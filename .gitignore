@@ -1,2 +1,6 @@
 /target
 .idea/
+
+# Local secrets: environment-specific config files stay out of the repo
+nebula.development.toml
+nebula.*.local.toml
