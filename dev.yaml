@@ -1,0 +1,36 @@
+# Development configuration. Secrets (database.url etc.) belong in
+# dev.local.yaml (gitignored) or NEBULA__* environment variables.
+
+server:
+  host: 127.0.0.1
+  port: 5000
+  request_timeout_secs: 30
+
+multitenancy:
+  enabled: false
+
+logging:
+  level: info
+  format: pretty
+
+currencies:
+  - { code: KES, minor_units: 2 }
+  - { code: TZS, minor_units: 2 }
+  - { code: UGX, minor_units: 0 }
+  - { code: RWF, minor_units: 0 }
+  - { code: ETB, minor_units: 2 }
+  - { code: ZAR, minor_units: 2 }
+  - { code: NGN, minor_units: 2 }
+  - { code: GHS, minor_units: 2 }
+  - { code: USD, minor_units: 2 }
+  - { code: EUR, minor_units: 2 }
+  - { code: GBP, minor_units: 2 }
+  - { code: CHF, minor_units: 2 }
+  - { code: CAD, minor_units: 2 }
+  - { code: AUD, minor_units: 2 }
+  - { code: JPY, minor_units: 0 }
+  - { code: CNY, minor_units: 2 }
+  - { code: INR, minor_units: 2 }
+  - { code: AED, minor_units: 2 }
+  - { code: SAR, minor_units: 2 }
+  - { code: BHD, minor_units: 3 }

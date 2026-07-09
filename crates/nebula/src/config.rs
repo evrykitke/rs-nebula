@@ -3,28 +3,28 @@
 //! Values are resolved in order, later sources overriding earlier ones:
 //!
 //! 1. Built-in defaults ([`Config::default`])
-//! 2. `nebula.toml` in the working directory
-//! 3. `nebula.{environment}.toml` (environment from `NEBULA_ENV`, default `development`)
+//! 2. `{env}.yaml` — `dev.yaml`, `test.yaml` or `prod.yaml`, selected by
+//!    `NEBULA_ENV` (default `dev`)
+//! 3. `{env}.local.yaml` — gitignored overlay for machine-local secrets
 //! 4. Environment variables prefixed `NEBULA__`, with `__` as the section
 //!    separator (e.g. `NEBULA__SERVER__PORT=8080` sets `server.port`)
 //!
-//! Secrets (connection strings, passwords) belong in environment variables,
-//! never in checked-in files.
+//! Secrets (connection strings, passwords) belong in the local overlay or
+//! environment variables, never in checked-in files. Validation runs at
+//! load so misconfiguration fails at boot, not at first use.
 
-use figment::providers::{Env, Format, Serialized, Toml};
+use figment::providers::{Env, Format, Serialized, Yaml};
 use figment::Figment;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
-/// Environment variable that selects the configuration environment.
 pub const ENV_VAR: &str = "NEBULA_ENV";
-/// Prefix for configuration overrides from the process environment.
 pub const ENV_PREFIX: &str = "NEBULA__";
+pub const DEFAULT_ENV: &str = "dev";
 
-/// A string that must never appear in logs or debug output (connection
-/// strings, passwords, API keys). `Debug`/`Display` print `***`;
-/// call [`Secret::expose`] to read the value deliberately.
+/// A string that must never appear in logs or debug output.
+/// `Debug`/`Display` print `***`; call [`Secret::expose`] deliberately.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);
@@ -34,7 +34,6 @@ impl Secret {
         Self(value.into())
     }
 
-    /// Deliberately reveal the secret value.
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -62,11 +61,9 @@ impl From<&str> for Secret {
     }
 }
 
-/// Root configuration for a Nebula application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Active environment name (`development`, `staging`, `production`, ...).
     pub environment: String,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
@@ -74,18 +71,20 @@ pub struct Config {
     pub redis: RedisConfig,
     pub rabbitmq: RabbitMqConfig,
     pub logging: LoggingConfig,
+    pub currencies: Vec<CurrencyConfig>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            environment: "development".into(),
+            environment: DEFAULT_ENV.into(),
             server: ServerConfig::default(),
             database: DatabaseConfig::default(),
             multitenancy: MultitenancyConfig::default(),
             redis: RedisConfig::default(),
             rabbitmq: RabbitMqConfig::default(),
             logging: LoggingConfig::default(),
+            currencies: Vec::new(),
         }
     }
 }
@@ -95,7 +94,6 @@ impl Default for Config {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
-    /// Requests running longer than this are aborted to protect the host.
     pub request_timeout_secs: u64,
 }
 
@@ -112,22 +110,13 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Connection string for the main (directory) database. When empty
-    /// the application boots without a database (modules relying on one
-    /// will say so loudly).
+    /// Empty means: boot without a database.
     pub url: Secret,
-    /// Upper bound on pooled connections; protects Postgres from
-    /// connection storms.
     pub max_connections: u32,
     pub min_connections: u32,
-    /// Fail fast when the database is unreachable at boot.
     pub connect_timeout_secs: u64,
-    /// Bound how long a request may wait for a pooled connection —
-    /// prevents pool exhaustion from turning into a deadlock.
     pub acquire_timeout_secs: u64,
-    /// Drop idle connections after this long.
     pub idle_timeout_secs: u64,
-    /// Apply pending migrations during boot.
     pub auto_migrate: bool,
 }
 
@@ -148,9 +137,8 @@ impl Default for DatabaseConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MultitenancyConfig {
-    /// When disabled the application runs against the single main database
-    /// (self-hosted mode). When enabled each tenant gets its own database
-    /// and the main database acts as the tenant directory.
+    /// Off: single main database (self-hosted mode). On: database per
+    /// tenant with the main database as the tenant directory.
     pub enabled: bool,
 }
 
@@ -202,13 +190,18 @@ impl Default for LoggingConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
-    /// Human-readable output for development.
     Pretty,
-    /// Structured JSON output for log aggregation.
     Json,
 }
 
-/// Errors raised while loading or validating configuration.
+/// One entry of the application's currency table, e.g.
+/// `{ code: KES, minor_units: 2 }`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrencyConfig {
+    pub code: String,
+    pub minor_units: u8,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to load configuration: {0}")]
@@ -218,24 +211,20 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// Load configuration from the current working directory.
     pub fn load() -> Result<Self, ConfigError> {
         Self::load_from(Path::new("."))
     }
 
-    /// Load configuration rooted at `dir`, applying all layers and
-    /// validating the result. Fails fast with a descriptive error so
-    /// misconfiguration is caught at boot, not at first use.
     pub fn load_from(dir: &Path) -> Result<Self, ConfigError> {
-        let environment = std::env::var(ENV_VAR).unwrap_or_else(|_| "development".into());
+        let environment = std::env::var(ENV_VAR).unwrap_or_else(|_| DEFAULT_ENV.into());
 
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config {
                 environment: environment.clone(),
                 ..Config::default()
             }))
-            .merge(Toml::file(dir.join("nebula.toml")))
-            .merge(Toml::file(dir.join(format!("nebula.{environment}.toml"))))
+            .merge(Yaml::file(dir.join(format!("{environment}.yaml"))))
+            .merge(Yaml::file(dir.join(format!("{environment}.local.yaml"))))
             .merge(Env::prefixed(ENV_PREFIX).split("__"))
             .extract()
             .map_err(Box::new)?;
@@ -262,6 +251,8 @@ impl Config {
         if self.logging.level.trim().is_empty() {
             return Err(ConfigError::Invalid("logging.level must not be empty".into()));
         }
+        crate::money::CurrencyRegistry::from_config(&self.currencies)
+            .map_err(|e| ConfigError::Invalid(e.to_string()))?;
         Ok(())
     }
 }

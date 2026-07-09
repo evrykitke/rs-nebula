@@ -3,8 +3,10 @@
 //! Modules keep the framework open for extension without modification.
 
 use crate::config::Config;
+use crate::money::CurrencyRegistry;
 use axum::Router;
 use sea_orm::DatabaseConnection;
+use std::sync::Arc;
 
 /// A composable unit of application functionality.
 ///
@@ -23,16 +25,27 @@ pub trait Module: Send + Sync + 'static {
 pub struct ModuleContext<'a> {
     config: &'a Config,
     database: Option<DatabaseConnection>,
+    currencies: Arc<CurrencyRegistry>,
     router: Router,
 }
 
 impl<'a> ModuleContext<'a> {
-    pub(crate) fn new(config: &'a Config, database: Option<DatabaseConnection>) -> Self {
+    pub(crate) fn new(
+        config: &'a Config,
+        database: Option<DatabaseConnection>,
+        currencies: Arc<CurrencyRegistry>,
+    ) -> Self {
         Self {
             config,
             database,
+            currencies,
             router: Router::new(),
         }
+    }
+
+    /// The configured currency table, shared application-wide.
+    pub fn currencies(&self) -> Arc<CurrencyRegistry> {
+        self.currencies.clone()
     }
 
     /// The fully-resolved application configuration.

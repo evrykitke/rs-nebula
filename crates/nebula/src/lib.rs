@@ -27,6 +27,6 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use kernel::{App, Kernel};
 pub use module::{Module, ModuleContext};
-pub use money::{Currency, Money};
+pub use money::{Currency, CurrencyRegistry, Money};
 pub use repository::Repository;
 pub use time::{Clock, SystemClock};

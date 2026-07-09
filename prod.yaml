@@ -1,0 +1,23 @@
+# Production configuration (NEBULA_ENV=prod). Secrets must come from
+# prod.local.yaml on the host or NEBULA__* environment variables —
+# never from this file.
+
+server:
+  host: 0.0.0.0
+  port: 5000
+  request_timeout_secs: 30
+
+multitenancy:
+  enabled: false
+
+logging:
+  level: info
+  format: json
+
+database:
+  auto_migrate: false
+
+currencies:
+  - { code: KES, minor_units: 2 }
+  - { code: USD, minor_units: 2 }
+  - { code: EUR, minor_units: 2 }

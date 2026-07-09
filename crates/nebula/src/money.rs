@@ -1,5 +1,9 @@
 //! Money: an exact decimal amount bound to a currency.
 //!
+//! Currencies are not hardcoded — the application defines its currency
+//! table in configuration (`currencies:` in `{env}.yaml`), and the kernel
+//! builds a [`CurrencyRegistry`] from it at boot.
+//!
 //! The rules that prevent the classic ERP money bugs:
 //!
 //! - amounts are [`Decimal`], never floats;
@@ -11,10 +15,12 @@
 //!   sub-unit: parts differ by at most one minor unit and always sum
 //!   back to the whole.
 
+use crate::config::CurrencyConfig;
 use crate::error::{Error, Result};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::fmt;
 
 /// ISO 4217 code plus minor-unit count (2 for KES/USD, 0 for JPY, 3 for BHD).
@@ -24,47 +30,8 @@ pub struct Currency {
     minor_units: u8,
 }
 
-macro_rules! currencies {
-    ($($name:ident => $code:literal, $minor:literal;)+) => {
-        impl Currency {
-            $(pub const $name: Currency = Currency { code: *$code, minor_units: $minor };)+
-
-            pub fn from_code(code: &str) -> Result<Currency> {
-                match code.as_bytes() {
-                    $($code => Ok(Currency::$name),)+
-                    _ => Err(Error::Validation(format!("unknown currency code {code:?}"))),
-                }
-            }
-        }
-    };
-}
-
-currencies! {
-    KES => b"KES", 2;
-    TZS => b"TZS", 2;
-    UGX => b"UGX", 0;
-    RWF => b"RWF", 0;
-    ETB => b"ETB", 2;
-    ZAR => b"ZAR", 2;
-    NGN => b"NGN", 2;
-    GHS => b"GHS", 2;
-    USD => b"USD", 2;
-    EUR => b"EUR", 2;
-    GBP => b"GBP", 2;
-    CHF => b"CHF", 2;
-    CAD => b"CAD", 2;
-    AUD => b"AUD", 2;
-    JPY => b"JPY", 0;
-    CNY => b"CNY", 2;
-    INR => b"INR", 2;
-    AED => b"AED", 2;
-    SAR => b"SAR", 2;
-    BHD => b"BHD", 3;
-}
-
 impl Currency {
-    /// For codes outside the built-in table (e.g. loyalty points).
-    pub fn custom(code: &str, minor_units: u8) -> Result<Currency> {
+    pub fn new(code: &str, minor_units: u8) -> Result<Currency> {
         let bytes = code.as_bytes();
         if bytes.len() != 3 || !bytes.iter().all(|b| b.is_ascii_uppercase()) {
             return Err(Error::Validation(format!(
@@ -78,7 +45,7 @@ impl Currency {
     }
 
     pub fn code(&self) -> &str {
-        std::str::from_utf8(&self.code).expect("constructors guarantee ASCII")
+        std::str::from_utf8(&self.code).expect("constructor guarantees ASCII")
     }
 
     pub fn minor_units(&self) -> u8 {
@@ -98,16 +65,67 @@ impl fmt::Display for Currency {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct CurrencyRepr {
+    code: String,
+    minor_units: u8,
+}
+
 impl Serialize for Currency {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.code())
+        CurrencyRepr {
+            code: self.code().to_string(),
+            minor_units: self.minor_units,
+        }
+        .serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Currency {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let code = String::deserialize(deserializer)?;
-        Currency::from_code(&code).map_err(D::Error::custom)
+        let repr = CurrencyRepr::deserialize(deserializer)?;
+        Currency::new(&repr.code, repr.minor_units).map_err(D::Error::custom)
+    }
+}
+
+/// The application's configured currencies, built by the kernel from
+/// the `currencies:` section and shared with modules.
+#[derive(Debug, Clone, Default)]
+pub struct CurrencyRegistry {
+    by_code: HashMap<String, Currency>,
+}
+
+impl CurrencyRegistry {
+    pub fn from_config(entries: &[CurrencyConfig]) -> Result<Self> {
+        let mut by_code = HashMap::new();
+        for entry in entries {
+            let currency = Currency::new(&entry.code, entry.minor_units)?;
+            if by_code.insert(entry.code.clone(), currency).is_some() {
+                return Err(Error::Validation(format!(
+                    "currency {:?} is configured twice",
+                    entry.code
+                )));
+            }
+        }
+        Ok(Self { by_code })
+    }
+
+    pub fn get(&self, code: &str) -> Result<Currency> {
+        self.by_code.get(code).copied().ok_or_else(|| {
+            Error::Validation(format!("currency {code:?} is not configured"))
+        })
+    }
+
+    pub fn codes(&self) -> impl Iterator<Item = &str> {
+        self.by_code.keys().map(String::as_str)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_code.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_code.is_empty()
     }
 }
 

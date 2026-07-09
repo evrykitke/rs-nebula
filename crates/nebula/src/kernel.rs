@@ -15,6 +15,8 @@ use crate::db;
 use crate::error::{Error, Result};
 use crate::logging::{self, LoggingError};
 use crate::module::{Module, ModuleContext};
+use crate::money::CurrencyRegistry;
+use std::sync::Arc;
 use axum::Router;
 use sea_orm::DatabaseConnection;
 use sea_orm_migration::MigratorTrait;
@@ -74,7 +76,9 @@ impl Kernel {
             (None, _, false) => {}
         }
 
-        let mut ctx = ModuleContext::new(&self.config, database.clone());
+        let currencies = Arc::new(CurrencyRegistry::from_config(&self.config.currencies)?);
+
+        let mut ctx = ModuleContext::new(&self.config, database.clone(), currencies.clone());
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
@@ -85,6 +89,7 @@ impl Kernel {
             config: self.config,
             router,
             database,
+            currencies,
         })
     }
 
@@ -100,6 +105,7 @@ pub struct App {
     config: Config,
     router: Router,
     database: Option<DatabaseConnection>,
+    currencies: Arc<CurrencyRegistry>,
 }
 
 impl App {
@@ -115,6 +121,10 @@ impl App {
 
     pub fn database(&self) -> Option<&DatabaseConnection> {
         self.database.as_ref()
+    }
+
+    pub fn currencies(&self) -> &CurrencyRegistry {
+        &self.currencies
     }
 
     /// Serve until ctrl-c, then shut down gracefully so in-flight

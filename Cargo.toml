@@ -11,7 +11,7 @@ authors = ["evrykitke <evrykitke@gmail.com>"]
 [workspace.dependencies]
 nebula = { path = "crates/nebula" }
 serde = { version = "1", features = ["derive"] }
-figment = { version = "0.10", features = ["toml", "env"] }
+figment = { version = "0.10", features = ["yaml", "env"] }
 thiserror = "2"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
