@@ -8,6 +8,7 @@
 use crate::config::DatabaseConfig;
 use crate::error::{Error, Result};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
+use std::future::Future;
 use std::time::Duration;
 
 /// Open a connection pool according to configuration and verify it works.
@@ -35,4 +36,39 @@ pub async fn connect(config: &DatabaseConfig) -> Result<DatabaseConnection> {
 /// Verify the database answers. Used at boot and by the readiness check.
 pub async fn ping(db: &DatabaseConnection) -> Result<()> {
     db.ping().await.map_err(Error::from)
+}
+
+/// Unit of work: run `f` inside a transaction. Commit on `Ok`, roll back
+/// on `Err` — partial writes never survive a failure.
+///
+/// ```ignore
+/// let receipt = db::transaction(&db, |txn| Box::pin(async move {
+///     invoice.update(txn).await?;
+///     payment.insert(txn).await?;
+///     Ok(receipt)
+/// })).await?;
+/// ```
+pub async fn transaction<F, T>(db: &DatabaseConnection, f: F) -> Result<T>
+where
+    F: for<'c> FnOnce(
+            &'c sea_orm::DatabaseTransaction,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
+        + Send,
+    T: Send,
+{
+    use sea_orm::TransactionTrait;
+
+    let txn = db.begin().await?;
+    match f(&txn).await {
+        Ok(value) => {
+            txn.commit().await?;
+            Ok(value)
+        }
+        Err(err) => {
+            if let Err(rollback_err) = txn.rollback().await {
+                tracing::error!(error = %rollback_err, "transaction rollback failed");
+            }
+            Err(err)
+        }
+    }
 }

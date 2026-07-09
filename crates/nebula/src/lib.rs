@@ -9,6 +9,7 @@ pub mod error;
 pub mod kernel;
 pub mod logging;
 pub mod module;
+pub mod repository;
 pub mod time;
 mod web;
 
@@ -25,4 +26,5 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use kernel::{App, Kernel};
 pub use module::{Module, ModuleContext};
+pub use repository::Repository;
 pub use time::{Clock, SystemClock};
