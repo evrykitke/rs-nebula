@@ -4,10 +4,10 @@
 //! skip (loudly) when it is not set, so the suite still passes on
 //! machines without a database.
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use nebula::config::{Config, DatabaseConfig};
-use nebula::{db, Kernel};
+use nebula::{Kernel, db};
 use tower::ServiceExt;
 
 fn test_db_url() -> Option<String> {

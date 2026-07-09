@@ -79,13 +79,19 @@ impl TenantManager {
     }
 
     pub async fn find_all(&self) -> Result<Vec<tenant::Model>> {
-        tenant::Entity::find().all(&self.main).await.map_err(Error::from)
+        tenant::Entity::find()
+            .all(&self.main)
+            .await
+            .map_err(Error::from)
     }
 
     pub async fn create(&self, new: NewTenant) -> Result<tenant::Model> {
         validate_name(&new.name)?;
         if self.find_by_name(&new.name).await?.is_some() {
-            return Err(Error::Conflict(format!("tenant {:?} already exists", new.name)));
+            return Err(Error::Conflict(format!(
+                "tenant {:?} already exists",
+                new.name
+            )));
         }
         tenant::ActiveModel {
             name: Set(new.name),

@@ -13,8 +13,8 @@
 
 use crate::error::{Error, Result};
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, DatabaseConnection, EntityTrait,
-    IntoActiveModel, PaginatorTrait, PrimaryKeyTrait,
+    ActiveModelBehavior, ActiveModelTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    PaginatorTrait, PrimaryKeyTrait,
 };
 use std::marker::PhantomData;
 
@@ -42,7 +42,10 @@ impl<E: EntityTrait> Repository<E> {
         &self,
         id: impl Into<<E::PrimaryKey as PrimaryKeyTrait>::ValueType>,
     ) -> Result<Option<E::Model>> {
-        E::find_by_id(id.into()).one(&self.db).await.map_err(Error::from)
+        E::find_by_id(id.into())
+            .one(&self.db)
+            .await
+            .map_err(Error::from)
     }
 
     /// Like [`Repository::find_by_id`] but absence is an error —

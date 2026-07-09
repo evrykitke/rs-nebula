@@ -41,7 +41,12 @@ impl MigrationTrait for CreateTenants {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Tenants::Name).string_len(64).not_null().unique_key())
+                    .col(
+                        ColumnDef::new(Tenants::Name)
+                            .string_len(64)
+                            .not_null()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(Tenants::DisplayName).string().not_null())
                     .col(ColumnDef::new(Tenants::ConnectionString).string().null())
                     .col(

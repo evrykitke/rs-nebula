@@ -1,10 +1,10 @@
 //! Proof of concept: the kernel composes modules into a working app and
 //! errors surface as RFC 9457 problem+json.
 
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
-use axum::Router;
 use nebula::{Config, Error, Kernel, Module, ModuleContext};
 use tower::ServiceExt;
 
@@ -107,7 +107,10 @@ async fn internal_error_details_are_not_leaked() {
     let (status, content_type, body) = get_response("/boom").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(content_type.as_deref(), Some("application/problem+json"));
-    assert!(body.get("detail").is_none(), "5xx must not expose internals");
+    assert!(
+        body.get("detail").is_none(),
+        "5xx must not expose internals"
+    );
 }
 
 #[tokio::test]

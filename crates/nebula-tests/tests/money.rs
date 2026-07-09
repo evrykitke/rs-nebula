@@ -28,8 +28,7 @@ fn entry(code: &str, minor_units: u8) -> CurrencyConfig {
 
 #[test]
 fn registry_is_built_from_configuration() {
-    let registry =
-        CurrencyRegistry::from_config(&[entry("KES", 2), entry("JPY", 0)]).unwrap();
+    let registry = CurrencyRegistry::from_config(&[entry("KES", 2), entry("JPY", 0)]).unwrap();
     assert_eq!(registry.len(), 2);
     assert_eq!(registry.get("KES").unwrap().minor_units(), 2);
     assert_eq!(registry.get("JPY").unwrap().minor_units(), 0);

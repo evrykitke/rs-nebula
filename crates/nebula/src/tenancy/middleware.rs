@@ -9,8 +9,8 @@
 use super::{TenantManager, TenantRef};
 use crate::error::{Error, ProblemDetails};
 use axum::extract::{FromRequestParts, Request, State};
-use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use sea_orm::DatabaseConnection;
@@ -57,10 +57,7 @@ pub struct CurrentTenant(pub Option<TenantRef>);
 impl<S: Send + Sync> FromRequestParts<S> for CurrentTenant {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(CurrentTenant(parts.extensions.get::<TenantRef>().cloned()))
     }
 }

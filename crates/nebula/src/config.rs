@@ -13,8 +13,8 @@
 //! environment variables, never in checked-in files. Validation runs at
 //! load so misconfiguration fails at boot, not at first use.
 
-use figment::providers::{Env, Format, Serialized, Yaml};
 use figment::Figment;
+use figment::providers::{Env, Format, Serialized, Yaml};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
@@ -260,7 +260,9 @@ impl Config {
             ));
         }
         if self.logging.level.trim().is_empty() {
-            return Err(ConfigError::Invalid("logging.level must not be empty".into()));
+            return Err(ConfigError::Invalid(
+                "logging.level must not be empty".into(),
+            ));
         }
         crate::money::CurrencyRegistry::from_config(&self.currencies)
             .map_err(|e| ConfigError::Invalid(e.to_string()))?;

@@ -2,7 +2,7 @@
 //! when `database.auto_migrate` is enabled.
 
 use nebula::config::{Config, DatabaseConfig};
-use nebula::{db, Kernel};
+use nebula::{Kernel, db};
 use sea_orm::{ConnectionTrait, Statement};
 use sea_orm_migration::prelude::*;
 
@@ -115,7 +115,11 @@ async fn kernel_applies_migrations_at_boot() {
         .expect("query must run")
         .expect("query must return a row");
     let table: Option<String> = row.try_get("", "tbl").expect("column must exist");
-    assert_eq!(table.as_deref(), Some("poc_notes"), "migration must have created the table");
+    assert_eq!(
+        table.as_deref(),
+        Some("poc_notes"),
+        "migration must have created the table"
+    );
 
     // The schema is actually usable.
     let inserted = db

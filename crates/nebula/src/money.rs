@@ -111,9 +111,10 @@ impl CurrencyRegistry {
     }
 
     pub fn get(&self, code: &str) -> Result<Currency> {
-        self.by_code.get(code).copied().ok_or_else(|| {
-            Error::Validation(format!("currency {code:?} is not configured"))
-        })
+        self.by_code
+            .get(code)
+            .copied()
+            .ok_or_else(|| Error::Validation(format!("currency {code:?} is not configured")))
     }
 
     pub fn codes(&self) -> impl Iterator<Item = &str> {
@@ -191,7 +192,9 @@ impl Money {
     /// (call [`Money::rounded`] first if needed).
     pub fn allocate(self, parts: u32) -> Result<Vec<Money>> {
         if parts == 0 {
-            return Err(Error::Validation("cannot allocate money into 0 parts".into()));
+            return Err(Error::Validation(
+                "cannot allocate money into 0 parts".into(),
+            ));
         }
         let scale = Decimal::from(10u64.pow(self.currency.minor_units as u32));
         let in_minor = self.amount * scale;

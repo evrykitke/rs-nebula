@@ -24,11 +24,10 @@ pub enum LoggingError {
 /// Call once at boot (the kernel does this); a second call fails.
 pub fn init(config: &LoggingConfig) -> Result<(), LoggingError> {
     let directive = std::env::var("RUST_LOG").unwrap_or_else(|_| config.level.clone());
-    let filter =
-        EnvFilter::try_new(&directive).map_err(|source| LoggingError::InvalidFilter {
-            directive: directive.clone(),
-            source,
-        })?;
+    let filter = EnvFilter::try_new(&directive).map_err(|source| LoggingError::InvalidFilter {
+        directive: directive.clone(),
+        source,
+    })?;
 
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
 

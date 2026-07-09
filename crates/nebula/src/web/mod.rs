@@ -6,9 +6,9 @@ mod health;
 
 use crate::config::Config;
 use crate::error::ProblemDetails;
+use axum::Router;
 use axum::http::StatusCode;
 use axum::response::Response;
-use axum::Router;
 use std::time::Duration;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;

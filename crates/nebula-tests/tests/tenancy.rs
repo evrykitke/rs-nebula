@@ -7,13 +7,13 @@
 //! (same server, name suffixed `_t2`... created here) for a tenant with
 //! its own connection string. Skips when the env var is unset.
 
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
-use axum::Router;
 use nebula::config::{Config, DatabaseConfig};
 use nebula::tenancy::NewTenant;
-use nebula::{db, CurrentTenant, Kernel, Module, ModuleContext, TenantDb};
+use nebula::{CurrentTenant, Kernel, Module, ModuleContext, TenantDb, db};
 use sea_orm::ConnectionTrait;
 use tower::ServiceExt;
 
@@ -27,21 +27,23 @@ impl Module for WhoAmI {
     fn configure(&self, ctx: &mut ModuleContext) {
         ctx.add_routes(Router::new().route(
             "/whoami",
-            get(|CurrentTenant(tenant): CurrentTenant, TenantDb(db): TenantDb| async move {
-                let row = db
-                    .query_one(sea_orm::Statement::from_string(
-                        db.get_database_backend(),
-                        "SELECT current_database() AS name",
-                    ))
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let database: String = row.try_get("", "name").unwrap();
-                axum::Json(serde_json::json!({
-                    "tenant": tenant.map(|t| t.name),
-                    "database": database,
-                }))
-            }),
+            get(
+                |CurrentTenant(tenant): CurrentTenant, TenantDb(db): TenantDb| async move {
+                    let row = db
+                        .query_one(sea_orm::Statement::from_string(
+                            db.get_database_backend(),
+                            "SELECT current_database() AS name",
+                        ))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let database: String = row.try_get("", "name").unwrap();
+                    axum::Json(serde_json::json!({
+                        "tenant": tenant.map(|t| t.name),
+                        "database": database,
+                    }))
+                },
+            ),
         ));
     }
 }
@@ -62,7 +64,10 @@ async fn get_json(
         .unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 #[tokio::test]
@@ -148,14 +153,16 @@ async fn multitenancy_end_to_end() {
         })
         .await;
     assert!(matches!(dup, Err(nebula::Error::Conflict(_))));
-    assert!(manager
-        .create(NewTenant {
-            name: "Bad Name!".into(),
-            display_name: "x".into(),
-            connection_string: None,
-        })
-        .await
-        .is_err());
+    assert!(
+        manager
+            .create(NewTenant {
+                name: "Bad Name!".into(),
+                display_name: "x".into(),
+                connection_string: None,
+            })
+            .await
+            .is_err()
+    );
 
     let router = app.router();
 

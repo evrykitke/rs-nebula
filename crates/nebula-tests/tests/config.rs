@@ -84,7 +84,10 @@ fn invalid_configuration_fails_at_boot() {
 #[test]
 fn invalid_currency_config_fails_at_boot() {
     figment::Jail::expect_with(|jail| {
-        jail.create_file("dev.yaml", "currencies:\n  - { code: kes, minor_units: 2 }\n")?;
+        jail.create_file(
+            "dev.yaml",
+            "currencies:\n  - { code: kes, minor_units: 2 }\n",
+        )?;
         let err = Config::load_from(jail.directory()).expect_err("lowercase code must be rejected");
         assert!(err.to_string().contains("kes"), "got: {err}");
         Ok(())

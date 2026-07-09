@@ -4,7 +4,7 @@
 //! `application/problem+json` response. Internal errors (5xx) are logged
 //! with full detail but never leak their message to the client.
 
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -90,10 +90,7 @@ pub struct ProblemDetails {
 impl ProblemDetails {
     pub fn from_status(status: StatusCode, detail: Option<String>) -> Self {
         Self {
-            type_uri: format!(
-                "https://httpstatuses.io/{}",
-                status.as_u16()
-            ),
+            type_uri: format!("https://httpstatuses.io/{}", status.as_u16()),
             title: status
                 .canonical_reason()
                 .unwrap_or("Unknown Error")
@@ -104,8 +101,7 @@ impl ProblemDetails {
     }
 
     pub fn into_response(self) -> Response {
-        let status =
-            StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let body = serde_json::to_string(&self)
             .unwrap_or_else(|_| r#"{"title":"Internal Server Error","status":500}"#.into());
         (

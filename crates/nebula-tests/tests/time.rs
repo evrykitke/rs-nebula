@@ -1,8 +1,8 @@
 //! Proof of concept: deterministic time and exact decimal arithmetic.
 
 use chrono::{TimeZone, Utc};
-use nebula::time::{to_local, Clock, FixedClock, Tz};
 use nebula::Decimal;
+use nebula::time::{Clock, FixedClock, Tz, to_local};
 use std::str::FromStr;
 
 #[test]

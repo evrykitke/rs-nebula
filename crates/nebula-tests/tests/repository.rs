@@ -2,7 +2,7 @@
 //! (unit of work) against a live database.
 
 use nebula::config::DatabaseConfig;
-use nebula::{db, Error, Repository};
+use nebula::{Error, Repository, db};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, Set};
 
 // --- A sample entity, as an application would define it ---
@@ -71,7 +71,9 @@ async fn connect(table: &str) -> Option<DatabaseConnection> {
 
 #[tokio::test]
 async fn repository_covers_the_common_verbs() {
-    let Some(db) = connect("poc_todos").await else { return };
+    let Some(db) = connect("poc_todos").await else {
+        return;
+    };
     let todos: Repository<todo::Entity> = Repository::new(db);
 
     // insert
@@ -102,16 +104,24 @@ async fn repository_covers_the_common_verbs() {
     // count / find_all / delete
     assert_eq!(todos.count().await.unwrap(), 1);
     assert_eq!(todos.find_all().await.unwrap().len(), 1);
-    todos.delete_by_id(created.id).await.expect("delete must work");
+    todos
+        .delete_by_id(created.id)
+        .await
+        .expect("delete must work");
     assert_eq!(todos.count().await.unwrap(), 0);
 
-    let err = todos.delete_by_id(created.id).await.expect_err("second delete must fail");
+    let err = todos
+        .delete_by_id(created.id)
+        .await
+        .expect_err("second delete must fail");
     assert!(matches!(err, Error::NotFound(_)));
 }
 
 #[tokio::test]
 async fn unit_of_work_commits_on_ok_and_rolls_back_on_err() {
-    let Some(db) = connect("poc_uow_todos").await else { return };
+    let Some(db) = connect("poc_uow_todos").await else {
+        return;
+    };
 
     // Ok(..) commits.
     db::transaction(&db, |txn| {
