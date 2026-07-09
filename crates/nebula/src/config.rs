@@ -3,10 +3,10 @@
 //! Values are resolved in order, later sources overriding earlier ones:
 //!
 //! 1. Built-in defaults ([`Config::default`])
-//! 2. `pylon.toml` in the working directory
-//! 3. `pylon.{environment}.toml` (environment from `PYLON_ENV`, default `development`)
-//! 4. Environment variables prefixed `PYLON__`, with `__` as the section
-//!    separator (e.g. `PYLON__SERVER__PORT=8080` sets `server.port`)
+//! 2. `nebula.toml` in the working directory
+//! 3. `nebula.{environment}.toml` (environment from `NEBULA_ENV`, default `development`)
+//! 4. Environment variables prefixed `NEBULA__`, with `__` as the section
+//!    separator (e.g. `NEBULA__SERVER__PORT=8080` sets `server.port`)
 //!
 //! Secrets (connection strings, passwords) belong in environment variables,
 //! never in checked-in files.
@@ -18,9 +18,9 @@ use std::fmt;
 use std::path::Path;
 
 /// Environment variable that selects the configuration environment.
-pub const ENV_VAR: &str = "PYLON_ENV";
+pub const ENV_VAR: &str = "NEBULA_ENV";
 /// Prefix for configuration overrides from the process environment.
-pub const ENV_PREFIX: &str = "PYLON__";
+pub const ENV_PREFIX: &str = "NEBULA__";
 
 /// A string that must never appear in logs or debug output (connection
 /// strings, passwords, API keys). `Debug`/`Display` print `***`;
@@ -62,7 +62,7 @@ impl From<&str> for Secret {
     }
 }
 
-/// Root configuration for a Pylon application.
+/// Root configuration for a Nebula application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -157,7 +157,7 @@ impl Default for RabbitMqConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
-    /// A `tracing` filter directive, e.g. `info` or `pylon=debug,info`.
+    /// A `tracing` filter directive, e.g. `info` or `nebula=debug,info`.
     pub level: String,
     pub format: LogFormat,
 }
@@ -206,8 +206,8 @@ impl Config {
                 environment: environment.clone(),
                 ..Config::default()
             }))
-            .merge(Toml::file(dir.join("pylon.toml")))
-            .merge(Toml::file(dir.join(format!("pylon.{environment}.toml"))))
+            .merge(Toml::file(dir.join("nebula.toml")))
+            .merge(Toml::file(dir.join(format!("nebula.{environment}.toml"))))
             .merge(Env::prefixed(ENV_PREFIX).split("__"))
             .extract()
             .map_err(Box::new)?;

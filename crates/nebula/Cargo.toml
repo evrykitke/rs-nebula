@@ -1,6 +1,6 @@
 [package]
-name = "pylon"
-description = "Pylon — a DDD application framework for building ERPs in Rust"
+name = "nebula"
+description = "Nebula — a DDD application framework for building ERPs in Rust"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,10 @@ authors.workspace = true
 [dependencies]
 axum.workspace = true
 tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 figment.workspace = true

@@ -2,10 +2,10 @@
 //! and the web host. `main.rs` stays a one-liner:
 //!
 //! ```no_run
-//! use pylon::kernel::Kernel;
+//! use nebula::kernel::Kernel;
 //!
 //! #[tokio::main]
-//! async fn main() -> pylon::Result<()> {
+//! async fn main() -> nebula::Result<()> {
 //!     Kernel::builder().build()?.run().await
 //! }
 //! ```
@@ -17,7 +17,7 @@ use crate::module::{Module, ModuleContext};
 use axum::Router;
 use tokio::net::TcpListener;
 
-/// Composes and boots a Pylon application.
+/// Composes and boots a Nebula application.
 pub struct Kernel {
     config: Config,
     modules: Vec<Box<dyn Module>>,
@@ -56,7 +56,7 @@ impl Kernel {
         tracing::info!(
             environment = %self.config.environment,
             multitenancy = self.config.multitenancy.enabled,
-            "pylon listening on http://{addr}"
+            "nebula listening on http://{addr}"
         );
 
         axum::serve(listener, router)

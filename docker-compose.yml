@@ -1,18 +1,18 @@
-# Local development infrastructure for Pylon.
+# Local development infrastructure for Nebula.
 #
 #   docker compose up -d
 #
 # PostgreSQL runs bare metal (not in Docker); only Redis and RabbitMQ
 # are containerized. Credentials below are for LOCAL DEVELOPMENT ONLY —
-# production values come from configuration (PYLON__* environment
+# production values come from configuration (NEBULA__* environment
 # variables), never from this file.
 
-name: pylon
+name: nebula
 
 services:
   redis:
     image: redis:7-alpine
-    container_name: pylon-redis
+    container_name: nebula-redis
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
@@ -27,10 +27,10 @@ services:
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
-    container_name: pylon-rabbitmq
+    container_name: nebula-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: pylon
-      RABBITMQ_DEFAULT_PASS: pylon_dev
+      RABBITMQ_DEFAULT_USER: nebula
+      RABBITMQ_DEFAULT_PASS: nebula_dev
     ports:
       - "5672:5672"    # AMQP
       - "15672:15672"  # management UI

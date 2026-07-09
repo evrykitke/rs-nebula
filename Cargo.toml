@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pylon", "crates/pylon-server", "crates/pylon-tests"]
+members = ["crates/nebula", "crates/nebula-server", "crates/nebula-tests"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,12 +9,16 @@ license = "MIT"
 authors = ["evrykitke <evrykitke@gmail.com>"]
 
 [workspace.dependencies]
-pylon = { path = "crates/pylon" }
+nebula = { path = "crates/nebula" }
 serde = { version = "1", features = ["derive"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 thiserror = "2"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["timeout", "catch-panic", "trace", "request-id"] }
+utoipa = "5"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

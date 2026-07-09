@@ -1,6 +1,6 @@
-use pylon::Kernel;
+use nebula::Kernel;
 
 #[tokio::main]
-async fn main() -> pylon::Result<()> {
+async fn main() -> nebula::Result<()> {
     Kernel::builder().build()?.run().await
 }

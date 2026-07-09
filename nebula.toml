@@ -1,5 +1,5 @@
-# Pylon base configuration. Overridden by pylon.{environment}.toml and
-# PYLON__* environment variables (e.g. PYLON__SERVER__PORT=8080).
+# Nebula base configuration. Overridden by nebula.{environment}.toml and
+# NEBULA__* environment variables (e.g. NEBULA__SERVER__PORT=8080).
 # Secrets (database.url, redis.url, rabbitmq.url) belong in environment
 # variables, not in this file.
 

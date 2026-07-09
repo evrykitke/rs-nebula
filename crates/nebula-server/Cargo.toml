@@ -1,11 +1,11 @@
 [package]
-name = "pylon-server"
-description = "Host application bootstrapped by the Pylon kernel"
+name = "nebula-server"
+description = "Host application bootstrapped by the Nebula kernel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [dependencies]
-pylon.workspace = true
+nebula.workspace = true
 tokio.workspace = true
