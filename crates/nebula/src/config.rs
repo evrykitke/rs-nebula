@@ -71,6 +71,7 @@ pub struct Config {
     pub redis: RedisConfig,
     pub rabbitmq: RabbitMqConfig,
     pub logging: LoggingConfig,
+    pub auth: AuthConfig,
     pub currencies: Vec<CurrencyConfig>,
 }
 
@@ -84,7 +85,39 @@ impl Default for Config {
             redis: RedisConfig::default(),
             rabbitmq: RabbitMqConfig::default(),
             logging: LoggingConfig::default(),
+            auth: AuthConfig::default(),
             currencies: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Signs JWTs. Required when the auth module is used; set it in the
+    /// local overlay or NEBULA__AUTH__JWT_SECRET.
+    pub jwt_secret: Secret,
+    pub access_token_ttl_secs: u64,
+    /// Lifetime of the short-lived token that bridges password login and
+    /// the two-factor step.
+    pub two_factor_token_ttl_secs: u64,
+    pub password_min_length: usize,
+    /// Issuer shown in authenticator apps.
+    pub totp_issuer: String,
+    pub lockout_max_failed: i32,
+    pub lockout_secs: u64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            jwt_secret: Secret::default(),
+            access_token_ttl_secs: 3600,
+            two_factor_token_ttl_secs: 300,
+            password_min_length: 8,
+            totp_issuer: "Nebula".into(),
+            lockout_max_failed: 5,
+            lockout_secs: 300,
         }
     }
 }

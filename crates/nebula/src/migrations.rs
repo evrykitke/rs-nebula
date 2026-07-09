@@ -1,0 +1,306 @@
+//! Framework-owned migrations: the tenant directory and the user store.
+//! They track in their own `nebula_migrations` table so they never
+//! collide with the application's migrator, and run on the main database
+//! and every tenant database with its own connection string.
+
+use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::DbErr;
+
+pub struct Migrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(CreateTenants), Box::new(CreateUsers)]
+    }
+
+    fn migration_table_name() -> sea_orm::DynIden {
+        Alias::new("nebula_migrations").into_iden()
+    }
+}
+
+struct CreateTenants;
+
+impl MigrationName for CreateTenants {
+    fn name(&self) -> &str {
+        "m20260709_000001_create_tenants"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateTenants {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Tenants::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Tenants::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Tenants::Name)
+                            .string_len(64)
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Tenants::DisplayName).string().not_null())
+                    .col(ColumnDef::new(Tenants::ConnectionString).string().null())
+                    .col(
+                        ColumnDef::new(Tenants::IsActive)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(Tenants::RequireTwoFactor)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Tenants::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(Tenants::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum Tenants {
+    Table,
+    Id,
+    Name,
+    DisplayName,
+    ConnectionString,
+    IsActive,
+    RequireTwoFactor,
+    CreatedAt,
+}
+
+struct CreateUsers;
+
+impl MigrationName for CreateUsers {
+    fn name(&self) -> &str {
+        "m20260709_000002_create_users"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateUsers {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Users::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Users::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Users::TenantId).integer().null())
+                    .col(ColumnDef::new(Users::UserName).string_len(64).not_null())
+                    .col(
+                        ColumnDef::new(Users::NormalizedUserName)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Users::Email).string_len(255).not_null())
+                    .col(
+                        ColumnDef::new(Users::NormalizedEmail)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::EmailConfirmed)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Users::EmailConfirmationToken)
+                            .string()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(Users::PasswordHash).text().not_null())
+                    .col(
+                        ColumnDef::new(Users::PasswordChangedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(Users::PasswordResetToken).string().null())
+                    .col(
+                        ColumnDef::new(Users::PasswordResetExpiresAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::SecurityStamp)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Users::FirstName).string_len(64).not_null())
+                    .col(ColumnDef::new(Users::LastName).string_len(64).not_null())
+                    .col(ColumnDef::new(Users::PhoneNumber).string_len(32).null())
+                    .col(
+                        ColumnDef::new(Users::PhoneNumberConfirmed)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Users::IsActive)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(Users::IsTenantAdmin)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Users::LockoutEnabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(Users::LockoutEndAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::AccessFailedCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Users::TwoFactorEnabled)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(ColumnDef::new(Users::TotpSecret).string().null())
+                    .col(
+                        ColumnDef::new(Users::TotpConfirmedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(Users::RecoveryCodes).text().null())
+                    .col(
+                        ColumnDef::new(Users::LastLoginAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(Users::Language).string_len(16).null())
+                    .col(ColumnDef::new(Users::TimeZone).string_len(64).null())
+                    .col(
+                        ColumnDef::new(Users::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        ColumnDef::new(Users::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        ColumnDef::new(Users::DeletedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("ux_users_tenant_user_name")
+                    .table(Users::Table)
+                    .col(Users::TenantId)
+                    .col(Users::NormalizedUserName)
+                    .unique()
+                    .nulls_not_distinct()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ux_users_tenant_email")
+                    .table(Users::Table)
+                    .col(Users::TenantId)
+                    .col(Users::NormalizedEmail)
+                    .unique()
+                    .nulls_not_distinct()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(Users::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum Users {
+    Table,
+    Id,
+    TenantId,
+    UserName,
+    NormalizedUserName,
+    Email,
+    NormalizedEmail,
+    EmailConfirmed,
+    EmailConfirmationToken,
+    PasswordHash,
+    PasswordChangedAt,
+    PasswordResetToken,
+    PasswordResetExpiresAt,
+    SecurityStamp,
+    FirstName,
+    LastName,
+    PhoneNumber,
+    PhoneNumberConfirmed,
+    IsActive,
+    IsTenantAdmin,
+    LockoutEnabled,
+    LockoutEndAt,
+    AccessFailedCount,
+    TwoFactorEnabled,
+    TotpSecret,
+    TotpConfirmedAt,
+    RecoveryCodes,
+    LastLoginAt,
+    Language,
+    TimeZone,
+    CreatedAt,
+    UpdatedAt,
+    DeletedAt,
+}

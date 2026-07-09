@@ -78,10 +78,9 @@ impl Kernel {
 
         let auto_migrate = self.config.database.auto_migrate;
 
-        if tenants.is_some() && auto_migrate {
-            let db = database.as_ref().expect("checked above");
-            tracing::info!("applying tenant directory migrations");
-            crate::tenancy::migrations::Migrator::up(db, None).await?;
+        if let (Some(db), true) = (&database, auto_migrate) {
+            tracing::info!("applying framework migrations");
+            crate::migrations::Migrator::up(db, None).await?;
         }
 
         match (&self.migrations, &database, auto_migrate) {
@@ -101,7 +100,7 @@ impl Kernel {
             (None, _, false) => {}
         }
 
-        if let (Some(run), Some(manager), true) = (&self.migrations, &tenants, auto_migrate) {
+        if let (Some(manager), true) = (&tenants, auto_migrate) {
             for tenant in manager.find_all().await? {
                 let has_own_db = tenant
                     .connection_string
@@ -109,7 +108,11 @@ impl Kernel {
                     .is_some_and(|s| !s.is_empty());
                 if tenant.is_active && has_own_db {
                     tracing::info!(tenant = %tenant.name, "applying migrations to tenant database");
-                    run(manager.connection_for(&tenant).await?).await?;
+                    let db = manager.connection_for(&tenant).await?;
+                    crate::migrations::Migrator::up(&db, None).await?;
+                    if let Some(run) = &self.migrations {
+                        run(db).await?;
+                    }
                 }
             }
         }

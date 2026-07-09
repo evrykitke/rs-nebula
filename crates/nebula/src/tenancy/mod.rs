@@ -4,16 +4,14 @@
 //! against the main database (self-hosted mode).
 //!
 //! Pieces:
-//! - [`tenant`] — the directory entity (`tenants` table in the main db)
-//! - [`migrations`] — framework-owned schema for the directory, tracked
-//!   in its own `nebula_migrations` table
+//! - [`tenant`] — the directory entity (`tenants` table in the main db;
+//!   schema in [`crate::migrations`])
 //! - [`TenantManager`] — directory lookups, tenant creation, and a lazy
 //!   cache of per-tenant connection pools
 //! - request resolution middleware and extractors live in `middleware`
 //!   (wired by the web layer when multitenancy is enabled)
 
 pub mod middleware;
-pub mod migrations;
 pub mod tenant;
 
 use crate::config::{DatabaseConfig, MultitenancyConfig};
@@ -78,6 +76,25 @@ impl TenantManager {
             .map_err(Error::from)
     }
 
+    pub async fn find_by_id(&self, id: i32) -> Result<Option<tenant::Model>> {
+        tenant::Entity::find_by_id(id)
+            .one(&self.main)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// Company-wide two-factor policy: when on, every user of the tenant
+    /// must set up an authenticator app before they can sign in.
+    pub async fn set_require_two_factor(&self, id: i32, required: bool) -> Result<tenant::Model> {
+        let tenant = self
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
+        let mut active: tenant::ActiveModel = tenant.into();
+        active.require_two_factor = Set(required);
+        active.update(&self.main).await.map_err(Error::from)
+    }
+
     pub async fn find_all(&self) -> Result<Vec<tenant::Model>> {
         tenant::Entity::find()
             .all(&self.main)
@@ -98,6 +115,7 @@ impl TenantManager {
             display_name: Set(new.display_name),
             connection_string: Set(new.connection_string),
             is_active: Set(true),
+            require_two_factor: Set(false),
             created_at: Set(chrono::Utc::now()),
             ..Default::default()
         }

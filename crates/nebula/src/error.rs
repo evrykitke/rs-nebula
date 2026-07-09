@@ -39,6 +39,10 @@ pub enum Error {
     #[error("{0}")]
     Conflict(String),
 
+    /// Account temporarily locked after repeated failures (HTTP 423).
+    #[error("{0}")]
+    Locked(String),
+
     /// Database failure (HTTP 500). Like all internal errors, the
     /// underlying cause is logged, never sent to the client.
     #[error("database error: {0}")]
@@ -68,6 +72,7 @@ impl Error {
             Error::Forbidden => StatusCode::FORBIDDEN,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Locked(_) => StatusCode::LOCKED,
             Error::Database(_) | Error::Config(_) | Error::Logging(_) | Error::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

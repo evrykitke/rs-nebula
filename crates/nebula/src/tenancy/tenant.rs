@@ -14,6 +14,7 @@ pub struct Model {
     pub display_name: String,
     pub connection_string: Option<String>,
     pub is_active: bool,
+    pub require_two_factor: bool,
     pub created_at: DateTimeUtc,
 }
 

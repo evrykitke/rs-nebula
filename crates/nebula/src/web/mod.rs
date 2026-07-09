@@ -58,6 +58,7 @@ pub(crate) fn finalize(
     if let Some(db) = database {
         router = router.layer(axum::Extension(db));
     }
+    router = router.layer(axum::Extension(config.auth.clone()));
 
     router.layer(
         ServiceBuilder::new()

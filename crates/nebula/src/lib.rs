@@ -3,11 +3,13 @@
 //! Inspired by ASP.NET Boilerplate: applications are composed from modules,
 //! bootstrapped by a kernel, and configured rather than hardcoded.
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
 pub mod kernel;
 pub mod logging;
+pub mod migrations;
 pub mod module;
 pub mod money;
 pub mod repository;
@@ -24,6 +26,7 @@ pub use rust_decimal::Decimal;
 pub use sea_orm;
 pub use sea_orm_migration;
 
+pub use auth::{AuthModule, CurrentUser as AuthUser, UserManager};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use kernel::{App, Kernel};
