@@ -4,5 +4,6 @@
 //! bootstrapped by a kernel, and configured rather than hardcoded.
 
 pub mod config;
+pub mod logging;
 
 pub use config::Config;
