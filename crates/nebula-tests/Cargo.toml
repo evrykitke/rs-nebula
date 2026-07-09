@@ -18,3 +18,5 @@ serde_json.workspace = true
 figment = { workspace = true, features = ["test"] }
 chrono.workspace = true
 rust_decimal.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true

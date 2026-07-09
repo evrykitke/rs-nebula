@@ -19,6 +19,7 @@ pub use rust_decimal::Decimal;
 
 /// Re-exported so applications use the same SeaORM the framework links.
 pub use sea_orm;
+pub use sea_orm_migration;
 
 pub use config::Config;
 pub use error::{Error, Result};

@@ -17,12 +17,22 @@ use crate::logging::{self, LoggingError};
 use crate::module::{Module, ModuleContext};
 use axum::Router;
 use sea_orm::DatabaseConnection;
+use sea_orm_migration::MigratorTrait;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::net::TcpListener;
+
+/// Type-erased migration runner so the kernel does not carry the
+/// application's migrator type around.
+type MigrationRunner = Box<
+    dyn Fn(DatabaseConnection) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
+>;
 
 /// Composes and boots a Nebula application.
 pub struct Kernel {
     config: Config,
     modules: Vec<Box<dyn Module>>,
+    migrations: Option<MigrationRunner>,
 }
 
 impl Kernel {
@@ -46,6 +56,23 @@ impl Kernel {
             tracing::info!("database connection established");
             Some(db)
         };
+
+        match (&self.migrations, &database, self.config.database.auto_migrate) {
+            (Some(run), Some(db), true) => {
+                tracing::info!("applying pending migrations");
+                run(db.clone()).await?;
+            }
+            (Some(_), Some(_), false) => {
+                tracing::info!("auto_migrate is off; skipping registered migrations");
+            }
+            (Some(_), None, _) => {
+                tracing::warn!("migrations registered but no database configured");
+            }
+            (None, _, true) => {
+                tracing::warn!("auto_migrate is on but no migrations were registered");
+            }
+            (None, _, false) => {}
+        }
 
         let mut ctx = ModuleContext::new(&self.config, database.clone());
         for module in &self.modules {
@@ -126,12 +153,22 @@ async fn shutdown_signal() {
 pub struct KernelBuilder {
     modules: Vec<Box<dyn Module>>,
     config: Option<Config>,
+    migrations: Option<MigrationRunner>,
 }
 
 impl KernelBuilder {
     /// Register a module. Modules are configured in registration order.
     pub fn add_module(mut self, module: impl Module) -> Self {
         self.modules.push(Box::new(module));
+        self
+    }
+
+    /// Register the application's migrations (a SeaORM `MigratorTrait`).
+    /// They run during [`Kernel::init`] when `database.auto_migrate` is on.
+    pub fn with_migrations<M: MigratorTrait + 'static>(mut self) -> Self {
+        self.migrations = Some(Box::new(|db| {
+            Box::pin(async move { M::up(&db, None).await.map_err(Error::from) })
+        }));
         self
     }
 
@@ -160,6 +197,7 @@ impl KernelBuilder {
         Ok(Kernel {
             config,
             modules: self.modules,
+            migrations: self.migrations,
         })
     }
 }
