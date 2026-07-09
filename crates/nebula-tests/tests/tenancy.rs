@@ -84,7 +84,10 @@ async fn multitenancy_end_to_end() {
     .await
     .expect("must connect to main");
     admin
-        .execute_unprepared("DROP TABLE IF EXISTS tenants; DROP TABLE IF EXISTS nebula_migrations;")
+        .execute_unprepared(
+            "DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS tenants; \
+             DROP TABLE IF EXISTS nebula_migrations;",
+        )
         .await
         .expect("cleanup must work");
 

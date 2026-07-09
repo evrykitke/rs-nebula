@@ -239,6 +239,7 @@ impl MigrationTrait for CreateUsers {
             .create_index(
                 Index::create()
                     .name("ux_users_tenant_user_name")
+                    .if_not_exists()
                     .table(Users::Table)
                     .col(Users::TenantId)
                     .col(Users::NormalizedUserName)
@@ -251,6 +252,7 @@ impl MigrationTrait for CreateUsers {
             .create_index(
                 Index::create()
                     .name("ux_users_tenant_email")
+                    .if_not_exists()
                     .table(Users::Table)
                     .col(Users::TenantId)
                     .col(Users::NormalizedEmail)
