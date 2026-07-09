@@ -1,0 +1,3 @@
+[build]
+# All build artifacts (including binaries) go to the shared Bin directory.
+target-dir = "D:/Ak/Dev/Ruru/Bin"
