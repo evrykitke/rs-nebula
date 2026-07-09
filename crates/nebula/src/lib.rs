@@ -8,6 +8,7 @@ pub mod error;
 pub mod kernel;
 pub mod logging;
 pub mod module;
+mod web;
 
 pub use config::Config;
 pub use error::{Error, Result};

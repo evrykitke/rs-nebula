@@ -40,7 +40,7 @@ impl Kernel {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
         }
-        ctx.into_router()
+        crate::web::finalize(ctx.into_router(), &self.config)
     }
 
     /// Serve the application until ctrl-c, then shut down gracefully so
