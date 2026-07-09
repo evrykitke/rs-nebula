@@ -10,3 +10,6 @@ authors = ["evrykitke <evrykitke@gmail.com>"]
 
 [workspace.dependencies]
 pylon = { path = "crates/pylon" }
+serde = { version = "1", features = ["derive"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+thiserror = "2"

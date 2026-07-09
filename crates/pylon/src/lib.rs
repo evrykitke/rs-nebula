@@ -2,3 +2,7 @@
 //!
 //! Inspired by ASP.NET Boilerplate: applications are composed from modules,
 //! bootstrapped by a kernel, and configured rather than hardcoded.
+
+pub mod config;
+
+pub use config::Config;

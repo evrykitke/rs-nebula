@@ -7,3 +7,6 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+serde.workspace = true
+figment.workspace = true
+thiserror.workspace = true

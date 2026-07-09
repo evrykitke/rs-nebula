@@ -1,0 +1,16 @@
+# Pylon base configuration. Overridden by pylon.{environment}.toml and
+# PYLON__* environment variables (e.g. PYLON__SERVER__PORT=8080).
+# Secrets (database.url, redis.url, rabbitmq.url) belong in environment
+# variables, not in this file.
+
+[server]
+host = "127.0.0.1"
+port = 5000
+request_timeout_secs = 30
+
+[multitenancy]
+enabled = false
+
+[logging]
+level = "info"
+format = "pretty"
