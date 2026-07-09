@@ -134,12 +134,23 @@ impl Default for DatabaseConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MultitenancyConfig {
     /// Off: single main database (self-hosted mode). On: database per
     /// tenant with the main database as the tenant directory.
     pub enabled: bool,
+    /// Request header that names the tenant.
+    pub header: String,
+}
+
+impl Default for MultitenancyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            header: "X-Tenant".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

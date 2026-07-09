@@ -11,6 +11,7 @@ pub mod logging;
 pub mod module;
 pub mod money;
 pub mod repository;
+pub mod tenancy;
 pub mod time;
 mod web;
 
@@ -29,4 +30,6 @@ pub use kernel::{App, Kernel};
 pub use module::{Module, ModuleContext};
 pub use money::{Currency, CurrencyRegistry, Money};
 pub use repository::Repository;
+pub use tenancy::middleware::{CurrentTenant, TenantDb};
+pub use tenancy::{TenantManager, TenantRef};
 pub use time::{Clock, SystemClock};

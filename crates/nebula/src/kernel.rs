@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::logging::{self, LoggingError};
 use crate::module::{Module, ModuleContext};
 use crate::money::CurrencyRegistry;
+use crate::tenancy::TenantManager;
 use std::sync::Arc;
 use axum::Router;
 use sea_orm::DatabaseConnection;
@@ -25,8 +26,9 @@ use std::pin::Pin;
 use tokio::net::TcpListener;
 
 /// Type-erased migration runner so the kernel does not carry the
-/// application's migrator type around.
-type MigrationRunner = Box<
+/// application's migrator type around. Shared so the same migrations
+/// can run on the main and each tenant database.
+type MigrationRunner = Arc<
     dyn Fn(DatabaseConnection) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
 >;
 
@@ -59,7 +61,30 @@ impl Kernel {
             Some(db)
         };
 
-        match (&self.migrations, &database, self.config.database.auto_migrate) {
+        let tenants = if self.config.multitenancy.enabled {
+            let Some(db) = &database else {
+                return Err(Error::internal(
+                    "multitenancy is enabled but no database is configured",
+                ));
+            };
+            Some(Arc::new(TenantManager::new(
+                db.clone(),
+                self.config.database.clone(),
+                self.config.multitenancy.clone(),
+            )))
+        } else {
+            None
+        };
+
+        let auto_migrate = self.config.database.auto_migrate;
+
+        if tenants.is_some() && auto_migrate {
+            let db = database.as_ref().expect("checked above");
+            tracing::info!("applying tenant directory migrations");
+            crate::tenancy::migrations::Migrator::up(db, None).await?;
+        }
+
+        match (&self.migrations, &database, auto_migrate) {
             (Some(run), Some(db), true) => {
                 tracing::info!("applying pending migrations");
                 run(db.clone()).await?;
@@ -76,20 +101,44 @@ impl Kernel {
             (None, _, false) => {}
         }
 
+        if let (Some(run), Some(manager), true) = (&self.migrations, &tenants, auto_migrate) {
+            for tenant in manager.find_all().await? {
+                let has_own_db = tenant
+                    .connection_string
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty());
+                if tenant.is_active && has_own_db {
+                    tracing::info!(tenant = %tenant.name, "applying migrations to tenant database");
+                    run(manager.connection_for(&tenant).await?).await?;
+                }
+            }
+        }
+
         let currencies = Arc::new(CurrencyRegistry::from_config(&self.config.currencies)?);
 
-        let mut ctx = ModuleContext::new(&self.config, database.clone(), currencies.clone());
+        let mut ctx = ModuleContext::new(
+            &self.config,
+            database.clone(),
+            currencies.clone(),
+            tenants.clone(),
+        );
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
         }
-        let router = crate::web::finalize(ctx.into_router(), &self.config, database.clone());
+        let router = crate::web::finalize(
+            ctx.into_router(),
+            &self.config,
+            database.clone(),
+            tenants.clone(),
+        );
 
         Ok(App {
             config: self.config,
             router,
             database,
             currencies,
+            tenants,
         })
     }
 
@@ -106,6 +155,7 @@ pub struct App {
     router: Router,
     database: Option<DatabaseConnection>,
     currencies: Arc<CurrencyRegistry>,
+    tenants: Option<Arc<TenantManager>>,
 }
 
 impl App {
@@ -125,6 +175,10 @@ impl App {
 
     pub fn currencies(&self) -> &CurrencyRegistry {
         &self.currencies
+    }
+
+    pub fn tenants(&self) -> Option<Arc<TenantManager>> {
+        self.tenants.clone()
     }
 
     /// Serve until ctrl-c, then shut down gracefully so in-flight
@@ -176,7 +230,7 @@ impl KernelBuilder {
     /// Register the application's migrations (a SeaORM `MigratorTrait`).
     /// They run during [`Kernel::init`] when `database.auto_migrate` is on.
     pub fn with_migrations<M: MigratorTrait + 'static>(mut self) -> Self {
-        self.migrations = Some(Box::new(|db| {
+        self.migrations = Some(Arc::new(|db| {
             Box::pin(async move { M::up(&db, None).await.map_err(Error::from) })
         }));
         self

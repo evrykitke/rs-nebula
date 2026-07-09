@@ -4,6 +4,7 @@
 
 use crate::config::Config;
 use crate::money::CurrencyRegistry;
+use crate::tenancy::TenantManager;
 use axum::Router;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ pub struct ModuleContext<'a> {
     config: &'a Config,
     database: Option<DatabaseConnection>,
     currencies: Arc<CurrencyRegistry>,
+    tenants: Option<Arc<TenantManager>>,
     router: Router,
 }
 
@@ -34,11 +36,13 @@ impl<'a> ModuleContext<'a> {
         config: &'a Config,
         database: Option<DatabaseConnection>,
         currencies: Arc<CurrencyRegistry>,
+        tenants: Option<Arc<TenantManager>>,
     ) -> Self {
         Self {
             config,
             database,
             currencies,
+            tenants,
             router: Router::new(),
         }
     }
@@ -46,6 +50,11 @@ impl<'a> ModuleContext<'a> {
     /// The configured currency table, shared application-wide.
     pub fn currencies(&self) -> Arc<CurrencyRegistry> {
         self.currencies.clone()
+    }
+
+    /// The tenant manager, when multitenancy is enabled.
+    pub fn tenants(&self) -> Option<Arc<TenantManager>> {
+        self.tenants.clone()
     }
 
     /// The fully-resolved application configuration.
