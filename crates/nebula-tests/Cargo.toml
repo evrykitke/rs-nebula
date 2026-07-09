@@ -9,3 +9,12 @@ publish = false
 
 [dependencies]
 nebula.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+serde_json.workspace = true
+figment = { workspace = true, features = ["test"] }
+chrono.workspace = true
+rust_decimal.workspace = true

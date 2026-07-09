@@ -44,9 +44,10 @@ pub(crate) fn finalize(router: Router, config: &Config) -> Router {
                 .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
                 .layer(TraceLayer::new_for_http())
                 .layer(CatchPanicLayer::custom(handle_panic))
-                .layer(TimeoutLayer::new(Duration::from_secs(
-                    config.server.request_timeout_secs,
-                )))
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    Duration::from_secs(config.server.request_timeout_secs),
+                ))
                 .layer(PropagateRequestIdLayer::x_request_id()),
         )
 }

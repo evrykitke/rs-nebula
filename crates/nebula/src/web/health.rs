@@ -20,7 +20,7 @@ pub struct Health {
 }
 
 #[derive(Clone)]
-struct HealthState {
+pub(crate) struct HealthState {
     environment: String,
 }
 
