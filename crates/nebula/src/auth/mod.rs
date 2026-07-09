@@ -17,6 +17,7 @@ pub mod jwt;
 pub mod manager;
 pub mod module;
 pub mod password;
+pub mod refresh_token;
 pub mod totp;
 pub mod user;
 

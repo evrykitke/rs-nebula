@@ -73,6 +73,11 @@ impl Module for AuthModule {
                 .route("/auth/two-factor/confirm", post(two_factor_confirm))
                 .route("/auth/two-factor/disable", post(two_factor_disable))
                 .route("/auth/tenant/two-factor", post(tenant_two_factor))
+                .route("/auth/token/refresh", post(refresh))
+                .route("/auth/logout", post(logout))
+                .route("/auth/password", post(change_password))
+                .route("/auth/users", post(create_user).get(list_users))
+                .route("/auth/users/{id}/admin", axum::routing::put(set_user_admin))
                 .route("/auth/me", get(me))
                 .with_state(state),
         );
@@ -181,17 +186,16 @@ pub struct LoginRequest {
 pub enum LoginResponse {
     Success {
         access_token: String,
+        /// Long-lived, single-use: exchange it at `POST /auth/token/refresh`
+        /// for a fresh pair.
+        refresh_token: String,
         user: Profile,
     },
     /// Password accepted; finish with `POST /auth/login/two-factor`.
-    TwoFactorRequired {
-        two_factor_token: String,
-    },
+    TwoFactorRequired { two_factor_token: String },
     /// The company mandates 2FA and this account has none yet: use the
     /// token on the setup + confirm endpoints, then log in again.
-    TwoFactorSetupRequired {
-        two_factor_token: String,
-    },
+    TwoFactorSetupRequired { two_factor_token: String },
 }
 
 async fn login(
@@ -220,8 +224,10 @@ async fn login(
     }
 
     let token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
+    let refresh_token = users.issue_refresh_token(user.id).await?;
     Ok(Json(LoginResponse::Success {
         access_token: token,
+        refresh_token,
         user: user.into(),
     }))
 }
@@ -241,8 +247,10 @@ async fn login_two_factor(
     let users = state.users(db.map(|Extension(d)| d));
     let user = users.verify_two_factor(user, &req.code).await?;
     let token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
+    let refresh_token = users.issue_refresh_token(user.id).await?;
     Ok(Json(LoginResponse::Success {
         access_token: token,
+        refresh_token,
         user: user.into(),
     }))
 }
@@ -358,4 +366,146 @@ async fn tenant_two_factor(
 
 async fn me(CurrentUser(user): CurrentUser) -> Json<Profile> {
     Json(user.into())
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+/// Exchange a refresh token for a fresh access/refresh pair. The old
+/// token is revoked; reusing it later revokes every session of the user.
+async fn refresh(
+    State(state): State<AuthState>,
+    db: Option<Extension<DatabaseConnection>>,
+    Json(req): Json<RefreshRequest>,
+) -> Result<Json<LoginResponse>> {
+    let users = state.users(db.map(|Extension(d)| d));
+    let (user, refresh_token) = users.rotate_refresh_token(&req.refresh_token).await?;
+    let access_token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
+    Ok(Json(LoginResponse::Success {
+        access_token,
+        refresh_token,
+        user: user.into(),
+    }))
+}
+
+async fn logout(
+    State(state): State<AuthState>,
+    db: Option<Extension<DatabaseConnection>>,
+    Json(req): Json<RefreshRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let users = state.users(db.map(|Extension(d)| d));
+    users.revoke_refresh_token(&req.refresh_token).await?;
+    Ok(Json(serde_json::json!({ "status": "logged_out" })))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// Changing the password rotates the security stamp and revokes all
+/// refresh tokens — every other session has to sign in again.
+async fn change_password(
+    State(state): State<AuthState>,
+    CurrentUser(user): CurrentUser,
+    db: Option<Extension<DatabaseConnection>>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<Profile>> {
+    let users = state.users(db.map(|Extension(d)| d));
+    let user = users
+        .change_password(user, &req.current_password, &req.new_password)
+        .await?;
+    Ok(Json(user.into()))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateUserRequest {
+    pub user_name: String,
+    pub email: String,
+    pub password: String,
+    pub first_name: String,
+    pub last_name: String,
+    #[serde(default)]
+    pub is_tenant_admin: bool,
+    pub phone_number: Option<String>,
+    pub language: Option<String>,
+    pub time_zone: Option<String>,
+}
+
+/// Tenant admins onboard their team here.
+async fn create_user(
+    State(state): State<AuthState>,
+    CurrentUser(admin): CurrentUser,
+    db: Option<Extension<DatabaseConnection>>,
+    Json(req): Json<CreateUserRequest>,
+) -> Result<Json<Profile>> {
+    if !admin.is_tenant_admin {
+        return Err(Error::Forbidden);
+    }
+    let users = state.users(db.map(|Extension(d)| d));
+    let user = users
+        .create(NewUser {
+            tenant_id: admin.tenant_id,
+            user_name: req.user_name,
+            email: req.email,
+            password: req.password,
+            first_name: req.first_name,
+            last_name: req.last_name,
+            is_tenant_admin: req.is_tenant_admin,
+            language: req.language,
+            time_zone: req.time_zone,
+            phone_number: req.phone_number,
+        })
+        .await?;
+    Ok(Json(user.into()))
+}
+
+async fn list_users(
+    State(state): State<AuthState>,
+    CurrentUser(admin): CurrentUser,
+    db: Option<Extension<DatabaseConnection>>,
+) -> Result<Json<Vec<Profile>>> {
+    if !admin.is_tenant_admin {
+        return Err(Error::Forbidden);
+    }
+    let users = state.users(db.map(|Extension(d)| d));
+    let all = users.find_all(admin.tenant_id).await?;
+    Ok(Json(all.into_iter().map(Profile::from).collect()))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SetAdminRequest {
+    pub is_admin: bool,
+}
+
+/// Admin rights start with whoever registered the company; this is how
+/// they are granted to or revoked from anyone later. Admins cannot
+/// demote themselves, so a tenant can never lose its last admin by
+/// accident.
+async fn set_user_admin(
+    State(state): State<AuthState>,
+    CurrentUser(admin): CurrentUser,
+    db: Option<Extension<DatabaseConnection>>,
+    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    Json(req): Json<SetAdminRequest>,
+) -> Result<Json<Profile>> {
+    if !admin.is_tenant_admin {
+        return Err(Error::Forbidden);
+    }
+    if admin.id == user_id && !req.is_admin {
+        return Err(Error::Validation(
+            "you cannot revoke your own admin rights; grant another admin first".into(),
+        ));
+    }
+    let users = state.users(db.map(|Extension(d)| d));
+    let target = users
+        .find_by_id(user_id)
+        .await?
+        .filter(|u| u.tenant_id == admin.tenant_id)
+        .ok_or_else(|| Error::NotFound(format!("user {user_id}")))?;
+    let user = users.set_tenant_admin(target, req.is_admin).await?;
+    Ok(Json(user.into()))
 }

@@ -98,6 +98,7 @@ pub struct AuthConfig {
     /// local overlay or NEBULA__AUTH__JWT_SECRET.
     pub jwt_secret: Secret,
     pub access_token_ttl_secs: u64,
+    pub refresh_token_ttl_secs: u64,
     /// Lifetime of the short-lived token that bridges password login and
     /// the two-factor step.
     pub two_factor_token_ttl_secs: u64,
@@ -113,6 +114,7 @@ impl Default for AuthConfig {
         Self {
             jwt_secret: Secret::default(),
             access_token_ttl_secs: 3600,
+            refresh_token_ttl_secs: 30 * 24 * 3600,
             two_factor_token_ttl_secs: 300,
             password_min_length: 8,
             totp_issuer: "Nebula".into(),

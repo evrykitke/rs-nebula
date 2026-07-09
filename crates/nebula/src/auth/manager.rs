@@ -9,11 +9,14 @@
 //!   outstanding tokens;
 //! - soft-deleted users are invisible to every lookup.
 
-use super::{password, totp, user};
+use super::{password, refresh_token, totp, user};
 use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use chrono::{Duration, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+};
+use sha2::{Digest, Sha256};
 
 pub struct NewUser {
     pub tenant_id: Option<i32>,
@@ -206,12 +209,15 @@ impl UserManager {
                 self.config.password_min_length
             )));
         }
+        let user_id = user.id;
         let mut active: user::ActiveModel = user.into();
         active.password_hash = Set(password::hash(new_password)?);
         active.password_changed_at = Set(Some(Utc::now()));
         active.security_stamp = Set(random_token());
         active.updated_at = Set(Utc::now());
-        active.update(&self.db).await.map_err(Error::from)
+        let user = active.update(&self.db).await?;
+        self.revoke_all_refresh_tokens(user_id).await?;
+        Ok(user)
     }
 
     pub async fn confirm_email(&self, user: user::Model, token: &str) -> Result<user::Model> {
@@ -226,19 +232,24 @@ impl UserManager {
     }
 
     pub async fn set_active(&self, user: user::Model, is_active: bool) -> Result<user::Model> {
+        let user_id = user.id;
         let mut active: user::ActiveModel = user.into();
         active.is_active = Set(is_active);
         active.security_stamp = Set(random_token());
         active.updated_at = Set(Utc::now());
-        active.update(&self.db).await.map_err(Error::from)
+        let user = active.update(&self.db).await?;
+        self.revoke_all_refresh_tokens(user_id).await?;
+        Ok(user)
     }
 
     pub async fn soft_delete(&self, user: user::Model) -> Result<()> {
+        let user_id = user.id;
         let mut active: user::ActiveModel = user.into();
         active.deleted_at = Set(Some(Utc::now()));
         active.security_stamp = Set(random_token());
         active.updated_at = Set(Utc::now());
         active.update(&self.db).await?;
+        self.revoke_all_refresh_tokens(user_id).await?;
         Ok(())
     }
 
@@ -281,6 +292,7 @@ impl UserManager {
             return Err(Error::Validation("invalid authenticator code".into()));
         }
         let codes = totp::generate_recovery_codes();
+        let user_id = user.id;
         let mut active: user::ActiveModel = user.into();
         active.two_factor_enabled = Set(true);
         active.totp_confirmed_at = Set(Some(Utc::now()));
@@ -288,6 +300,7 @@ impl UserManager {
         active.security_stamp = Set(random_token());
         active.updated_at = Set(Utc::now());
         let user = active.update(&self.db).await?;
+        self.revoke_all_refresh_tokens(user_id).await?;
         Ok((user, codes))
     }
 
@@ -311,6 +324,7 @@ impl UserManager {
     }
 
     pub async fn disable_two_factor(&self, user: user::Model) -> Result<user::Model> {
+        let user_id = user.id;
         let mut active: user::ActiveModel = user.into();
         active.two_factor_enabled = Set(false);
         active.totp_secret = Set(None);
@@ -318,8 +332,125 @@ impl UserManager {
         active.recovery_codes = Set(None);
         active.security_stamp = Set(random_token());
         active.updated_at = Set(Utc::now());
+        let user = active.update(&self.db).await?;
+        self.revoke_all_refresh_tokens(user_id).await?;
+        Ok(user)
+    }
+
+    /// Everyone in a tenant, for the admin user list (soft-deleted
+    /// excluded).
+    pub async fn find_all(&self, tenant_id: Option<i32>) -> Result<Vec<user::Model>> {
+        user::Entity::find()
+            .filter(tenant_filter(tenant_id))
+            .filter(user::Column::DeletedAt.is_null())
+            .order_by_asc(user::Column::Id)
+            .all(&self.db)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// Grant or revoke tenant-admin. The registering user starts as the
+    /// admin, but this is how it changes hands later.
+    pub async fn set_tenant_admin(&self, user: user::Model, is_admin: bool) -> Result<user::Model> {
+        let mut active: user::ActiveModel = user.into();
+        active.is_tenant_admin = Set(is_admin);
+        active.updated_at = Set(Utc::now());
         active.update(&self.db).await.map_err(Error::from)
     }
+
+    /// Issue a refresh token: 48 random bytes, returned raw exactly once,
+    /// stored only as a SHA-256 hash.
+    pub async fn issue_refresh_token(&self, user_id: i32) -> Result<String> {
+        let mut bytes = [0u8; 48];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+        let raw = hex::encode(bytes);
+        refresh_token::ActiveModel {
+            user_id: Set(user_id),
+            token_hash: Set(hash_token(&raw)),
+            expires_at: Set(
+                Utc::now() + Duration::seconds(self.config.refresh_token_ttl_secs as i64)
+            ),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await?;
+        Ok(raw)
+    }
+
+    /// Rotate a refresh token: the presented token is revoked and a new
+    /// one issued. Presenting an already-revoked token is treated as
+    /// theft — every session of that user is revoked.
+    pub async fn rotate_refresh_token(&self, raw: &str) -> Result<(user::Model, String)> {
+        let found = refresh_token::Entity::find()
+            .filter(refresh_token::Column::TokenHash.eq(hash_token(raw)))
+            .one(&self.db)
+            .await?;
+        let Some(token) = found else {
+            return Err(Error::Unauthorized);
+        };
+
+        if token.revoked_at.is_some() {
+            tracing::warn!(
+                user_id = token.user_id,
+                "revoked refresh token reused; revoking all sessions"
+            );
+            self.revoke_all_refresh_tokens(token.user_id).await?;
+            return Err(Error::Unauthorized);
+        }
+        if token.expires_at < Utc::now() {
+            return Err(Error::Unauthorized);
+        }
+
+        let user = self
+            .find_by_id(token.user_id)
+            .await?
+            .filter(|u| u.is_active)
+            .ok_or(Error::Unauthorized)?;
+
+        let user_id = token.user_id;
+        let mut active: refresh_token::ActiveModel = token.into();
+        active.revoked_at = Set(Some(Utc::now()));
+        active.update(&self.db).await?;
+
+        let new_raw = self.issue_refresh_token(user_id).await?;
+        Ok((user, new_raw))
+    }
+
+    /// Logout: revoke one refresh token. Unknown tokens are ignored so
+    /// logout is idempotent.
+    pub async fn revoke_refresh_token(&self, raw: &str) -> Result<()> {
+        let found = refresh_token::Entity::find()
+            .filter(refresh_token::Column::TokenHash.eq(hash_token(raw)))
+            .one(&self.db)
+            .await?;
+        if let Some(token) = found {
+            if token.revoked_at.is_none() {
+                let mut active: refresh_token::ActiveModel = token.into();
+                active.revoked_at = Set(Some(Utc::now()));
+                active.update(&self.db).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn revoke_all_refresh_tokens(&self, user_id: i32) -> Result<()> {
+        refresh_token::Entity::update_many()
+            .col_expr(
+                refresh_token::Column::RevokedAt,
+                sea_orm::sea_query::Expr::value(Utc::now()),
+            )
+            .filter(refresh_token::Column::UserId.eq(user_id))
+            .filter(refresh_token::Column::RevokedAt.is_null())
+            .exec(&self.db)
+            .await
+            .map(|_| ())
+            .map_err(Error::from)
+    }
+}
+
+fn hash_token(raw: &str) -> String {
+    hex::encode(Sha256::digest(raw.as_bytes()))
 }
 
 fn tenant_filter(tenant_id: Option<i32>) -> sea_orm::Condition {
