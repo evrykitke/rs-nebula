@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 figment.workspace = true
 chrono.workspace = true
+sea-orm.workspace = true
 chrono-tz.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true

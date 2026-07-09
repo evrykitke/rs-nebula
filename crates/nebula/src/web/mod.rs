@@ -26,17 +26,21 @@ use utoipa_swagger_ui::SwaggerUi;
         description = "API served by the Nebula framework",
         version = env!("CARGO_PKG_VERSION")
     ),
-    paths(health::health)
+    paths(health::health, health::ready)
 )]
 struct ApiDoc;
 
 /// Wrap the module-composed router with framework routes and layers.
 /// Applied once by the kernel after all modules have configured.
-pub(crate) fn finalize(router: Router, config: &Config) -> Router {
+pub(crate) fn finalize(
+    router: Router,
+    config: &Config,
+    database: Option<sea_orm::DatabaseConnection>,
+) -> Router {
     let api = ApiDoc::openapi();
 
     router
-        .merge(health::routes(config))
+        .merge(health::routes(config, database))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
         .fallback(not_found)
         .layer(

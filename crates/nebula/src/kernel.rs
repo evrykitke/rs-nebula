@@ -1,5 +1,5 @@
-//! The kernel bootstraps everything: configuration, logging, modules,
-//! and the web host. `main.rs` stays a one-liner:
+//! The kernel bootstraps everything: configuration, logging, database,
+//! modules, and the web host. `main.rs` stays a one-liner:
 //!
 //! ```no_run
 //! use nebula::kernel::Kernel;
@@ -11,10 +11,12 @@
 //! ```
 
 use crate::config::Config;
+use crate::db;
 use crate::error::{Error, Result};
 use crate::logging::{self, LoggingError};
 use crate::module::{Module, ModuleContext};
 use axum::Router;
+use sea_orm::DatabaseConnection;
 use tokio::net::TcpListener;
 
 /// Composes and boots a Nebula application.
@@ -32,22 +34,66 @@ impl Kernel {
         &self.config
     }
 
-    /// Assemble the application router from all registered modules.
-    /// Exposed so tests can drive the app without binding a socket.
-    pub fn router(&self) -> Router {
-        let mut ctx = ModuleContext::new(&self.config);
+    /// Asynchronous boot phase: connect to the database when configured
+    /// (verifying it answers, so a bad connection fails at boot rather
+    /// than on the first request), then let every module configure itself.
+    pub async fn init(self) -> Result<App> {
+        let database = if self.config.database.url.is_empty() {
+            tracing::info!("no database configured; booting without one");
+            None
+        } else {
+            let db = db::connect(&self.config.database).await?;
+            tracing::info!("database connection established");
+            Some(db)
+        };
+
+        let mut ctx = ModuleContext::new(&self.config, database.clone());
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
         }
-        crate::web::finalize(ctx.into_router(), &self.config)
+        let router = crate::web::finalize(ctx.into_router(), &self.config, database.clone());
+
+        Ok(App {
+            config: self.config,
+            router,
+            database,
+        })
     }
 
-    /// Serve the application until ctrl-c, then shut down gracefully so
-    /// in-flight requests complete instead of being severed.
+    /// Boot and serve until shutdown.
     pub async fn run(self) -> Result<()> {
+        self.init().await?.serve().await
+    }
+}
+
+/// A fully booted application, ready to serve (or to be driven directly
+/// in tests via [`App::router`]).
+pub struct App {
+    config: Config,
+    router: Router,
+    database: Option<DatabaseConnection>,
+}
+
+impl App {
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// The composed router — lets tests exercise the full stack without
+    /// binding a socket.
+    pub fn router(&self) -> Router {
+        self.router.clone()
+    }
+
+    pub fn database(&self) -> Option<&DatabaseConnection> {
+        self.database.as_ref()
+    }
+
+    /// Serve until ctrl-c, then shut down gracefully so in-flight
+    /// requests complete instead of being severed.
+    pub async fn serve(self) -> Result<()> {
         let addr = format!("{}:{}", self.config.server.host, self.config.server.port);
-        let router = self.router();
 
         let listener = TcpListener::bind(&addr)
             .await
@@ -59,7 +105,7 @@ impl Kernel {
             "nebula listening on http://{addr}"
         );
 
-        axum::serve(listener, router)
+        axum::serve(listener, self.router)
             .with_graceful_shutdown(shutdown_signal())
             .await
             .map_err(Error::internal)

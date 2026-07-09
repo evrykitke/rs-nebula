@@ -109,12 +109,40 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Connection string for the main (directory) database.
-    /// Empty until the database layer is configured; validated when used.
+    /// Connection string for the main (directory) database. When empty
+    /// the application boots without a database (modules relying on one
+    /// will say so loudly).
     pub url: Secret,
+    /// Upper bound on pooled connections; protects Postgres from
+    /// connection storms.
+    pub max_connections: u32,
+    pub min_connections: u32,
+    /// Fail fast when the database is unreachable at boot.
+    pub connect_timeout_secs: u64,
+    /// Bound how long a request may wait for a pooled connection —
+    /// prevents pool exhaustion from turning into a deadlock.
+    pub acquire_timeout_secs: u64,
+    /// Drop idle connections after this long.
+    pub idle_timeout_secs: u64,
+    /// Apply pending migrations during boot.
+    pub auto_migrate: bool,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            url: Secret::default(),
+            max_connections: 10,
+            min_connections: 0,
+            connect_timeout_secs: 10,
+            acquire_timeout_secs: 10,
+            idle_timeout_secs: 600,
+            auto_migrate: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

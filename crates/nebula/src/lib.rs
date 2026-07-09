@@ -4,6 +4,7 @@
 //! bootstrapped by a kernel, and configured rather than hardcoded.
 
 pub mod config;
+pub mod db;
 pub mod error;
 pub mod kernel;
 pub mod logging;
@@ -16,8 +17,11 @@ mod web;
 /// rounding errors.
 pub use rust_decimal::Decimal;
 
+/// Re-exported so applications use the same SeaORM the framework links.
+pub use sea_orm;
+
 pub use config::Config;
 pub use error::{Error, Result};
-pub use kernel::Kernel;
+pub use kernel::{App, Kernel};
 pub use module::{Module, ModuleContext};
 pub use time::{Clock, SystemClock};

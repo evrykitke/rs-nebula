@@ -4,6 +4,7 @@
 
 use crate::config::Config;
 use axum::Router;
+use sea_orm::DatabaseConnection;
 
 /// A composable unit of application functionality.
 ///
@@ -21,13 +22,15 @@ pub trait Module: Send + Sync + 'static {
 /// Collects module contributions during boot.
 pub struct ModuleContext<'a> {
     config: &'a Config,
+    database: Option<DatabaseConnection>,
     router: Router,
 }
 
 impl<'a> ModuleContext<'a> {
-    pub(crate) fn new(config: &'a Config) -> Self {
+    pub(crate) fn new(config: &'a Config, database: Option<DatabaseConnection>) -> Self {
         Self {
             config,
+            database,
             router: Router::new(),
         }
     }
@@ -35,6 +38,21 @@ impl<'a> ModuleContext<'a> {
     /// The fully-resolved application configuration.
     pub fn config(&self) -> &Config {
         self.config
+    }
+
+    /// The main database pool, when one is configured. Cloning a
+    /// `DatabaseConnection` is cheap (it shares the underlying pool).
+    pub fn db(&self) -> Option<&DatabaseConnection> {
+        self.database.as_ref()
+    }
+
+    /// The main database pool, for modules that cannot function without
+    /// one. Fails loudly at boot with the module-facing explanation.
+    pub fn require_db(&self) -> DatabaseConnection {
+        self.database.clone().expect(
+            "this module requires a database; configure database.url in \
+             nebula.{env}.toml or NEBULA__DATABASE__URL",
+        )
     }
 
     /// Merge the given routes into the application router.

@@ -39,6 +39,11 @@ pub enum Error {
     #[error("{0}")]
     Conflict(String),
 
+    /// Database failure (HTTP 500). Like all internal errors, the
+    /// underlying cause is logged, never sent to the client.
+    #[error("database error: {0}")]
+    Database(#[from] sea_orm::DbErr),
+
     #[error(transparent)]
     Config(#[from] ConfigError),
 
@@ -63,7 +68,7 @@ impl Error {
             Error::Forbidden => StatusCode::FORBIDDEN,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
-            Error::Config(_) | Error::Logging(_) | Error::Internal(_) => {
+            Error::Database(_) | Error::Config(_) | Error::Logging(_) | Error::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }

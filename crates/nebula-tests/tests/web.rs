@@ -31,17 +31,21 @@ impl Module for PingModule {
     }
 }
 
-fn app() -> Router {
+async fn app() -> Router {
     Kernel::builder()
         .with_config(Config::default())
         .add_module(PingModule)
         .build()
         .expect("kernel must build")
+        .init()
+        .await
+        .expect("app must boot")
         .router()
 }
 
 async fn get_response(path: &str) -> (StatusCode, Option<String>, serde_json::Value) {
     let response = app()
+        .await
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -58,6 +62,7 @@ async fn get_response(path: &str) -> (StatusCode, Option<String>, serde_json::Va
 #[tokio::test]
 async fn module_routes_are_served() {
     let response = app()
+        .await
         .oneshot(Request::get("/ping").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -72,11 +77,20 @@ async fn health_endpoint_is_always_available() {
 }
 
 #[tokio::test]
+async fn readiness_without_database_is_ready() {
+    let (status, _, body) = get_response("/health/ready").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["database"], "not_configured");
+}
+
+#[tokio::test]
 async fn openapi_document_is_served() {
     let (status, _, body) = get_response("/api-docs/openapi.json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["info"]["title"], "Nebula API");
     assert!(body["paths"]["/health"].is_object());
+    assert!(body["paths"]["/health/ready"].is_object());
 }
 
 #[tokio::test]
