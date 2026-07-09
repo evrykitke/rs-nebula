@@ -1,0 +1,48 @@
+# Local development infrastructure for Pylon.
+#
+#   docker compose up -d
+#
+# PostgreSQL runs bare metal (not in Docker); only Redis and RabbitMQ
+# are containerized. Credentials below are for LOCAL DEVELOPMENT ONLY —
+# production values come from configuration (PYLON__* environment
+# variables), never from this file.
+
+name: pylon
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: pylon-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: pylon-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: pylon
+      RABBITMQ_DEFAULT_PASS: pylon_dev
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  rabbitmq-data:
