@@ -17,8 +17,9 @@ async fn main() -> nebula::Result<()> {
 Every application gets, with zero code: layered yaml configuration with
 validation at boot, tracing-based logging, SeaORM database connectivity
 with migrations and readiness checks, a generic repository and unit of
-work, currency-safe `Money`, OpenAPI + Swagger UI, and resilient web
-defaults (timeouts, panic containment, request ids, RFC 9457
+work, toggleable multitenancy (database-per-tenant with a directory
+database), currency-safe `Money`, OpenAPI + Swagger UI, and resilient
+web defaults (timeouts, panic containment, request ids, RFC 9457
 problem+json errors).
 
 ## Documentation
@@ -29,8 +30,11 @@ setup, architecture, dataflow and roadmap.
 
 ## Quick start
 
+You need a reachable PostgreSQL server; point the framework at it via
+`dev.local.yaml` (gitignored) or `NEBULA__DATABASE__URL`.
+
 ```sh
-docker compose up -d        # Redis + RabbitMQ (PostgreSQL runs bare metal)
+docker compose up -d        # optional: Redis + RabbitMQ
 cargo run -p nebula-server
 ```
 

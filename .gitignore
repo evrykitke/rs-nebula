@@ -3,3 +3,6 @@
 
 # Machine-local secrets: environment overlays stay out of the repo
 *.local.yaml
+
+# Machine-local cargo config (e.g. a custom build.target-dir)
+.cargo/

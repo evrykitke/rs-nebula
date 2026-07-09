@@ -1,11 +1,11 @@
-# Local development infrastructure for Nebula.
+# Optional local development infrastructure for Nebula: Redis and
+# RabbitMQ. PostgreSQL is not included — bring your own server and point
+# the framework at it via configuration.
 #
 #   docker compose up -d
 #
-# PostgreSQL runs bare metal (not in Docker); only Redis and RabbitMQ
-# are containerized. Credentials below are for LOCAL DEVELOPMENT ONLY —
-# production values come from configuration (NEBULA__* environment
-# variables), never from this file.
+# Credentials below are for LOCAL DEVELOPMENT ONLY — production values
+# come from configuration, never from this file.
 
 name: nebula
 
