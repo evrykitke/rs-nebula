@@ -73,8 +73,8 @@ impl Module for AuthModule {
         let config = ctx.config().auth.clone();
         assert!(
             !config.jwt_secret.is_empty(),
-            "AuthModule requires auth.jwt_secret; set it in {{env}}.local.yaml \
-             or NEBULA__AUTH__JWT_SECRET"
+            "AuthModule requires auth.jwt_secret; set it in \
+             config/{{env}}.local.yaml or NEBULA__AUTH__JWT_SECRET"
         );
         let state = AuthState {
             config: config.clone(),

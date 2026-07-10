@@ -3,9 +3,9 @@
 //! Values are resolved in order, later sources overriding earlier ones:
 //!
 //! 1. Built-in defaults ([`Config::default`])
-//! 2. `{env}.yaml` — `dev.yaml`, `test.yaml` or `prod.yaml`, selected by
-//!    `NEBULA_ENV` (default `dev`)
-//! 3. `{env}.local.yaml` — gitignored overlay for machine-local secrets
+//! 2. `config/{env}.yaml` — `dev.yaml`, `test.yaml` or `prod.yaml` in the
+//!    application's `config/` folder, selected by `NEBULA_ENV` (default `dev`)
+//! 3. `config/{env}.local.yaml` — gitignored overlay for machine-local secrets
 //! 4. Environment variables prefixed `NEBULA__`, with `__` as the section
 //!    separator (e.g. `NEBULA__SERVER__PORT=8080` sets `server.port`)
 //!
@@ -281,7 +281,7 @@ pub enum ConfigError {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
-        Self::load_from(Path::new("."))
+        Self::load_from(Path::new("config"))
     }
 
     pub fn load_from(dir: &Path) -> Result<Self, ConfigError> {
