@@ -44,13 +44,7 @@ impl MigrationTrait for CreateTenants {
                 Table::create()
                     .table(Tenants::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Tenants::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(Tenants::Id).uuid().not_null().primary_key())
                     .col(
                         ColumnDef::new(Tenants::Name)
                             .string_len(64)
@@ -118,14 +112,8 @@ impl MigrationTrait for CreateUsers {
                 Table::create()
                     .table(Users::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Users::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Users::TenantId).integer().null())
+                    .col(ColumnDef::new(Users::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Users::TenantId).uuid().null())
                     .col(ColumnDef::new(Users::UserName).string_len(64).not_null())
                     .col(
                         ColumnDef::new(Users::NormalizedUserName)
@@ -335,12 +323,11 @@ impl MigrationTrait for CreateRefreshTokens {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(RefreshTokens::Id)
-                            .integer()
+                            .uuid()
                             .not_null()
-                            .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(RefreshTokens::UserId).integer().not_null())
+                    .col(ColumnDef::new(RefreshTokens::UserId).uuid().not_null())
                     .col(
                         ColumnDef::new(RefreshTokens::TokenHash)
                             .string_len(64)
@@ -413,14 +400,8 @@ impl MigrationTrait for CreateRolesAndPermissions {
                 Table::create()
                     .table(Roles::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Roles::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Roles::TenantId).integer().null())
+                    .col(ColumnDef::new(Roles::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Roles::TenantId).uuid().null())
                     .col(ColumnDef::new(Roles::Name).string_len(64).not_null())
                     .col(ColumnDef::new(Roles::DisplayName).string().not_null())
                     .col(
@@ -457,8 +438,8 @@ impl MigrationTrait for CreateRolesAndPermissions {
                 Table::create()
                     .table(UserRoles::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(UserRoles::UserId).integer().not_null())
-                    .col(ColumnDef::new(UserRoles::RoleId).integer().not_null())
+                    .col(ColumnDef::new(UserRoles::UserId).uuid().not_null())
+                    .col(ColumnDef::new(UserRoles::RoleId).uuid().not_null())
                     .primary_key(
                         Index::create()
                             .col(UserRoles::UserId)
@@ -475,9 +456,8 @@ impl MigrationTrait for CreateRolesAndPermissions {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(PermissionGrants::Id)
-                            .integer()
+                            .uuid()
                             .not_null()
-                            .auto_increment()
                             .primary_key(),
                     )
                     .col(
@@ -485,8 +465,8 @@ impl MigrationTrait for CreateRolesAndPermissions {
                             .string_len(128)
                             .not_null(),
                     )
-                    .col(ColumnDef::new(PermissionGrants::RoleId).integer().null())
-                    .col(ColumnDef::new(PermissionGrants::UserId).integer().null())
+                    .col(ColumnDef::new(PermissionGrants::RoleId).uuid().null())
+                    .col(ColumnDef::new(PermissionGrants::UserId).uuid().null())
                     .col(
                         ColumnDef::new(PermissionGrants::IsGranted)
                             .boolean()
@@ -582,8 +562,8 @@ impl MigrationTrait for CreateAuditLogs {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(AuditLogs::TenantId).integer().null())
-                    .col(ColumnDef::new(AuditLogs::UserId).integer().null())
+                    .col(ColumnDef::new(AuditLogs::TenantId).uuid().null())
+                    .col(ColumnDef::new(AuditLogs::UserId).uuid().null())
                     .col(ColumnDef::new(AuditLogs::RequestId).string_len(64).null())
                     .col(ColumnDef::new(AuditLogs::Method).string_len(16).not_null())
                     .col(ColumnDef::new(AuditLogs::Path).string().not_null())
@@ -725,13 +705,12 @@ impl MigrationTrait for CreateUserDirectory {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(UserDirectory::Id)
-                            .integer()
+                            .uuid()
                             .not_null()
-                            .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(UserDirectory::TenantId).integer().not_null())
-                    .col(ColumnDef::new(UserDirectory::UserId).integer().not_null())
+                    .col(ColumnDef::new(UserDirectory::TenantId).uuid().not_null())
+                    .col(ColumnDef::new(UserDirectory::UserId).uuid().not_null())
                     .col(
                         ColumnDef::new(UserDirectory::NormalizedUserName)
                             .string_len(64)
@@ -788,8 +767,8 @@ impl MigrationTrait for CreateUserDirectory {
             .get_connection()
             .execute_unprepared(
                 "INSERT INTO user_directory \
-                 (tenant_id, user_id, normalized_user_name, normalized_email) \
-                 SELECT tenant_id, id, normalized_user_name, normalized_email \
+                 (id, tenant_id, user_id, normalized_user_name, normalized_email) \
+                 SELECT gen_random_uuid(), tenant_id, id, normalized_user_name, normalized_email \
                  FROM users WHERE tenant_id IS NOT NULL AND deleted_at IS NULL \
                  ON CONFLICT DO NOTHING",
             )

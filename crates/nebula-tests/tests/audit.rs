@@ -123,7 +123,7 @@ async fn audit_trail_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "register failed: {body}");
-    let tenant_id = body["tenant_id"].as_i64().unwrap();
+    let tenant_id = body["tenant_id"].as_str().unwrap().to_string();
     let boss = login(&router, "boss@auditco.test", "hunter2hunter2").await;
 
     let (status, body) = send(
@@ -141,7 +141,7 @@ async fn audit_trail_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "create user failed: {body}");
-    let clerk_id = body["id"].as_i64().unwrap();
+    let clerk_id = body["id"].as_str().unwrap().to_string();
 
     // -- Entity rows: registration and user creation were snapshotted,
     //    with the full request context on every row.
@@ -218,7 +218,7 @@ async fn audit_trail_end_to_end() {
         .iter()
         .find(|r| r["message"] == "boss@auditco.test logged in")
         .expect("login event");
-    assert!(login_event["user_id"].is_i64(), "events know who");
+    assert!(login_event["user_id"].is_string(), "events know who");
     assert!(
         login_event["old_values"].is_null(),
         "events carry no snapshots"
@@ -299,7 +299,7 @@ async fn audit_trail_end_to_end() {
         &admin_db,
         &format!(
             "INSERT INTO audit_logs (tenant_id, method, path, action, message, created_at) \
-             VALUES ({tenant_id}, 'POST', '/old', 'event', 'ancient event', \
+             VALUES ('{tenant_id}', 'POST', '/old', 'event', 'ancient event', \
                      now() - interval '40 days')"
         ),
     )

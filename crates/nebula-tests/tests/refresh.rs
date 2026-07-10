@@ -208,7 +208,7 @@ async fn refresh_tokens_and_onboarding_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK, "create user: {body}");
     assert_eq!(body["is_tenant_admin"], false);
-    let peter_id = body["id"].as_i64().unwrap();
+    let peter_id = body["id"].as_str().unwrap().to_string();
 
     // Non-admins cannot create users or list them.
     let (_, body) = send(

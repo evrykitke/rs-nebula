@@ -12,10 +12,10 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "users")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: Uuid,
     /// `None` = host user (no tenant context).
-    pub tenant_id: Option<i32>,
+    pub tenant_id: Option<Uuid>,
 
     pub user_name: String,
     pub normalized_user_name: String,
@@ -68,8 +68,8 @@ impl ActiveModelBehavior for ActiveModel {}
 /// The client-safe view of a user.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Profile {
-    pub id: i32,
-    pub tenant_id: Option<i32>,
+    pub id: uuid::Uuid,
+    pub tenant_id: Option<uuid::Uuid>,
     pub user_name: String,
     pub email: String,
     pub email_confirmed: bool,

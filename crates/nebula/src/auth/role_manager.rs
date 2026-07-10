@@ -13,6 +13,7 @@ use super::permission::Registry;
 use super::role::{self, permission_grant, user_role};
 use crate::error::{Error, Result};
 use chrono::Utc;
+use uuid::Uuid;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
@@ -35,7 +36,7 @@ impl RoleManager {
 
     pub async fn create_role(
         &self,
-        tenant_id: Option<i32>,
+        tenant_id: Option<Uuid>,
         name: &str,
         display_name: &str,
         permissions: &[String],
@@ -58,6 +59,7 @@ impl RoleManager {
         }
         let tx = self.db.begin().await?;
         let role = role::ActiveModel {
+            id: Set(Uuid::new_v4()),
             tenant_id: Set(tenant_id),
             name: Set(name.to_string()),
             display_name: Set(display_name.to_string()),
@@ -69,6 +71,7 @@ impl RoleManager {
         .await?;
         for permission in permissions {
             permission_grant::ActiveModel {
+                id: Set(Uuid::new_v4()),
                 permission: Set(permission.clone()),
                 role_id: Set(Some(role.id)),
                 user_id: Set(None),
@@ -84,11 +87,12 @@ impl RoleManager {
 
     /// Find or create the static `Admin` role for a tenant. Called at
     /// company registration so the first user has somewhere to sit.
-    pub async fn ensure_admin_role(&self, tenant_id: Option<i32>) -> Result<role::Model> {
+    pub async fn ensure_admin_role(&self, tenant_id: Option<Uuid>) -> Result<role::Model> {
         if let Some(existing) = self.find_by_name(tenant_id, ADMIN_ROLE).await? {
             return Ok(existing);
         }
         Ok(role::ActiveModel {
+            id: Set(Uuid::new_v4()),
             tenant_id: Set(tenant_id),
             name: Set(ADMIN_ROLE.to_string()),
             display_name: Set("Administrator".to_string()),
@@ -100,7 +104,7 @@ impl RoleManager {
         .await?)
     }
 
-    pub async fn find_by_id(&self, id: i32) -> Result<role::Model> {
+    pub async fn find_by_id(&self, id: Uuid) -> Result<role::Model> {
         role::Entity::find_by_id(id)
             .one(&self.db)
             .await?
@@ -109,7 +113,7 @@ impl RoleManager {
 
     pub async fn find_by_name(
         &self,
-        tenant_id: Option<i32>,
+        tenant_id: Option<Uuid>,
         name: &str,
     ) -> Result<Option<role::Model>> {
         Ok(role::Entity::find()
@@ -119,7 +123,7 @@ impl RoleManager {
             .await?)
     }
 
-    pub async fn find_all(&self, tenant_id: Option<i32>) -> Result<Vec<role::Model>> {
+    pub async fn find_all(&self, tenant_id: Option<Uuid>) -> Result<Vec<role::Model>> {
         Ok(role::Entity::find()
             .filter(tenant_filter(tenant_id))
             .order_by_asc(role::Column::Name)
@@ -127,7 +131,7 @@ impl RoleManager {
             .await?)
     }
 
-    pub async fn update_role(&self, id: i32, display_name: &str) -> Result<role::Model> {
+    pub async fn update_role(&self, id: Uuid, display_name: &str) -> Result<role::Model> {
         let display_name = display_name.trim();
         if display_name.is_empty() || display_name.len() > 128 {
             return Err(Error::Validation(
@@ -142,7 +146,7 @@ impl RoleManager {
 
     /// Delete a role together with its assignments and grants. Static
     /// roles are framework-managed and cannot be deleted.
-    pub async fn delete_role(&self, id: i32) -> Result<()> {
+    pub async fn delete_role(&self, id: Uuid) -> Result<()> {
         let role = self.find_by_id(id).await?;
         if role.is_static {
             return Err(Error::Validation(format!(
@@ -164,7 +168,7 @@ impl RoleManager {
         Ok(())
     }
 
-    pub async fn assign_role(&self, user_id: i32, role_id: i32) -> Result<()> {
+    pub async fn assign_role(&self, user_id: Uuid, role_id: Uuid) -> Result<()> {
         self.find_by_id(role_id).await?;
         let already = user_role::Entity::find_by_id((user_id, role_id))
             .one(&self.db)
@@ -180,15 +184,15 @@ impl RoleManager {
         Ok(())
     }
 
-    pub async fn unassign_role(&self, user_id: i32, role_id: i32) -> Result<()> {
+    pub async fn unassign_role(&self, user_id: Uuid, role_id: Uuid) -> Result<()> {
         user_role::Entity::delete_by_id((user_id, role_id))
             .exec(&self.db)
             .await?;
         Ok(())
     }
 
-    pub async fn roles_of(&self, user_id: i32) -> Result<Vec<role::Model>> {
-        let role_ids: Vec<i32> = user_role::Entity::find()
+    pub async fn roles_of(&self, user_id: Uuid) -> Result<Vec<role::Model>> {
+        let role_ids: Vec<Uuid> = user_role::Entity::find()
             .filter(user_role::Column::UserId.eq(user_id))
             .all(&self.db)
             .await?
@@ -207,7 +211,7 @@ impl RoleManager {
 
     /// Replace a role's grants with exactly the given permission names.
     /// Static roles implicitly hold everything, so editing them is refused.
-    pub async fn set_role_permissions(&self, role_id: i32, permissions: &[String]) -> Result<()> {
+    pub async fn set_role_permissions(&self, role_id: Uuid, permissions: &[String]) -> Result<()> {
         let role = self.find_by_id(role_id).await?;
         if role.is_static {
             return Err(Error::Validation(format!(
@@ -223,6 +227,7 @@ impl RoleManager {
             .await?;
         for name in permissions {
             permission_grant::ActiveModel {
+                id: Set(Uuid::new_v4()),
                 permission: Set(name.clone()),
                 role_id: Set(Some(role_id)),
                 user_id: Set(None),
@@ -236,7 +241,7 @@ impl RoleManager {
         Ok(())
     }
 
-    pub async fn role_permissions(&self, role_id: i32) -> Result<Vec<String>> {
+    pub async fn role_permissions(&self, role_id: Uuid) -> Result<Vec<String>> {
         let mut names: Vec<String> = permission_grant::Entity::find()
             .filter(permission_grant::Column::RoleId.eq(role_id))
             .filter(permission_grant::Column::IsGranted.eq(true))
@@ -254,7 +259,7 @@ impl RoleManager {
     /// permission not listed falls back to role resolution.
     pub async fn set_user_permissions(
         &self,
-        user_id: i32,
+        user_id: Uuid,
         granted: &[String],
         denied: &[String],
     ) -> Result<()> {
@@ -273,6 +278,7 @@ impl RoleManager {
         for (names, is_granted) in [(granted, true), (denied, false)] {
             for name in names {
                 permission_grant::ActiveModel {
+                    id: Set(Uuid::new_v4()),
                     permission: Set(name.clone()),
                     role_id: Set(None),
                     user_id: Set(Some(user_id)),
@@ -287,7 +293,7 @@ impl RoleManager {
         Ok(())
     }
 
-    pub async fn user_overrides(&self, user_id: i32) -> Result<Vec<permission_grant::Model>> {
+    pub async fn user_overrides(&self, user_id: Uuid) -> Result<Vec<permission_grant::Model>> {
         Ok(permission_grant::Entity::find()
             .filter(permission_grant::Column::UserId.eq(user_id))
             .all(&self.db)
@@ -296,7 +302,7 @@ impl RoleManager {
 
     /// The resolution rule: user override first (deny wins), then static
     /// role membership (grants all), then the user's roles' grants.
-    pub async fn is_granted(&self, user_id: i32, permission: &str) -> Result<bool> {
+    pub async fn is_granted(&self, user_id: Uuid, permission: &str) -> Result<bool> {
         let user_row = permission_grant::Entity::find()
             .filter(permission_grant::Column::UserId.eq(user_id))
             .filter(permission_grant::Column::Permission.eq(permission))
@@ -310,7 +316,7 @@ impl RoleManager {
         if roles.iter().any(|r| r.is_static) {
             return Ok(true);
         }
-        let role_ids: Vec<i32> = roles.iter().map(|r| r.id).collect();
+        let role_ids: Vec<Uuid> = roles.iter().map(|r| r.id).collect();
         if role_ids.is_empty() {
             return Ok(false);
         }
@@ -325,12 +331,12 @@ impl RoleManager {
 
     /// Every permission the user effectively holds, for admin UIs and
     /// the profile endpoint.
-    pub async fn granted_permissions(&self, user_id: i32) -> Result<HashSet<String>> {
+    pub async fn granted_permissions(&self, user_id: Uuid) -> Result<HashSet<String>> {
         let roles = self.roles_of(user_id).await?;
         let mut effective: HashSet<String> = if roles.iter().any(|r| r.is_static) {
             self.registry.all_names().map(String::from).collect()
         } else {
-            let role_ids: Vec<i32> = roles.iter().map(|r| r.id).collect();
+            let role_ids: Vec<Uuid> = roles.iter().map(|r| r.id).collect();
             if role_ids.is_empty() {
                 HashSet::new()
             } else {
@@ -364,7 +370,7 @@ impl RoleManager {
     }
 }
 
-fn tenant_filter(tenant_id: Option<i32>) -> sea_orm::sea_query::SimpleExpr {
+fn tenant_filter(tenant_id: Option<Uuid>) -> sea_orm::sea_query::SimpleExpr {
     match tenant_id {
         Some(id) => role::Column::TenantId.eq(id),
         None => role::Column::TenantId.is_null(),

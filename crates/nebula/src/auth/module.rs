@@ -57,6 +57,7 @@ use axum::{Extension, Json, Router};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 use utoipa::ToSchema;
 
 pub struct AuthModule;
@@ -207,7 +208,7 @@ pub struct RegisterRequest {
 
 #[derive(Serialize, ToSchema)]
 pub struct RegisterResponse {
-    pub tenant_id: Option<i32>,
+    pub tenant_id: Option<Uuid>,
     pub user: Profile,
 }
 
@@ -291,8 +292,8 @@ async fn register(
 async fn seed_admin(
     db: &DatabaseConnection,
     registry: &Arc<Registry>,
-    tenant_id: Option<i32>,
-    user_id: i32,
+    tenant_id: Option<Uuid>,
+    user_id: Uuid,
 ) -> Result<()> {
     let roles = RoleManager::new(db.clone(), registry.clone());
     let admin_role = roles.ensure_admin_role(tenant_id).await?;
@@ -903,7 +904,7 @@ pub struct SetAdminRequest {
 /// permission) for anyone later. Admins cannot demote themselves, so a
 /// tenant can never lose its last admin by accident.
 #[utoipa::path(put, path = "/auth/users/{id}/admin", tag = "auth",
-    params(("id" = i32, Path, description = "User id")),
+    params(("id" = Uuid, Path, description = "User id")),
     request_body = SetAdminRequest,
     responses((status = 200, body = Profile)))]
 async fn set_user_admin(
@@ -911,7 +912,7 @@ async fn set_user_admin(
     authz: Authz,
     audit: Audit,
     db: Option<Extension<DatabaseConnection>>,
-    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    axum::extract::Path(user_id): axum::extract::Path<Uuid>,
     Json(req): Json<SetAdminRequest>,
 ) -> Result<Json<Profile>> {
     authz.require(permission::names::USERS_PERMISSIONS).await?;
@@ -947,12 +948,12 @@ async fn set_user_admin(
 
 #[derive(Deserialize, ToSchema)]
 pub struct SetUserRolesRequest {
-    pub role_ids: Vec<i32>,
+    pub role_ids: Vec<Uuid>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct RoleResponse {
-    pub id: i32,
+    pub id: Uuid,
     pub name: String,
     pub display_name: String,
     pub is_static: bool,
@@ -1023,7 +1024,7 @@ async fn role_response(roles: &RoleManager, role: super::role::Model) -> Result<
 
 /// A role in the caller's tenant, or 404 — one tenant must never see or
 /// touch another tenant's roles.
-async fn tenant_role(authz: &Authz, role_id: i32) -> Result<super::role::Model> {
+async fn tenant_role(authz: &Authz, role_id: Uuid) -> Result<super::role::Model> {
     let role = authz.roles().find_by_id(role_id).await?;
     if role.tenant_id != authz.user.tenant_id {
         return Err(Error::NotFound("role".into()));
@@ -1066,13 +1067,13 @@ async fn create_role(
 }
 
 #[utoipa::path(put, path = "/auth/roles/{id}", tag = "auth",
-    params(("id" = i32, Path, description = "Role id")),
+    params(("id" = Uuid, Path, description = "Role id")),
     request_body = UpdateRoleRequest,
     responses((status = 200, body = RoleResponse)))]
 async fn update_role(
     authz: Authz,
     audit: Audit,
-    axum::extract::Path(role_id): axum::extract::Path<i32>,
+    axum::extract::Path(role_id): axum::extract::Path<Uuid>,
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>> {
     authz.require(permission::names::ROLES_EDIT).await?;
@@ -1093,12 +1094,12 @@ async fn update_role(
 }
 
 #[utoipa::path(delete, path = "/auth/roles/{id}", tag = "auth",
-    params(("id" = i32, Path, description = "Role id")),
+    params(("id" = Uuid, Path, description = "Role id")),
     responses((status = 200, body = StatusResponse)))]
 async fn delete_role(
     authz: Authz,
     audit: Audit,
-    axum::extract::Path(role_id): axum::extract::Path<i32>,
+    axum::extract::Path(role_id): axum::extract::Path<Uuid>,
 ) -> Result<Json<StatusResponse>> {
     authz.require(permission::names::ROLES_DELETE).await?;
     let role = tenant_role(&authz, role_id).await?;
@@ -1113,7 +1114,7 @@ async fn delete_role(
 /// Replace a user's role set. Changing your own roles is refused — an
 /// admin locking themselves out is never one call away.
 #[utoipa::path(put, path = "/auth/users/{id}/roles", tag = "auth",
-    params(("id" = i32, Path, description = "User id")),
+    params(("id" = Uuid, Path, description = "User id")),
     request_body = SetUserRolesRequest,
     responses((status = 200, body = Vec<RoleResponse>)))]
 async fn set_user_roles(
@@ -1121,7 +1122,7 @@ async fn set_user_roles(
     authz: Authz,
     audit: Audit,
     db: Option<Extension<DatabaseConnection>>,
-    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    axum::extract::Path(user_id): axum::extract::Path<Uuid>,
     Json(req): Json<SetUserRolesRequest>,
 ) -> Result<Json<Vec<RoleResponse>>> {
     authz.require(permission::names::USERS_PERMISSIONS).await?;
@@ -1162,13 +1163,13 @@ async fn set_user_roles(
 }
 
 #[utoipa::path(get, path = "/auth/users/{id}/permissions", tag = "auth",
-    params(("id" = i32, Path, description = "User id")),
+    params(("id" = Uuid, Path, description = "User id")),
     responses((status = 200, body = UserPermissionsResponse)))]
 async fn user_permissions(
     State(state): State<AuthState>,
     authz: Authz,
     db: Option<Extension<DatabaseConnection>>,
-    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    axum::extract::Path(user_id): axum::extract::Path<Uuid>,
 ) -> Result<Json<UserPermissionsResponse>> {
     authz.require(permission::names::USERS_PERMISSIONS).await?;
     let target = tenant_user(&state, &authz, db, user_id).await?;
@@ -1177,7 +1178,7 @@ async fn user_permissions(
 
 /// Replace a user's per-user overrides. Like roles, never on yourself.
 #[utoipa::path(put, path = "/auth/users/{id}/permissions", tag = "auth",
-    params(("id" = i32, Path, description = "User id")),
+    params(("id" = Uuid, Path, description = "User id")),
     request_body = SetUserPermissionsRequest,
     responses((status = 200, body = UserPermissionsResponse)))]
 async fn set_user_permissions(
@@ -1185,7 +1186,7 @@ async fn set_user_permissions(
     authz: Authz,
     audit: Audit,
     db: Option<Extension<DatabaseConnection>>,
-    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    axum::extract::Path(user_id): axum::extract::Path<Uuid>,
     Json(req): Json<SetUserPermissionsRequest>,
 ) -> Result<Json<UserPermissionsResponse>> {
     authz.require(permission::names::USERS_PERMISSIONS).await?;
@@ -1218,7 +1219,7 @@ async fn tenant_user(
     state: &AuthState,
     authz: &Authz,
     db: Option<Extension<DatabaseConnection>>,
-    user_id: i32,
+    user_id: Uuid,
 ) -> Result<user::Model> {
     state
         .users(db.map(|Extension(d)| d))
@@ -1228,7 +1229,7 @@ async fn tenant_user(
         .ok_or_else(|| Error::NotFound(format!("user {user_id}")))
 }
 
-async fn user_permissions_response(authz: &Authz, user_id: i32) -> Result<UserPermissionsResponse> {
+async fn user_permissions_response(authz: &Authz, user_id: Uuid) -> Result<UserPermissionsResponse> {
     let mut roles = Vec::new();
     for role in authz.roles().roles_of(user_id).await? {
         roles.push(role_response(authz.roles(), role).await?);

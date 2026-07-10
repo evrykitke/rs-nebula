@@ -127,7 +127,7 @@ async fn authentication_end_to_end() {
     assert_eq!(status, StatusCode::OK, "register failed: {body}");
     assert_eq!(body["user"]["is_tenant_admin"], true);
     assert_eq!(body["user"]["two_factor_enabled"], false);
-    let tenant_id = body["tenant_id"].as_i64().unwrap() as i32;
+    let tenant_id = uuid::Uuid::parse_str(body["tenant_id"].as_str().unwrap()).unwrap();
 
     // Duplicate company name is a conflict.
     let (status, _) = post_json(

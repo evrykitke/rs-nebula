@@ -16,10 +16,10 @@ use sea_orm::{DatabaseConnection, QuerySelect, Set};
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "user_directory")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
-    pub tenant_id: i32,
-    pub user_id: i32,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
     pub normalized_user_name: String,
     pub normalized_email: String,
     pub created_at: DateTimeUtc,
@@ -40,8 +40,9 @@ impl Directory {
         Self { main }
     }
 
-    pub async fn add(&self, tenant_id: i32, user: &user::Model) -> Result<()> {
+    pub async fn add(&self, tenant_id: Uuid, user: &user::Model) -> Result<()> {
         ActiveModel {
+            id: Set(Uuid::new_v4()),
             tenant_id: Set(tenant_id),
             user_id: Set(user.id),
             normalized_user_name: Set(user.normalized_user_name.clone()),
@@ -55,7 +56,7 @@ impl Directory {
         .map_err(Error::from)
     }
 
-    pub async fn remove(&self, tenant_id: i32, user_id: i32) -> Result<()> {
+    pub async fn remove(&self, tenant_id: Uuid, user_id: Uuid) -> Result<()> {
         Entity::delete_many()
             .filter(Column::TenantId.eq(tenant_id))
             .filter(Column::UserId.eq(user_id))
@@ -67,7 +68,7 @@ impl Directory {
 
     /// Tenants that have a user whose username or email matches the
     /// login — the candidates credential-based sign-in verifies against.
-    pub async fn tenants_matching(&self, login: &str) -> Result<Vec<i32>> {
+    pub async fn tenants_matching(&self, login: &str) -> Result<Vec<Uuid>> {
         let needle = normalize(login);
         Entity::find()
             .select_only()
@@ -78,7 +79,7 @@ impl Directory {
                     .or(Column::NormalizedEmail.eq(needle)),
             )
             .distinct()
-            .into_tuple::<i32>()
+            .into_tuple::<Uuid>()
             .all(&self.main)
             .await
             .map_err(Error::from)

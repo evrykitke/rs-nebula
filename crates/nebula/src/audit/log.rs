@@ -11,10 +11,12 @@ use serde::Serialize;
 #[sea_orm(table_name = "audit_logs")]
 #[schema(as = AuditLog)]
 pub struct Model {
+    /// Row id: the trail is an append-only sequence, so this stays a
+    /// bigserial — audit rows are log lines, not domain entities.
     #[sea_orm(primary_key)]
     pub id: i64,
-    pub tenant_id: Option<i32>,
-    pub user_id: Option<i32>,
+    pub tenant_id: Option<Uuid>,
+    pub user_id: Option<Uuid>,
     /// The `x-request-id` of the request, linking audit rows to traces.
     pub request_id: Option<String>,
     pub method: String,

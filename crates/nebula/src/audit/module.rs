@@ -79,7 +79,7 @@ pub struct LogQuery {
     pub offset: Option<u64>,
     pub action: Option<String>,
     pub entity_type: Option<String>,
-    pub user_id: Option<i32>,
+    pub user_id: Option<uuid::Uuid>,
 }
 
 #[utoipa::path(get, path = "/audit/logs", tag = "audit",
@@ -151,7 +151,7 @@ async fn get_log_diff(
 
 async fn tenant_log(
     db: &DatabaseConnection,
-    tenant_id: Option<i32>,
+    tenant_id: Option<uuid::Uuid>,
     id: i64,
 ) -> Result<log::Model> {
     log::Entity::find_by_id(id)
@@ -161,7 +161,7 @@ async fn tenant_log(
         .ok_or_else(|| Error::NotFound("audit log entry".into()))
 }
 
-fn tenant_filter(tenant_id: Option<i32>) -> sea_orm::sea_query::SimpleExpr {
+fn tenant_filter(tenant_id: Option<uuid::Uuid>) -> sea_orm::sea_query::SimpleExpr {
     match tenant_id {
         Some(id) => log::Column::TenantId.eq(id),
         None => log::Column::TenantId.is_null(),
@@ -185,7 +185,7 @@ pub struct RetentionResponse {
 }
 
 impl AuditState {
-    async fn tenant_retention(&self, authz: &Authz) -> Result<(Arc<TenantManager>, i32)> {
+    async fn tenant_retention(&self, authz: &Authz) -> Result<(Arc<TenantManager>, uuid::Uuid)> {
         let manager = self.tenants.clone().ok_or_else(|| {
             Error::Validation("multitenancy is not enabled on this deployment".into())
         })?;

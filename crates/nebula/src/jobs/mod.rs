@@ -75,7 +75,7 @@ impl Jobs {
 /// nothing of their own to migrate — the main database migrates at boot).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrateTenants {
-    pub tenant_id: Option<i32>,
+    pub tenant_id: Option<uuid::Uuid>,
 }
 
 /// Worker state for [`run_tenant_migrations`].

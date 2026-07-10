@@ -17,9 +17,10 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
 };
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 pub struct NewUser {
-    pub tenant_id: Option<i32>,
+    pub tenant_id: Option<Uuid>,
     pub user_name: String,
     pub email: String,
     pub password: String,
@@ -102,6 +103,7 @@ impl UserManager {
 
         let now = Utc::now();
         let user = user::ActiveModel {
+            id: Set(Uuid::new_v4()),
             tenant_id: Set(new.tenant_id),
             user_name: Set(new.user_name),
             normalized_user_name: Set(normalized_user_name),
@@ -137,7 +139,7 @@ impl UserManager {
         Ok(user)
     }
 
-    pub async fn find_by_id(&self, id: i32) -> Result<Option<user::Model>> {
+    pub async fn find_by_id(&self, id: Uuid) -> Result<Option<user::Model>> {
         Ok(user::Entity::find_by_id(id)
             .one(&self.db)
             .await?
@@ -147,7 +149,7 @@ impl UserManager {
     /// Look up by username or email, scoped to the tenant.
     pub async fn find_by_login(
         &self,
-        tenant_id: Option<i32>,
+        tenant_id: Option<Uuid>,
         login: &str,
     ) -> Result<Option<user::Model>> {
         let needle = normalize(login);
@@ -167,7 +169,7 @@ impl UserManager {
     /// counter and records the login.
     pub async fn authenticate(
         &self,
-        tenant_id: Option<i32>,
+        tenant_id: Option<Uuid>,
         login: &str,
         pass: &str,
     ) -> Result<user::Model> {
@@ -361,7 +363,7 @@ impl UserManager {
 
     /// Everyone in a tenant, for the admin user list (soft-deleted
     /// excluded).
-    pub async fn find_all(&self, tenant_id: Option<i32>) -> Result<Vec<user::Model>> {
+    pub async fn find_all(&self, tenant_id: Option<Uuid>) -> Result<Vec<user::Model>> {
         user::Entity::find()
             .filter(tenant_filter(tenant_id))
             .filter(user::Column::DeletedAt.is_null())
@@ -382,11 +384,12 @@ impl UserManager {
 
     /// Issue a refresh token: 48 random bytes, returned raw exactly once,
     /// stored only as a SHA-256 hash.
-    pub async fn issue_refresh_token(&self, user_id: i32) -> Result<String> {
+    pub async fn issue_refresh_token(&self, user_id: Uuid) -> Result<String> {
         let mut bytes = [0u8; 48];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
         let raw = hex::encode(bytes);
         refresh_token::ActiveModel {
+            id: Set(Uuid::new_v4()),
             user_id: Set(user_id),
             token_hash: Set(hash_token(&raw)),
             expires_at: Set(
@@ -414,7 +417,7 @@ impl UserManager {
 
         if token.revoked_at.is_some() {
             tracing::warn!(
-                user_id = token.user_id,
+                user_id = %token.user_id,
                 "revoked refresh token reused; revoking all sessions"
             );
             self.revoke_all_refresh_tokens(token.user_id).await?;
@@ -456,7 +459,7 @@ impl UserManager {
         Ok(())
     }
 
-    pub async fn revoke_all_refresh_tokens(&self, user_id: i32) -> Result<()> {
+    pub async fn revoke_all_refresh_tokens(&self, user_id: Uuid) -> Result<()> {
         refresh_token::Entity::update_many()
             .col_expr(
                 refresh_token::Column::RevokedAt,
@@ -475,7 +478,7 @@ fn hash_token(raw: &str) -> String {
     hex::encode(Sha256::digest(raw.as_bytes()))
 }
 
-fn tenant_filter(tenant_id: Option<i32>) -> sea_orm::Condition {
+fn tenant_filter(tenant_id: Option<Uuid>) -> sea_orm::Condition {
     match tenant_id {
         Some(id) => sea_orm::Condition::all().add(user::Column::TenantId.eq(id)),
         None => sea_orm::Condition::all().add(user::Column::TenantId.is_null()),

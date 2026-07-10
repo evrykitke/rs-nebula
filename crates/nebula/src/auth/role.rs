@@ -8,9 +8,9 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, utoipa::ToSchema)]
 #[sea_orm(table_name = "roles")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
-    pub tenant_id: Option<i32>,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
     pub name: String,
     pub display_name: String,
     /// Static roles are framework-managed (e.g. `Admin`) and cannot be
@@ -32,9 +32,9 @@ pub mod user_role {
     #[sea_orm(table_name = "user_roles")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
-        pub user_id: i32,
+        pub user_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
-        pub role_id: i32,
+        pub role_id: Uuid,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -49,12 +49,12 @@ pub mod permission_grant {
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
     #[sea_orm(table_name = "permission_grants")]
     pub struct Model {
-        #[sea_orm(primary_key)]
-        pub id: i32,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
         pub permission: String,
         /// Exactly one of `role_id` / `user_id` is set.
-        pub role_id: Option<i32>,
-        pub user_id: Option<i32>,
+        pub role_id: Option<Uuid>,
+        pub user_id: Option<Uuid>,
         /// `false` only makes sense on user rows: an explicit deny that
         /// overrides whatever the user's roles grant.
         pub is_granted: bool,

@@ -20,12 +20,13 @@ use crate::error::{Error, Result};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// The resolved tenant of the current request, inserted into request
 /// extensions by the resolution middleware.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct TenantRef {
-    pub id: i32,
+    pub id: Uuid,
     pub name: String,
 }
 
@@ -43,7 +44,7 @@ pub struct TenantManager {
     main: DatabaseConnection,
     db_config: DatabaseConfig,
     config: MultitenancyConfig,
-    pools: RwLock<HashMap<i32, DatabaseConnection>>,
+    pools: RwLock<HashMap<Uuid, DatabaseConnection>>,
 }
 
 impl TenantManager {
@@ -76,7 +77,7 @@ impl TenantManager {
             .map_err(Error::from)
     }
 
-    pub async fn find_by_id(&self, id: i32) -> Result<Option<tenant::Model>> {
+    pub async fn find_by_id(&self, id: Uuid) -> Result<Option<tenant::Model>> {
         tenant::Entity::find_by_id(id)
             .one(&self.main)
             .await
@@ -85,7 +86,7 @@ impl TenantManager {
 
     /// Company-wide two-factor policy: when on, every user of the tenant
     /// must set up an authenticator app before they can sign in.
-    pub async fn set_require_two_factor(&self, id: i32, required: bool) -> Result<tenant::Model> {
+    pub async fn set_require_two_factor(&self, id: Uuid, required: bool) -> Result<tenant::Model> {
         let tenant = self
             .find_by_id(id)
             .await?
@@ -98,7 +99,7 @@ impl TenantManager {
     /// Tenant override of the audit retention window; `None` reverts to
     /// the system default. The cap is enforced by the caller, which
     /// knows the configured maximum.
-    pub async fn set_audit_retention(&self, id: i32, days: Option<i32>) -> Result<tenant::Model> {
+    pub async fn set_audit_retention(&self, id: Uuid, days: Option<i32>) -> Result<tenant::Model> {
         let tenant = self
             .find_by_id(id)
             .await?
@@ -124,6 +125,7 @@ impl TenantManager {
             )));
         }
         tenant::ActiveModel {
+            id: Set(Uuid::new_v4()),
             name: Set(new.name),
             display_name: Set(new.display_name),
             connection_string: Set(new.connection_string),

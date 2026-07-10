@@ -29,8 +29,8 @@ pub enum TokenPurpose {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     /// User id.
-    pub sub: i32,
-    pub tenant_id: Option<i32>,
+    pub sub: uuid::Uuid,
+    pub tenant_id: Option<uuid::Uuid>,
     pub purpose: TokenPurpose,
     /// Security stamp at issue time.
     pub stamp: String,

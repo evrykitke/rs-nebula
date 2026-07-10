@@ -116,7 +116,7 @@ async fn authorization_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "register failed: {body}");
-    let boss_id = body["user"]["id"].as_i64().unwrap();
+    let boss_id = body["user"]["id"].as_str().unwrap().to_string();
     let boss = login(&router, "boss@globex.test", "hunter2hunter2").await;
 
     // The admin effectively holds every defined permission.
@@ -146,7 +146,7 @@ async fn authorization_end_to_end() {
         .find(|r| r["name"] == "Admin")
         .expect("Admin role must be seeded");
     assert_eq!(admin_role["is_static"], true);
-    let admin_role_id = admin_role["id"].as_i64().unwrap();
+    let admin_role_id = admin_role["id"].as_str().unwrap().to_string();
     let (status, _) = send(
         &router,
         "DELETE",
@@ -173,7 +173,7 @@ async fn authorization_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "create user failed: {body}");
-    let worker_id = body["id"].as_i64().unwrap();
+    let worker_id = body["id"].as_str().unwrap().to_string();
     let worker = login(&router, "worker", "workerpass1").await;
 
     let (status, body) = send(&router, "GET", "/auth/me/permissions", Some(&worker), None).await;
@@ -212,7 +212,7 @@ async fn authorization_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "create role failed: {body}");
-    let support_id = body["id"].as_i64().unwrap();
+    let support_id = body["id"].as_str().unwrap().to_string();
 
     let (status, body) = send(
         &router,

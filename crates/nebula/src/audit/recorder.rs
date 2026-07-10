@@ -33,8 +33,8 @@ use std::net::SocketAddr;
 /// The request context stamped onto every audit row.
 #[derive(Debug, Clone, Default)]
 pub struct RequestInfo {
-    pub tenant_id: Option<i32>,
-    pub user_id: Option<i32>,
+    pub tenant_id: Option<uuid::Uuid>,
+    pub user_id: Option<uuid::Uuid>,
     pub request_id: Option<String>,
     pub method: String,
     pub path: String,
@@ -104,14 +104,14 @@ impl Recorder {
 
     /// Stamp rows with a tenant the request context does not carry —
     /// e.g. registration, where the tenant is created mid-request.
-    pub fn with_tenant(mut self, tenant_id: Option<i32>) -> Self {
+    pub fn with_tenant(mut self, tenant_id: Option<uuid::Uuid>) -> Self {
         self.info.tenant_id = tenant_id;
         self
     }
 
     /// Stamp rows with a user the request context does not carry —
     /// e.g. login, where the user is only known after the password check.
-    pub fn with_user(mut self, user_id: Option<i32>) -> Self {
+    pub fn with_user(mut self, user_id: Option<uuid::Uuid>) -> Self {
         self.info.user_id = user_id;
         self
     }
