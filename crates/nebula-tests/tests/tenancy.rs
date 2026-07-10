@@ -85,7 +85,7 @@ async fn multitenancy_end_to_end() {
     .expect("must connect to main");
     admin
         .execute_unprepared(
-            "DROP TABLE IF EXISTS user_directory; DROP TABLE IF EXISTS audit_logs; DROP TABLE IF EXISTS permission_grants; \
+            "DROP TABLE IF EXISTS user_directory; DROP TABLE IF EXISTS currencies; DROP TABLE IF EXISTS audit_logs; DROP TABLE IF EXISTS permission_grants; \
              DROP TABLE IF EXISTS user_roles; DROP TABLE IF EXISTS roles; \
              DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS tenants; \
              DROP TABLE IF EXISTS nebula_migrations;",
@@ -138,6 +138,7 @@ async fn multitenancy_end_to_end() {
             name: "acme".into(),
             display_name: "Acme Ltd".into(),
             connection_string: None,
+            default_currency: None,
         })
         .await
         .expect("shared tenant must be created");
@@ -146,6 +147,7 @@ async fn multitenancy_end_to_end() {
             name: "globex".into(),
             display_name: "Globex Corp".into(),
             connection_string: Some(t2_url),
+            default_currency: None,
         })
         .await
         .expect("own-db tenant must be created");
@@ -155,6 +157,7 @@ async fn multitenancy_end_to_end() {
             name: "acme".into(),
             display_name: "Duplicate".into(),
             connection_string: None,
+            default_currency: None,
         })
         .await;
     assert!(matches!(dup, Err(nebula::Error::Conflict(_))));
@@ -164,6 +167,7 @@ async fn multitenancy_end_to_end() {
                 name: "Bad Name!".into(),
                 display_name: "x".into(),
                 connection_string: None,
+                default_currency: None,
             })
             .await
             .is_err()

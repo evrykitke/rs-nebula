@@ -65,6 +65,7 @@ pub struct AuthModule;
 #[derive(Clone)]
 struct AuthState {
     config: AuthConfig,
+    files: crate::config::FilesConfig,
     main_db: DatabaseConnection,
     tenants: Option<Arc<TenantManager>>,
 }
@@ -83,6 +84,7 @@ impl Module for AuthModule {
         );
         let state = AuthState {
             config: config.clone(),
+            files: ctx.config().files.clone(),
             main_db: ctx.require_db(),
             tenants: ctx.tenants(),
         };
@@ -105,6 +107,11 @@ impl Module for AuthModule {
                     "/auth/tenant/two-factor",
                     post(tenant_two_factor).get(tenant_two_factor_get),
                 )
+                .route(
+                    "/auth/tenant/profile",
+                    get(tenant_profile_get).put(tenant_profile_update),
+                )
+                .route("/auth/tenant/logo", post(tenant_logo_upload))
                 .route("/auth/tenant/migrate", post(tenant_migrate))
                 .route("/auth/token/refresh", post(refresh))
                 .route("/auth/logout", post(logout))
@@ -153,6 +160,9 @@ struct AccountApiDoc;
 #[openapi(paths(
     tenant_two_factor,
     tenant_two_factor_get,
+    tenant_profile_get,
+    tenant_profile_update,
+    tenant_logo_upload,
     tenant_migrate,
     create_user,
     list_users,
@@ -192,6 +202,35 @@ impl AuthState {
             .await?
             .is_some_and(|t| t.require_two_factor))
     }
+
+    /// The caller's own tenant, for the tenant-scoped settings
+    /// endpoints: requires multitenancy, a tenant context, and that the
+    /// authenticated user belongs to it.
+    fn tenant_context(
+        &self,
+        authz: &Authz,
+        tenant: Option<Extension<TenantRef>>,
+    ) -> Result<(Arc<TenantManager>, TenantRef)> {
+        let manager = self.tenants.clone().ok_or_else(|| {
+            Error::Validation("multitenancy is not enabled on this deployment".into())
+        })?;
+        let Some(Extension(tenant)) = tenant else {
+            return Err(Error::Validation("a tenant context is required".into()));
+        };
+        if authz.user.tenant_id != Some(tenant.id) {
+            return Err(Error::Forbidden);
+        }
+        Ok((manager, tenant))
+    }
+
+    /// Validate a currency code against the currency table.
+    async fn known_currency(&self, code: &str) -> Result<()> {
+        crate::money::currency::Store::new(self.main_db.clone())
+            .find_by_code(code)
+            .await?
+            .map(|_| ())
+            .ok_or_else(|| Error::Validation(format!("unknown currency {code:?}")))
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -200,6 +239,9 @@ pub struct RegisterRequest {
     /// Ignored in single-tenant mode.
     pub tenant_name: Option<String>,
     pub company_display_name: Option<String>,
+    /// The company's currency, a code from `GET /currencies`.
+    /// Ignored in single-tenant mode.
+    pub currency: Option<String>,
     pub email: String,
     pub password: String,
     pub first_name: String,
@@ -242,6 +284,9 @@ async fn register(
                 .tenant_name
                 .clone()
                 .ok_or_else(|| Error::Validation("tenant_name is required".into()))?;
+            if let Some(code) = &req.currency {
+                state.known_currency(code).await?;
+            }
             let tenant = manager
                 .create(NewTenant {
                     display_name: req
@@ -250,6 +295,7 @@ async fn register(
                         .unwrap_or_else(|| name.clone()),
                     name,
                     connection_string: None,
+                    default_currency: req.currency.clone(),
                 })
                 .await?;
             let db = manager.connection_for(&tenant).await?;
@@ -267,6 +313,7 @@ async fn register(
                     &serde_json::json!({
                         "name": tenant.name,
                         "display_name": tenant.display_name,
+                        "default_currency": tenant.default_currency,
                     }),
                 )
                 .await;
@@ -717,6 +764,201 @@ async fn tenant_two_factor(
         tenant: tenant.name,
         require_two_factor: tenant.require_two_factor,
     }))
+}
+
+/// The tenant's company profile as shown to its users and edited in
+/// tenant settings.
+#[derive(Serialize, ToSchema)]
+pub struct CompanyProfileResponse {
+    pub tenant: String,
+    pub display_name: String,
+    /// A code from `GET /currencies`.
+    pub default_currency: Option<String>,
+    /// Tax registration PIN (e.g. a KRA PIN).
+    pub tax_pin: Option<String>,
+    pub vat_number: Option<String>,
+    /// Where the uploaded company logo is served from, when one exists.
+    pub logo_url: Option<String>,
+}
+
+fn company_profile(t: &crate::tenancy::tenant::Model) -> CompanyProfileResponse {
+    CompanyProfileResponse {
+        tenant: t.name.clone(),
+        display_name: t.display_name.clone(),
+        default_currency: t.default_currency.clone(),
+        tax_pin: t.tax_pin.clone(),
+        vat_number: t.vat_number.clone(),
+        logo_url: t.logo_path.as_ref().map(|p| format!("/public/{p}")),
+    }
+}
+
+/// Readable by any authenticated user of the tenant — the company name,
+/// logo and currency are what its own screens display.
+#[utoipa::path(get, path = "/auth/tenant/profile", tag = "auth",
+    responses((status = 200, body = CompanyProfileResponse)))]
+async fn tenant_profile_get(
+    State(state): State<AuthState>,
+    authz: Authz,
+    tenant: Option<Extension<TenantRef>>,
+) -> Result<Json<CompanyProfileResponse>> {
+    let (manager, tenant) = state.tenant_context(&authz, tenant)?;
+    let row = manager
+        .find_by_id(tenant.id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("tenant {}", tenant.id)))?;
+    Ok(Json(company_profile(&row)))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateCompanyProfileRequest {
+    pub display_name: String,
+    /// A code from `GET /currencies`; null clears the default.
+    pub default_currency: Option<String>,
+    pub tax_pin: Option<String>,
+    pub vat_number: Option<String>,
+}
+
+#[utoipa::path(put, path = "/auth/tenant/profile", tag = "auth",
+    request_body = UpdateCompanyProfileRequest,
+    responses((status = 200, body = CompanyProfileResponse)))]
+async fn tenant_profile_update(
+    State(state): State<AuthState>,
+    authz: Authz,
+    audit: Audit,
+    tenant: Option<Extension<TenantRef>>,
+    Json(req): Json<UpdateCompanyProfileRequest>,
+) -> Result<Json<CompanyProfileResponse>> {
+    let (manager, tenant) = state.tenant_context(&authz, tenant)?;
+    authz.require(permission::names::TENANT_SETTINGS).await?;
+    let display_name = req.display_name.trim().to_string();
+    if display_name.is_empty() {
+        return Err(Error::Validation("display_name must not be empty".into()));
+    }
+    if let Some(code) = &req.default_currency {
+        state.known_currency(code).await?;
+    }
+    let none_if_blank = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let before = manager
+        .find_by_id(tenant.id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("tenant {}", tenant.id)))?;
+    let updated = manager
+        .update_profile(
+            tenant.id,
+            crate::tenancy::CompanyProfile {
+                display_name,
+                default_currency: req.default_currency,
+                tax_pin: none_if_blank(req.tax_pin),
+                vat_number: none_if_blank(req.vat_number),
+            },
+        )
+        .await?;
+    audit
+        .0
+        .updated(
+            "tenant",
+            tenant.id,
+            &company_profile(&before),
+            &company_profile(&updated),
+        )
+        .await;
+    Ok(Json(company_profile(&updated)))
+}
+
+/// Multipart body of the logo upload.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct LogoUpload {
+    /// The image file: png, jpg, svg or webp, at most 1 MiB.
+    #[schema(value_type = String, format = Binary)]
+    pub file: String,
+}
+
+/// Stores the logo at `{files.root}/{tenant-id}/logo.{ext}`; it is then
+/// served from the `logo_url` in the profile response.
+#[utoipa::path(post, path = "/auth/tenant/logo", tag = "auth",
+    request_body(content = LogoUpload, content_type = "multipart/form-data"),
+    responses((status = 200, body = CompanyProfileResponse)))]
+async fn tenant_logo_upload(
+    State(state): State<AuthState>,
+    authz: Authz,
+    audit: Audit,
+    tenant: Option<Extension<TenantRef>>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<CompanyProfileResponse>> {
+    let (manager, tenant) = state.tenant_context(&authz, tenant)?;
+    authz.require(permission::names::TENANT_SETTINGS).await?;
+
+    const ALLOWED: [&str; 5] = ["png", "jpg", "jpeg", "svg", "webp"];
+    const MAX_BYTES: usize = 1024 * 1024;
+    let mut upload: Option<(String, axum::body::Bytes)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("invalid multipart body: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let ext = field
+            .file_name()
+            .and_then(|n| n.rsplit('.').next())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if !ALLOWED.contains(&ext.as_str()) {
+            return Err(Error::Validation(
+                "the logo must be a png, jpg, svg or webp file".into(),
+            ));
+        }
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| Error::Validation(format!("failed to read the upload: {e}")))?;
+        if data.is_empty() {
+            return Err(Error::Validation("the uploaded file is empty".into()));
+        }
+        if data.len() > MAX_BYTES {
+            return Err(Error::Validation("the logo must be at most 1 MiB".into()));
+        }
+        upload = Some((ext, data));
+        break;
+    }
+    let Some((ext, data)) = upload else {
+        return Err(Error::Validation(
+            "a multipart field named \"file\" is required".into(),
+        ));
+    };
+
+    let root = std::path::Path::new(&state.files.root);
+    let dir = root.join(tenant.id.to_string());
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| Error::internal(format!("could not create the upload directory: {e}")))?;
+    let before = manager
+        .find_by_id(tenant.id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("tenant {}", tenant.id)))?;
+    let relative = format!("{}/logo.{ext}", tenant.id);
+    tokio::fs::write(dir.join(format!("logo.{ext}")), &data)
+        .await
+        .map_err(|e| Error::internal(format!("could not store the logo: {e}")))?;
+    // A previous logo with a different extension would otherwise linger.
+    if let Some(old) = before.logo_path.as_deref()
+        && old != relative
+    {
+        let _ = tokio::fs::remove_file(root.join(old)).await;
+    }
+    let updated = manager.set_logo_path(tenant.id, Some(relative)).await?;
+    audit
+        .0
+        .updated(
+            "tenant",
+            tenant.id,
+            &serde_json::json!({ "logo_path": before.logo_path }),
+            &serde_json::json!({ "logo_path": updated.logo_path }),
+        )
+        .await;
+    Ok(Json(company_profile(&updated)))
 }
 
 /// Queue a background migration of the caller's tenant database — how a

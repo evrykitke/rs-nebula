@@ -1,8 +1,10 @@
 //! Money: an exact decimal amount bound to a currency.
 //!
-//! Currencies are not hardcoded — the application defines its currency
-//! table in configuration (`currencies:` in `{env}.yaml`), and the kernel
-//! builds a [`CurrencyRegistry`] from it at boot.
+//! Currencies are not hardcoded — they live in the `currencies` table
+//! ([`currency`]), pre-populated with the world's system currencies by a
+//! framework migration, extendable through [`CurrencyModule`]'s endpoints
+//! and, for app-specific units, the `currencies:` configuration section.
+//! The kernel builds a [`CurrencyRegistry`] from both at boot.
 //!
 //! The rules that prevent the classic ERP money bugs:
 //!
@@ -14,6 +16,11 @@
 //! - splitting an amount ([`Money::allocate`]) never loses or invents a
 //!   sub-unit: parts differ by at most one minor unit and always sum
 //!   back to the whole.
+
+pub mod currency;
+pub mod module;
+
+pub use module::CurrencyModule;
 
 use crate::config::CurrencyConfig;
 use crate::error::{Error, Result};
@@ -108,6 +115,13 @@ impl CurrencyRegistry {
             }
         }
         Ok(Self { by_code })
+    }
+
+    /// Insert or replace a currency — how the kernel folds the
+    /// `currencies` table into the registry. Config entries are applied
+    /// after database rows, so an application can re-declare a unit.
+    pub(crate) fn insert(&mut self, currency: Currency) {
+        self.by_code.insert(currency.code().to_string(), currency);
     }
 
     pub fn get(&self, code: &str) -> Result<Currency> {

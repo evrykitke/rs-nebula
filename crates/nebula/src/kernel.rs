@@ -120,7 +120,32 @@ impl Kernel {
             }
         }
 
-        let currencies = Arc::new(CurrencyRegistry::from_config(&self.config.currencies)?);
+        // The currency table (seeded by migrations) plus the app's
+        // configured units; config entries win so an application can
+        // re-declare a code. A missing table (auto_migrate off on a
+        // fresh database) degrades to config-only with a warning.
+        let mut registry = CurrencyRegistry::default();
+        if let Some(db) = &database {
+            use sea_orm::EntityTrait;
+            match crate::money::currency::Entity::find().all(db).await {
+                Ok(rows) => {
+                    for row in rows {
+                        match crate::money::Currency::new(&row.code, row.minor_units as u8) {
+                            Ok(currency) => registry.insert(currency),
+                            Err(e) => tracing::warn!(code = %row.code, error = %e,
+                                "skipping unusable currency row"),
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e,
+                    "could not load the currency table; using configured currencies only"),
+            }
+        }
+        for entry in &self.config.currencies {
+            registry.insert(crate::money::Currency::new(&entry.code, entry.minor_units)?);
+        }
+        let currencies = Arc::new(registry);
+        tracing::info!(count = currencies.len(), "currency registry built");
 
         let jobs = if self.config.jobs.enabled {
             let conn = apalis_redis::connect(self.config.redis.url.expose())

@@ -20,6 +20,8 @@ impl MigratorTrait for Migrator {
             Box::new(AddAuditLogMessage),
             Box::new(AddTenantAuditRetention),
             Box::new(CreateUserDirectory),
+            Box::new(CreateCurrencies),
+            Box::new(AddTenantCompanyProfile),
         ]
     }
 
@@ -93,6 +95,10 @@ enum Tenants {
     IsActive,
     RequireTwoFactor,
     AuditRetentionDays,
+    DefaultCurrency,
+    TaxPin,
+    VatNumber,
+    LogoPath,
     CreatedAt,
 }
 
@@ -792,6 +798,208 @@ enum UserDirectory {
     NormalizedUserName,
     NormalizedEmail,
     CreatedAt,
+}
+
+/// The currency table, pre-populated with the world's currencies as
+/// undeletable system rows. Deployments add their own units through the
+/// currency module's endpoints; tenants pick a default from the list.
+struct CreateCurrencies;
+
+impl MigrationName for CreateCurrencies {
+    fn name(&self) -> &str {
+        "m20260710_000009_create_currencies"
+    }
+}
+
+/// `(code, name, minor units)` — seeded as system currencies.
+const SYSTEM_CURRENCIES: &[(&str, &str, i16)] = &[
+    ("AED", "UAE Dirham", 2),
+    ("AUD", "Australian Dollar", 2),
+    ("BDT", "Bangladeshi Taka", 2),
+    ("BHD", "Bahraini Dinar", 3),
+    ("BIF", "Burundian Franc", 0),
+    ("BRL", "Brazilian Real", 2),
+    ("BWP", "Botswana Pula", 2),
+    ("CAD", "Canadian Dollar", 2),
+    ("CDF", "Congolese Franc", 2),
+    ("CHF", "Swiss Franc", 2),
+    ("CNY", "Chinese Yuan", 2),
+    ("DJF", "Djiboutian Franc", 0),
+    ("DKK", "Danish Krone", 2),
+    ("EGP", "Egyptian Pound", 2),
+    ("ERN", "Eritrean Nakfa", 2),
+    ("ETB", "Ethiopian Birr", 2),
+    ("EUR", "Euro", 2),
+    ("GBP", "British Pound", 2),
+    ("GHS", "Ghanaian Cedi", 2),
+    ("HKD", "Hong Kong Dollar", 2),
+    ("IDR", "Indonesian Rupiah", 2),
+    ("ILS", "Israeli New Shekel", 2),
+    ("INR", "Indian Rupee", 2),
+    ("JPY", "Japanese Yen", 0),
+    ("KES", "Kenyan Shilling", 2),
+    ("KRW", "South Korean Won", 0),
+    ("KWD", "Kuwaiti Dinar", 3),
+    ("LKR", "Sri Lankan Rupee", 2),
+    ("MAD", "Moroccan Dirham", 2),
+    ("MUR", "Mauritian Rupee", 2),
+    ("MWK", "Malawian Kwacha", 2),
+    ("MXN", "Mexican Peso", 2),
+    ("MYR", "Malaysian Ringgit", 2),
+    ("MZN", "Mozambican Metical", 2),
+    ("NGN", "Nigerian Naira", 2),
+    ("NOK", "Norwegian Krone", 2),
+    ("NZD", "New Zealand Dollar", 2),
+    ("OMR", "Omani Rial", 3),
+    ("PHP", "Philippine Peso", 2),
+    ("PKR", "Pakistani Rupee", 2),
+    ("PLN", "Polish Zloty", 2),
+    ("QAR", "Qatari Riyal", 2),
+    ("RUB", "Russian Ruble", 2),
+    ("RWF", "Rwandan Franc", 0),
+    ("SAR", "Saudi Riyal", 2),
+    ("SEK", "Swedish Krona", 2),
+    ("SGD", "Singapore Dollar", 2),
+    ("SOS", "Somali Shilling", 2),
+    ("SSP", "South Sudanese Pound", 2),
+    ("THB", "Thai Baht", 2),
+    ("TRY", "Turkish Lira", 2),
+    ("TZS", "Tanzanian Shilling", 2),
+    ("UGX", "Ugandan Shilling", 0),
+    ("USD", "US Dollar", 2),
+    ("VND", "Vietnamese Dong", 0),
+    ("XAF", "Central African CFA Franc", 0),
+    ("XOF", "West African CFA Franc", 0),
+    ("ZAR", "South African Rand", 2),
+    ("ZMW", "Zambian Kwacha", 2),
+];
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateCurrencies {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Currencies::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Currencies::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Currencies::Code)
+                            .string_len(8)
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Currencies::Name).string_len(64).not_null())
+                    .col(
+                        ColumnDef::new(Currencies::MinorUnits)
+                            .small_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Currencies::IsSystem)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Currencies::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        let values = SYSTEM_CURRENCIES
+            .iter()
+            .map(|(code, name, minor)| {
+                format!("(gen_random_uuid(), '{code}', '{name}', {minor}, TRUE)")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "INSERT INTO currencies (id, code, name, minor_units, is_system) \
+                 VALUES {values} ON CONFLICT (code) DO NOTHING"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(Currencies::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum Currencies {
+    Table,
+    Id,
+    Code,
+    Name,
+    MinorUnits,
+    IsSystem,
+    CreatedAt,
+}
+
+/// Company profile fields on the tenant: default currency, tax
+/// registration identifiers and the uploaded logo's storage path.
+struct AddTenantCompanyProfile;
+
+impl MigrationName for AddTenantCompanyProfile {
+    fn name(&self) -> &str {
+        "m20260710_000010_add_tenant_company_profile"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddTenantCompanyProfile {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::DefaultCurrency)
+                            .string_len(8)
+                            .null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::TaxPin).string_len(64).null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::VatNumber).string_len(64).null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::LogoPath).string_len(255).null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .drop_column(Tenants::DefaultCurrency)
+                    .drop_column(Tenants::TaxPin)
+                    .drop_column(Tenants::VatNumber)
+                    .drop_column(Tenants::LogoPath)
+                    .to_owned(),
+            )
+            .await
+    }
 }
 
 struct AddAuditLogMessage;

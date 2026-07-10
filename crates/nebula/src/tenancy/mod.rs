@@ -35,6 +35,17 @@ pub struct NewTenant {
     pub display_name: String,
     /// `None` shares the main database.
     pub connection_string: Option<String>,
+    /// Currency code the company operates in, validated by the caller
+    /// against the currency table.
+    pub default_currency: Option<String>,
+}
+
+/// Editable company-profile fields (see `PUT /auth/tenant/profile`).
+pub struct CompanyProfile {
+    pub display_name: String,
+    pub default_currency: Option<String>,
+    pub tax_pin: Option<String>,
+    pub vat_number: Option<String>,
 }
 
 /// Directory lookups and per-tenant connection pooling. One instance is
@@ -109,6 +120,37 @@ impl TenantManager {
         active.update(&self.main).await.map_err(Error::from)
     }
 
+    /// Replace the editable company-profile fields. Currency validity is
+    /// the caller's concern — it knows the currency table.
+    pub async fn update_profile(
+        &self,
+        id: Uuid,
+        profile: CompanyProfile,
+    ) -> Result<tenant::Model> {
+        let tenant = self
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
+        let mut active: tenant::ActiveModel = tenant.into();
+        active.display_name = Set(profile.display_name);
+        active.default_currency = Set(profile.default_currency);
+        active.tax_pin = Set(profile.tax_pin);
+        active.vat_number = Set(profile.vat_number);
+        active.update(&self.main).await.map_err(Error::from)
+    }
+
+    /// Record where the uploaded company logo lives, relative to the
+    /// public file root.
+    pub async fn set_logo_path(&self, id: Uuid, path: Option<String>) -> Result<tenant::Model> {
+        let tenant = self
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
+        let mut active: tenant::ActiveModel = tenant.into();
+        active.logo_path = Set(path);
+        active.update(&self.main).await.map_err(Error::from)
+    }
+
     pub async fn find_all(&self) -> Result<Vec<tenant::Model>> {
         tenant::Entity::find()
             .all(&self.main)
@@ -131,6 +173,7 @@ impl TenantManager {
             connection_string: Set(new.connection_string),
             is_active: Set(true),
             require_two_factor: Set(false),
+            default_currency: Set(new.default_currency),
             created_at: Set(chrono::Utc::now()),
             ..Default::default()
         }

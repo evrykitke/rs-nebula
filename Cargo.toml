@@ -13,10 +13,10 @@ nebula = { path = "crates/nebula" }
 serde = { version = "1", features = ["derive"] }
 figment = { version = "0.10", features = ["yaml", "env"] }
 thiserror = "2"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["timeout", "catch-panic", "trace", "request-id", "cors"] }
+tower-http = { version = "0.6", features = ["timeout", "catch-panic", "trace", "request-id", "cors", "fs"] }
 utoipa = { version = "5", features = ["chrono", "uuid"] }
 chrono = { version = "0.4", features = ["serde"] }
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-rust_decimal", "with-uuid"] }

@@ -58,7 +58,7 @@ async fn refresh_tokens_and_onboarding_end_to_end() {
     .expect("must connect");
     sea_orm::ConnectionTrait::execute_unprepared(
         &admin_db,
-        "DROP TABLE IF EXISTS user_directory; DROP TABLE IF EXISTS audit_logs; DROP TABLE IF EXISTS permission_grants; \
+        "DROP TABLE IF EXISTS user_directory; DROP TABLE IF EXISTS currencies; DROP TABLE IF EXISTS audit_logs; DROP TABLE IF EXISTS permission_grants; \
          DROP TABLE IF EXISTS user_roles; DROP TABLE IF EXISTS roles; \
          DROP TABLE IF EXISTS refresh_tokens; DROP TABLE IF EXISTS users; \
          DROP TABLE IF EXISTS tenants; DROP TABLE IF EXISTS nebula_migrations;",

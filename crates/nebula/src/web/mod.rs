@@ -54,6 +54,11 @@ pub(crate) fn finalize(
     let mut router = router
         .merge(health::routes(config, database.clone()))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
+        // Public files (tenant logos, uploads under {root}/{tenant-id}/).
+        .nest_service(
+            "/public",
+            tower_http::services::ServeDir::new(&config.files.root),
+        )
         .fallback(not_found);
 
     // Innermost, so it sees the tenant-swapped database connection.

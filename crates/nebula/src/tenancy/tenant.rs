@@ -18,6 +18,14 @@ pub struct Model {
     /// Override of `audit.retention_days`, capped by
     /// `audit.retention_max_days`; null uses the system default.
     pub audit_retention_days: Option<i32>,
+    /// The company's currency, a code from the `currencies` table.
+    pub default_currency: Option<String>,
+    /// Tax registration PIN (e.g. a KRA PIN).
+    pub tax_pin: Option<String>,
+    pub vat_number: Option<String>,
+    /// Storage path of the uploaded company logo, relative to the
+    /// public file root (`{tenant-id}/logo.png`).
+    pub logo_path: Option<String>,
     pub created_at: DateTimeUtc,
 }
 

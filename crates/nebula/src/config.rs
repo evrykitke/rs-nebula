@@ -74,6 +74,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub audit: AuditConfig,
     pub jobs: JobsConfig,
+    pub files: FilesConfig,
     pub currencies: Vec<CurrencyConfig>,
 }
 
@@ -90,7 +91,26 @@ impl Default for Config {
             auth: AuthConfig::default(),
             audit: AuditConfig::default(),
             jobs: JobsConfig::default(),
+            files: FilesConfig::default(),
             currencies: Vec::new(),
+        }
+    }
+}
+
+/// Public file storage: uploads land under `{root}/{tenant-id}/…` and
+/// the whole root is served at `/public`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesConfig {
+    /// Directory for publicly served files, relative to the working
+    /// directory (or absolute).
+    pub root: String,
+}
+
+impl Default for FilesConfig {
+    fn default() -> Self {
+        Self {
+            root: "public".into(),
         }
     }
 }
@@ -356,6 +376,9 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "logging.level must not be empty".into(),
             ));
+        }
+        if self.files.root.trim().is_empty() {
+            return Err(ConfigError::Invalid("files.root must not be empty".into()));
         }
         crate::money::CurrencyRegistry::from_config(&self.currencies)
             .map_err(|e| ConfigError::Invalid(e.to_string()))?;
