@@ -198,6 +198,14 @@ impl App {
     /// Serve until ctrl-c, then shut down gracefully so in-flight
     /// requests complete instead of being severed.
     pub async fn serve(self) -> Result<()> {
+        if let (Some(db), true) = (&self.database, self.config.audit.enabled) {
+            crate::audit::pruner::spawn(
+                db.clone(),
+                self.tenants.clone(),
+                self.config.audit.clone(),
+            );
+        }
+
         let addr = format!("{}:{}", self.config.server.host, self.config.server.port);
 
         let listener = TcpListener::bind(&addr)

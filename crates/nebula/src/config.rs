@@ -103,6 +103,12 @@ pub struct AuditConfig {
     /// Also record read (GET/HEAD) requests. Off by default: reads are
     /// high-volume and rarely worth a row each.
     pub include_reads: bool,
+    /// System-level retention window: rows older than this are pruned.
+    pub retention_days: u32,
+    /// Cap for per-tenant retention overrides (six months by default).
+    pub retention_max_days: u32,
+    /// How often the pruning job runs.
+    pub prune_interval_secs: u64,
 }
 
 impl Default for AuditConfig {
@@ -110,6 +116,9 @@ impl Default for AuditConfig {
         Self {
             enabled: true,
             include_reads: false,
+            retention_days: 30,
+            retention_max_days: 180,
+            prune_interval_secs: 3600,
         }
     }
 }

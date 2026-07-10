@@ -5,20 +5,25 @@
 //! - `GET /audit/logs/{id}` — one row with its full snapshots
 //! - `GET /audit/logs/{id}/diff` — the what-changed view: only the
 //!   fields that differ between the before and after snapshots
+//! - `GET`/`PUT /audit/retention` — the tenant's retention override
+//!   (days), capped at `audit.retention_max_days`
 //!
 //! Rows are tenant-scoped: a tenant only ever sees its own trail.
 
 use super::diff::{FieldChange, diff};
 use super::log;
 use crate::auth::Authz;
-use crate::auth::permission::PermissionDef;
+use crate::auth::permission::{self, PermissionDef};
+use crate::config::AuditConfig;
 use crate::error::{Error, Result};
 use crate::module::{Module, ModuleContext};
-use axum::extract::{Path, Query};
+use crate::tenancy::TenantManager;
+use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Permission names the audit module defines.
 pub mod names {
@@ -27,6 +32,12 @@ pub mod names {
 }
 
 pub struct AuditModule;
+
+#[derive(Clone)]
+struct AuditState {
+    config: AuditConfig,
+    tenants: Option<Arc<TenantManager>>,
+}
 
 impl Module for AuditModule {
     fn name(&self) -> &'static str {
@@ -37,11 +48,17 @@ impl Module for AuditModule {
         ctx.add_permissions(PermissionDef::new(names::AUDIT_LOGS, "Audit logs").child(
             PermissionDef::new(names::AUDIT_LOGS_VIEW, "View audit logs"),
         ));
+        let state = AuditState {
+            config: ctx.config().audit.clone(),
+            tenants: ctx.tenants(),
+        };
         ctx.add_routes(
             Router::new()
                 .route("/audit/logs", get(list_logs))
                 .route("/audit/logs/{id}", get(get_log))
-                .route("/audit/logs/{id}/diff", get(get_log_diff)),
+                .route("/audit/logs/{id}/diff", get(get_log_diff))
+                .route("/audit/retention", get(get_retention).put(set_retention))
+                .with_state(state),
         );
     }
 }
@@ -130,4 +147,76 @@ fn tenant_filter(tenant_id: Option<i32>) -> sea_orm::sea_query::SimpleExpr {
         Some(id) => log::Column::TenantId.eq(id),
         None => log::Column::TenantId.is_null(),
     }
+}
+
+#[derive(Deserialize)]
+pub struct RetentionRequest {
+    /// Days to keep audit rows; null reverts to the system default.
+    pub retention_days: Option<i32>,
+}
+
+#[derive(Serialize)]
+pub struct RetentionResponse {
+    /// The tenant's override, when one is set.
+    pub retention_days: Option<i32>,
+    pub system_default_days: u32,
+    pub max_days: u32,
+    /// What the pruner actually applies.
+    pub effective_days: i64,
+}
+
+impl AuditState {
+    async fn tenant_retention(&self, authz: &Authz) -> Result<(Arc<TenantManager>, i32)> {
+        let manager = self.tenants.clone().ok_or_else(|| {
+            Error::Validation("multitenancy is not enabled on this deployment".into())
+        })?;
+        let tenant_id = authz
+            .user
+            .tenant_id
+            .ok_or_else(|| Error::Validation("a tenant context is required".into()))?;
+        Ok((manager, tenant_id))
+    }
+
+    fn response(&self, retention_days: Option<i32>) -> RetentionResponse {
+        RetentionResponse {
+            retention_days,
+            system_default_days: self.config.retention_days,
+            max_days: self.config.retention_max_days,
+            effective_days: super::pruner::effective_retention(&self.config, retention_days),
+        }
+    }
+}
+
+async fn get_retention(
+    State(state): State<AuditState>,
+    authz: Authz,
+) -> Result<Json<RetentionResponse>> {
+    authz.require(permission::names::TENANT_SETTINGS).await?;
+    let (manager, tenant_id) = state.tenant_retention(&authz).await?;
+    let tenant = manager
+        .find_by_id(tenant_id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("tenant {tenant_id}")))?;
+    Ok(Json(state.response(tenant.audit_retention_days)))
+}
+
+async fn set_retention(
+    State(state): State<AuditState>,
+    authz: Authz,
+    Json(req): Json<RetentionRequest>,
+) -> Result<Json<RetentionResponse>> {
+    authz.require(permission::names::TENANT_SETTINGS).await?;
+    let (manager, tenant_id) = state.tenant_retention(&authz).await?;
+    if let Some(days) = req.retention_days {
+        if days < 1 || days as u32 > state.config.retention_max_days {
+            return Err(Error::Validation(format!(
+                "retention_days must be between 1 and {}",
+                state.config.retention_max_days
+            )));
+        }
+    }
+    let tenant = manager
+        .set_audit_retention(tenant_id, req.retention_days)
+        .await?;
+    Ok(Json(state.response(tenant.audit_retention_days)))
 }

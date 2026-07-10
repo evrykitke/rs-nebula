@@ -18,6 +18,7 @@ pub mod diff;
 pub mod log;
 pub(crate) mod middleware;
 pub mod module;
+pub mod pruner;
 pub mod recorder;
 
 pub use diff::{FieldChange, diff};

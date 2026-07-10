@@ -95,6 +95,7 @@ async fn audit_trail_end_to_end() {
     };
     config.multitenancy.enabled = true;
     config.auth.jwt_secret = "test-secret-not-for-production".into();
+    let audit_config = config.audit.clone();
 
     let app = Kernel::builder()
         .with_config(config)
@@ -122,6 +123,7 @@ async fn audit_trail_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "register failed: {body}");
+    let tenant_id = body["tenant_id"].as_i64().unwrap();
     let boss = login(&router, "boss@auditco.test", "hunter2hunter2").await;
 
     let (status, body) = send(
@@ -282,6 +284,91 @@ async fn audit_trail_end_to_end() {
     let intern = login(&router, "intern", "internpass12").await;
     let (status, _) = send(&router, "GET", "/audit/logs", Some(&intern), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &router,
+        "PUT",
+        "/audit/retention",
+        Some(&intern),
+        Some(serde_json::json!({ "retention_days": 60 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // -- Retention: 30 days by default, tenant override capped at 180.
+    sea_orm::ConnectionTrait::execute_unprepared(
+        &admin_db,
+        &format!(
+            "INSERT INTO audit_logs (tenant_id, method, path, action, message, created_at) \
+             VALUES ({tenant_id}, 'POST', '/old', 'event', 'ancient event', \
+                     now() - interval '40 days')"
+        ),
+    )
+    .await
+    .expect("old row must insert");
+    let ancient_visible = || async {
+        let (_, body) = send(
+            &router,
+            "GET",
+            "/audit/logs?action=event&limit=500",
+            Some(&boss),
+            None,
+        )
+        .await;
+        body.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["message"] == "ancient event")
+    };
+    assert!(ancient_visible().await);
+
+    let (status, body) = send(
+        &router,
+        "PUT",
+        "/audit/retention",
+        Some(&boss),
+        Some(serde_json::json!({ "retention_days": 200 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "cap is six months: {body}");
+
+    let (status, body) = send(
+        &router,
+        "PUT",
+        "/audit/retention",
+        Some(&boss),
+        Some(serde_json::json!({ "retention_days": 60 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "override failed: {body}");
+    assert_eq!(body["effective_days"], 60);
+
+    let tenants = app.tenants();
+    nebula::audit::pruner::prune_once(app.database().unwrap(), tenants.as_ref(), &audit_config)
+        .await
+        .expect("prune must run");
+    assert!(
+        ancient_visible().await,
+        "a 60-day window keeps a 40-day-old row"
+    );
+
+    let (status, body) = send(
+        &router,
+        "PUT",
+        "/audit/retention",
+        Some(&boss),
+        Some(serde_json::json!({ "retention_days": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["effective_days"], 30, "back to the system default");
+
+    nebula::audit::pruner::prune_once(app.database().unwrap(), tenants.as_ref(), &audit_config)
+        .await
+        .expect("prune must run");
+    assert!(
+        !ancient_visible().await,
+        "the default 30-day window prunes a 40-day-old row"
+    );
 }
 
 #[test]

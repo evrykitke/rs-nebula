@@ -15,6 +15,9 @@ pub struct Model {
     pub connection_string: Option<String>,
     pub is_active: bool,
     pub require_two_factor: bool,
+    /// Override of `audit.retention_days`, capped by
+    /// `audit.retention_max_days`; null uses the system default.
+    pub audit_retention_days: Option<i32>,
     pub created_at: DateTimeUtc,
 }
 

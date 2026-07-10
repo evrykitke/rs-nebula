@@ -95,6 +95,19 @@ impl TenantManager {
         active.update(&self.main).await.map_err(Error::from)
     }
 
+    /// Tenant override of the audit retention window; `None` reverts to
+    /// the system default. The cap is enforced by the caller, which
+    /// knows the configured maximum.
+    pub async fn set_audit_retention(&self, id: i32, days: Option<i32>) -> Result<tenant::Model> {
+        let tenant = self
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
+        let mut active: tenant::ActiveModel = tenant.into();
+        active.audit_retention_days = Set(days);
+        active.update(&self.main).await.map_err(Error::from)
+    }
+
     pub async fn find_all(&self) -> Result<Vec<tenant::Model>> {
         tenant::Entity::find()
             .all(&self.main)

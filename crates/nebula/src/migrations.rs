@@ -18,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateRolesAndPermissions),
             Box::new(CreateAuditLogs),
             Box::new(AddAuditLogMessage),
+            Box::new(AddTenantAuditRetention),
         ]
     }
 
@@ -96,6 +97,7 @@ enum Tenants {
     ConnectionString,
     IsActive,
     RequireTwoFactor,
+    AuditRetentionDays,
     CreatedAt,
 }
 
@@ -663,6 +665,41 @@ enum AuditLogs {
     OldValues,
     NewValues,
     CreatedAt,
+}
+
+struct AddTenantAuditRetention;
+
+impl MigrationName for AddTenantAuditRetention {
+    fn name(&self) -> &str {
+        "m20260710_000007_add_tenant_audit_retention"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddTenantAuditRetention {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::AuditRetentionDays).integer().null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .drop_column(Tenants::AuditRetentionDays)
+                    .to_owned(),
+            )
+            .await
+    }
 }
 
 struct AddAuditLogMessage;
