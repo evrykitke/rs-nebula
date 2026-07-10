@@ -42,11 +42,24 @@ pub struct TwoFactorSetup {
 pub struct UserManager {
     db: DatabaseConnection,
     config: AuthConfig,
+    directory: Option<super::directory::Directory>,
 }
 
 impl UserManager {
     pub fn new(db: DatabaseConnection, config: AuthConfig) -> Self {
-        Self { db, config }
+        Self {
+            db,
+            config,
+            directory: None,
+        }
+    }
+
+    /// Keep the main-database login directory in sync with this user
+    /// store — required in multitenant mode so credential-based sign-in
+    /// can resolve which tenant a login belongs to.
+    pub fn with_directory(mut self, main: DatabaseConnection) -> Self {
+        self.directory = Some(super::directory::Directory::new(main));
+        self
     }
 
     pub fn db(&self) -> &DatabaseConnection {
@@ -88,7 +101,7 @@ impl UserManager {
         }
 
         let now = Utc::now();
-        user::ActiveModel {
+        let user = user::ActiveModel {
             tenant_id: Set(new.tenant_id),
             user_name: Set(new.user_name),
             normalized_user_name: Set(normalized_user_name),
@@ -116,7 +129,12 @@ impl UserManager {
         }
         .insert(&self.db)
         .await
-        .map_err(Error::from)
+        .map_err(Error::from)?;
+
+        if let (Some(directory), Some(tenant_id)) = (&self.directory, user.tenant_id) {
+            directory.add(tenant_id, &user).await?;
+        }
+        Ok(user)
     }
 
     pub async fn find_by_id(&self, id: i32) -> Result<Option<user::Model>> {
@@ -244,12 +262,16 @@ impl UserManager {
 
     pub async fn soft_delete(&self, user: user::Model) -> Result<()> {
         let user_id = user.id;
+        let tenant_id = user.tenant_id;
         let mut active: user::ActiveModel = user.into();
         active.deleted_at = Set(Some(Utc::now()));
         active.security_stamp = Set(random_token());
         active.updated_at = Set(Utc::now());
         active.update(&self.db).await?;
         self.revoke_all_refresh_tokens(user_id).await?;
+        if let (Some(directory), Some(tenant_id)) = (&self.directory, tenant_id) {
+            directory.remove(tenant_id, user_id).await?;
+        }
         Ok(())
     }
 
@@ -460,7 +482,7 @@ fn tenant_filter(tenant_id: Option<i32>) -> sea_orm::Condition {
     }
 }
 
-fn normalize(value: &str) -> String {
+pub(crate) fn normalize(value: &str) -> String {
     value.trim().to_uppercase()
 }
 

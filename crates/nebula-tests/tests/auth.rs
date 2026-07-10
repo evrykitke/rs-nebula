@@ -79,7 +79,7 @@ async fn authentication_end_to_end() {
     .expect("must connect");
     sea_orm::ConnectionTrait::execute_unprepared(
         &admin_db,
-        "DROP TABLE IF EXISTS audit_logs; DROP TABLE IF EXISTS permission_grants; \
+        "DROP TABLE IF EXISTS user_directory; DROP TABLE IF EXISTS audit_logs; DROP TABLE IF EXISTS permission_grants; \
          DROP TABLE IF EXISTS user_roles; DROP TABLE IF EXISTS roles; \
          DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS tenants; \
          DROP TABLE IF EXISTS nebula_migrations;",
@@ -145,6 +145,70 @@ async fn authentication_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
+
+    // -- No tenant header needed: sign-in resolves the tenant from the
+    // credentials via the login directory.
+    let (status, body) = post_json(
+        &router,
+        "/auth/login",
+        None,
+        None,
+        serde_json::json!({ "login": "boss@acme.test", "password": "hunter2hunter2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolved login failed: {body}");
+    assert_eq!(body["status"], "success");
+    assert_eq!(body["tenant"], "acme");
+
+    // A second company with the same admin email makes the login
+    // ambiguous: the user is offered the choice and retries with the
+    // tenant header.
+    let (status, body) = post_json(
+        &router,
+        "/auth/register",
+        None,
+        None,
+        serde_json::json!({
+            "tenant_name": "globex",
+            "company_display_name": "Globex Corp",
+            "email": "boss@acme.test",
+            "password": "hunter2hunter2",
+            "first_name": "Ada",
+            "last_name": "Boss",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "second register failed: {body}");
+
+    let (status, body) = post_json(
+        &router,
+        "/auth/login",
+        None,
+        None,
+        serde_json::json!({ "login": "boss@acme.test", "password": "hunter2hunter2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "tenant_selection", "got: {body}");
+    let names: Vec<&str> = body["tenants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"acme") && names.contains(&"globex"));
+
+    let (status, body) = post_json(
+        &router,
+        "/auth/login",
+        Some("globex"),
+        None,
+        serde_json::json!({ "login": "boss@acme.test", "password": "hunter2hunter2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "success");
+    assert_eq!(body["tenant"], "globex");
 
     // -- Login: wrong password is 401 and eventually locks the account.
     let login =

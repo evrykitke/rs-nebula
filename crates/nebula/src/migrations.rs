@@ -19,6 +19,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateAuditLogs),
             Box::new(AddAuditLogMessage),
             Box::new(AddTenantAuditRetention),
+            Box::new(CreateUserDirectory),
         ]
     }
 
@@ -700,6 +701,118 @@ impl MigrationTrait for AddTenantAuditRetention {
             )
             .await
     }
+}
+
+/// The login directory: a main-database index of every tenant user's
+/// normalized login identifiers, so sign-in can resolve which tenant a
+/// set of credentials belongs to without a tenant header. Backfilled
+/// from the users already present in this database.
+struct CreateUserDirectory;
+
+impl MigrationName for CreateUserDirectory {
+    fn name(&self) -> &str {
+        "m20260710_000008_create_user_directory"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateUserDirectory {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(UserDirectory::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(UserDirectory::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(UserDirectory::TenantId).integer().not_null())
+                    .col(ColumnDef::new(UserDirectory::UserId).integer().not_null())
+                    .col(
+                        ColumnDef::new(UserDirectory::NormalizedUserName)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserDirectory::NormalizedEmail)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserDirectory::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ux_user_directory_tenant_user")
+                    .if_not_exists()
+                    .table(UserDirectory::Table)
+                    .col(UserDirectory::TenantId)
+                    .col(UserDirectory::UserId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_user_directory_user_name")
+                    .if_not_exists()
+                    .table(UserDirectory::Table)
+                    .col(UserDirectory::NormalizedUserName)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_user_directory_email")
+                    .if_not_exists()
+                    .table(UserDirectory::Table)
+                    .col(UserDirectory::NormalizedEmail)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "INSERT INTO user_directory \
+                 (tenant_id, user_id, normalized_user_name, normalized_email) \
+                 SELECT tenant_id, id, normalized_user_name, normalized_email \
+                 FROM users WHERE tenant_id IS NOT NULL AND deleted_at IS NULL \
+                 ON CONFLICT DO NOTHING",
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(UserDirectory::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum UserDirectory {
+    Table,
+    Id,
+    TenantId,
+    UserId,
+    NormalizedUserName,
+    NormalizedEmail,
+    CreatedAt,
 }
 
 struct AddAuditLogMessage;

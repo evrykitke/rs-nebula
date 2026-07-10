@@ -4,10 +4,14 @@
 //! - `POST /auth/register` — a company registers: creates the tenant and
 //!   its admin account from the email + password given at registration
 //!   (multitenant mode; in single-tenant mode it creates a host user)
-//! - `POST /auth/login` — password step. Answers `success` with an
-//!   access token, `two_factor_required` (user has an authenticator) or
+//! - `POST /auth/login` — password step, no tenant header required: the
+//!   tenant is resolved from the credentials via the login directory
+//!   (`tenant_selection` answers an ambiguous login; retry with the
+//!   header). Answers `success` with an access token,
+//!   `two_factor_required` (user has an authenticator) or
 //!   `two_factor_setup_required` (company mandates 2FA but the user has
-//!   not set it up), the latter two with a short-lived bridge token
+//!   not set it up), the latter two with a short-lived bridge token;
+//!   every answer names the resolved tenant for subsequent headers
 //! - `POST /auth/login/two-factor` — completes login with an
 //!   authenticator or recovery code
 //! - `POST /auth/two-factor/setup` + `/confirm` — enable an authenticator
@@ -164,12 +168,18 @@ struct AccountApiDoc;
 struct AdminApiDoc;
 
 impl AuthState {
-    /// The user store for the current request's context.
+    /// The user store for the current request's context. In multitenant
+    /// mode it keeps the main-database login directory in sync so
+    /// credential-based sign-in can resolve the tenant.
     fn users(&self, db: Option<DatabaseConnection>) -> UserManager {
-        UserManager::new(
+        let users = UserManager::new(
             db.unwrap_or_else(|| self.main_db.clone()),
             self.config.clone(),
-        )
+        );
+        match &self.tenants {
+            Some(_) => users.with_directory(self.main_db.clone()),
+            None => users,
+        }
     }
 
     async fn tenant_requires_2fa(&self, tenant: Option<&TenantRef>) -> Result<bool> {
@@ -305,14 +315,39 @@ pub enum LoginResponse {
         /// for a fresh pair.
         refresh_token: String,
         user: Profile,
+        /// The tenant the session belongs to — send it as the tenant
+        /// header on subsequent requests. Null in single-tenant mode.
+        tenant: Option<String>,
     },
-    /// Password accepted; finish with `POST /auth/login/two-factor`.
-    TwoFactorRequired { two_factor_token: String },
+    /// Password accepted; finish with `POST /auth/login/two-factor`
+    /// (send the tenant header there too).
+    TwoFactorRequired {
+        two_factor_token: String,
+        tenant: Option<String>,
+    },
     /// The company mandates 2FA and this account has none yet: use the
     /// token on the setup + confirm endpoints, then log in again.
-    TwoFactorSetupRequired { two_factor_token: String },
+    TwoFactorSetupRequired {
+        two_factor_token: String,
+        tenant: Option<String>,
+    },
+    /// The credentials matched accounts in more than one company: retry
+    /// with the tenant header set to the chosen one.
+    TenantSelection { tenants: Vec<TenantChoice> },
 }
 
+/// One of the companies a set of credentials belongs to.
+#[derive(Serialize, ToSchema)]
+pub struct TenantChoice {
+    pub name: String,
+    pub display_name: String,
+}
+
+/// Sign in with a username or email and password. No tenant header is
+/// needed: the tenant is resolved from the credentials via the login
+/// directory. A header (or single-tenant mode) skips resolution and
+/// authenticates against that context directly — which is also how the
+/// client answers a `tenant_selection` response.
 #[utoipa::path(post, path = "/auth/login", tag = "auth",
     request_body = LoginRequest,
     responses((status = 200, body = LoginResponse)))]
@@ -324,6 +359,10 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>> {
     let tenant = tenant.map(|Extension(t)| t);
+    if tenant.is_none() && state.tenants.is_some() {
+        return resolve_and_login(&state, &req, audit).await.map(Json);
+    }
+
     let users = state.users(db.map(|Extension(d)| d));
     let user = match users
         .authenticate(tenant.as_ref().map(|t| t.id), &req.login, &req.password)
@@ -338,32 +377,119 @@ async fn login(
             return Err(e);
         }
     };
+    finish_login(&state, &users, tenant, user, audit)
+        .await
+        .map(Json)
+}
 
+/// No tenant given: find the tenants whose user stores know this login,
+/// verify the password against each, and sign in where it matches. More
+/// than one match hands the choice back to the user.
+async fn resolve_and_login(
+    state: &AuthState,
+    req: &LoginRequest,
+    audit: Audit,
+) -> Result<LoginResponse> {
+    let manager = state.tenants.as_ref().expect("caller checked multitenancy");
+    let directory = super::directory::Directory::new(state.main_db.clone());
+    let candidates = directory.tenants_matching(&req.login).await?;
+    if candidates.is_empty() {
+        // Hash anyway so the timing matches a real password check.
+        let _ = super::password::hash(&req.password);
+    }
+
+    let mut matches = Vec::new();
+    let mut locked = None;
+    for tenant_id in candidates {
+        let Some(tenant) = manager.find_by_id(tenant_id).await? else {
+            continue;
+        };
+        if !tenant.is_active {
+            continue;
+        }
+        let db = manager.connection_for(&tenant).await?;
+        let users = state.users(Some(db));
+        match users
+            .authenticate(Some(tenant.id), &req.login, &req.password)
+            .await
+        {
+            Ok(user) => matches.push((tenant, users, user)),
+            Err(e @ Error::Locked(_)) => locked = Some(e),
+            Err(_) => {}
+        }
+    }
+
+    match matches.len() {
+        0 => {
+            if let Some(e) = locked {
+                return Err(e);
+            }
+            audit
+                .0
+                .event(format!("failed login attempt for {:?}", req.login))
+                .await;
+            Err(Error::Unauthorized)
+        }
+        1 => {
+            let (tenant, users, user) = matches.remove(0);
+            let tenant_ref = TenantRef {
+                id: tenant.id,
+                name: tenant.name,
+            };
+            finish_login(state, &users, Some(tenant_ref), user, audit).await
+        }
+        _ => Ok(LoginResponse::TenantSelection {
+            tenants: matches
+                .into_iter()
+                .map(|(tenant, ..)| TenantChoice {
+                    name: tenant.name,
+                    display_name: tenant.display_name,
+                })
+                .collect(),
+        }),
+    }
+}
+
+/// The password checked out — answer with a session or the applicable
+/// two-factor branch, always naming the tenant the client should send
+/// the tenant header for from here on.
+async fn finish_login(
+    state: &AuthState,
+    users: &UserManager,
+    tenant: Option<TenantRef>,
+    user: user::Model,
+    audit: Audit,
+) -> Result<LoginResponse> {
+    let tenant_name = tenant.as_ref().map(|t| t.name.clone());
     if user.two_factor_enabled && user.totp_confirmed_at.is_some() {
         let token = jwt::issue(&state.config, &user, TokenPurpose::TwoFactor)?;
-        return Ok(Json(LoginResponse::TwoFactorRequired {
+        return Ok(LoginResponse::TwoFactorRequired {
             two_factor_token: token,
-        }));
+            tenant: tenant_name,
+        });
     }
     if state.tenant_requires_2fa(tenant.as_ref()).await? {
         let token = jwt::issue(&state.config, &user, TokenPurpose::TwoFactor)?;
-        return Ok(Json(LoginResponse::TwoFactorSetupRequired {
+        return Ok(LoginResponse::TwoFactorSetupRequired {
             two_factor_token: token,
-        }));
+            tenant: tenant_name,
+        });
     }
 
     let token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
     let refresh_token = users.issue_refresh_token(user.id).await?;
     audit
         .0
+        .with_tenant(tenant.as_ref().map(|t| t.id))
         .with_user(Some(user.id))
         .event(format!("{} logged in", user.user_name))
         .await;
-    Ok(Json(LoginResponse::Success {
+    Ok(LoginResponse::Success {
         access_token: token,
         refresh_token,
         user: user.into(),
-    }))
+        tenant: tenant_name,
+    })
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -378,6 +504,7 @@ pub struct TwoFactorLoginRequest {
 async fn login_two_factor(
     State(state): State<AuthState>,
     TwoFactorUser(user): TwoFactorUser,
+    tenant: Option<Extension<TenantRef>>,
     db: Option<Extension<DatabaseConnection>>,
     audit: Audit,
     Json(req): Json<TwoFactorLoginRequest>,
@@ -395,6 +522,7 @@ async fn login_two_factor(
         access_token: token,
         refresh_token,
         user: user.into(),
+        tenant: tenant.map(|Extension(t)| t.name),
     }))
 }
 
@@ -645,6 +773,7 @@ pub struct RefreshRequest {
     responses((status = 200, body = LoginResponse)))]
 async fn refresh(
     State(state): State<AuthState>,
+    tenant: Option<Extension<TenantRef>>,
     db: Option<Extension<DatabaseConnection>>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<LoginResponse>> {
@@ -655,6 +784,7 @@ async fn refresh(
         access_token,
         refresh_token,
         user: user.into(),
+        tenant: tenant.map(|Extension(t)| t.name),
     }))
 }
 

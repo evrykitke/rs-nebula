@@ -14,6 +14,7 @@
 //! before signing in), and any user can opt in from their profile.
 
 pub mod authz;
+pub mod directory;
 pub mod jwt;
 pub mod manager;
 pub mod module;
