@@ -102,6 +102,29 @@ impl Recorder {
         Self { db, info }
     }
 
+    /// Stamp rows with a tenant the request context does not carry —
+    /// e.g. registration, where the tenant is created mid-request.
+    pub fn with_tenant(mut self, tenant_id: Option<i32>) -> Self {
+        self.info.tenant_id = tenant_id;
+        self
+    }
+
+    /// Stamp rows with a user the request context does not carry —
+    /// e.g. login, where the user is only known after the password check.
+    pub fn with_user(mut self, user_id: Option<i32>) -> Self {
+        self.info.user_id = user_id;
+        self
+    }
+
+    /// A plain human-readable event without entity snapshots —
+    /// "boss logged in", "failed login attempt for x". The row still
+    /// carries the full request context (ip, user agent, request id).
+    pub async fn event(&self, message: impl Into<String>) {
+        let mut row = self.row(log::ACTION_EVENT);
+        row.message = Set(Some(message.into()));
+        self.insert(row).await;
+    }
+
     pub async fn created(
         &self,
         entity_type: &str,

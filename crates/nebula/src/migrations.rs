@@ -17,6 +17,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateRefreshTokens),
             Box::new(CreateRolesAndPermissions),
             Box::new(CreateAuditLogs),
+            Box::new(AddAuditLogMessage),
         ]
     }
 
@@ -658,7 +659,41 @@ enum AuditLogs {
     Action,
     EntityType,
     EntityId,
+    Message,
     OldValues,
     NewValues,
     CreatedAt,
+}
+
+struct AddAuditLogMessage;
+
+impl MigrationName for AddAuditLogMessage {
+    fn name(&self) -> &str {
+        "m20260710_000006_add_audit_log_message"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAuditLogMessage {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AuditLogs::Table)
+                    .add_column_if_not_exists(ColumnDef::new(AuditLogs::Message).string().null())
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AuditLogs::Table)
+                    .drop_column(AuditLogs::Message)
+                    .to_owned(),
+            )
+            .await
+    }
 }

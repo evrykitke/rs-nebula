@@ -27,6 +27,7 @@ pub use rust_decimal::Decimal;
 pub use sea_orm;
 pub use sea_orm_migration;
 
+pub use audit::AuditModule;
 pub use auth::{AuthModule, CurrentUser as AuthUser, UserManager};
 pub use config::Config;
 pub use error::{Error, Result};

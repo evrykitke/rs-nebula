@@ -42,6 +42,7 @@ use super::manager::{NewUser, TwoFactorSetup, UserManager};
 use super::permission::{self, PermissionDef, Registry};
 use super::role_manager::RoleManager;
 use super::user::{self, Profile};
+use crate::audit::Audit;
 use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use crate::module::{Module, ModuleContext};
@@ -156,6 +157,7 @@ pub struct RegisterResponse {
 async fn register(
     State(state): State<AuthState>,
     Extension(registry): Extension<Arc<Registry>>,
+    audit: Audit,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>> {
     let admin = |tenant_id| NewUser {
@@ -193,17 +195,32 @@ async fn register(
                 .create(admin(Some(tenant.id)))
                 .await?;
             seed_admin(&db, &registry, Some(tenant.id), user.id).await?;
+            let profile: Profile = user.into();
+            let recorder = audit.0.with_tenant(Some(tenant.id));
+            recorder
+                .created(
+                    "tenant",
+                    tenant.id,
+                    &serde_json::json!({
+                        "name": tenant.name,
+                        "display_name": tenant.display_name,
+                    }),
+                )
+                .await;
+            recorder.created("user", profile.id, &profile).await;
             Ok(Json(RegisterResponse {
                 tenant_id: Some(tenant.id),
-                user: user.into(),
+                user: profile,
             }))
         }
         None => {
             let user = state.users(None).create(admin(None)).await?;
             seed_admin(&state.main_db, &registry, None, user.id).await?;
+            let profile: Profile = user.into();
+            audit.0.created("user", profile.id, &profile).await;
             Ok(Json(RegisterResponse {
                 tenant_id: None,
-                user: user.into(),
+                user: profile,
             }))
         }
     }
@@ -248,13 +265,24 @@ async fn login(
     State(state): State<AuthState>,
     tenant: Option<Extension<TenantRef>>,
     db: Option<Extension<DatabaseConnection>>,
+    audit: Audit,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>> {
     let tenant = tenant.map(|Extension(t)| t);
     let users = state.users(db.map(|Extension(d)| d));
-    let user = users
+    let user = match users
         .authenticate(tenant.as_ref().map(|t| t.id), &req.login, &req.password)
-        .await?;
+        .await
+    {
+        Ok(user) => user,
+        Err(e) => {
+            audit
+                .0
+                .event(format!("failed login attempt for {:?}", req.login))
+                .await;
+            return Err(e);
+        }
+    };
 
     if user.two_factor_enabled && user.totp_confirmed_at.is_some() {
         let token = jwt::issue(&state.config, &user, TokenPurpose::TwoFactor)?;
@@ -271,6 +299,11 @@ async fn login(
 
     let token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
     let refresh_token = users.issue_refresh_token(user.id).await?;
+    audit
+        .0
+        .with_user(Some(user.id))
+        .event(format!("{} logged in", user.user_name))
+        .await;
     Ok(Json(LoginResponse::Success {
         access_token: token,
         refresh_token,
@@ -288,12 +321,18 @@ async fn login_two_factor(
     State(state): State<AuthState>,
     TwoFactorUser(user): TwoFactorUser,
     db: Option<Extension<DatabaseConnection>>,
+    audit: Audit,
     Json(req): Json<TwoFactorLoginRequest>,
 ) -> Result<Json<LoginResponse>> {
     let users = state.users(db.map(|Extension(d)| d));
     let user = users.verify_two_factor(user, &req.code).await?;
     let token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
     let refresh_token = users.issue_refresh_token(user.id).await?;
+    audit
+        .0
+        .with_user(Some(user.id))
+        .event(format!("{} logged in with two-factor", user.user_name))
+        .await;
     Ok(Json(LoginResponse::Success {
         access_token: token,
         refresh_token,
@@ -344,11 +383,20 @@ async fn two_factor_confirm(
     current: Result<CurrentUser, axum::response::Response>,
     bridge: Result<TwoFactorUser, axum::response::Response>,
     db: Option<Extension<DatabaseConnection>>,
+    audit: Audit,
     Json(req): Json<ConfirmTwoFactorRequest>,
 ) -> Result<Json<ConfirmTwoFactorResponse>> {
     let user = setup_user(current, bridge).await?;
     let users = state.users(db.map(|Extension(d)| d));
-    let (_, recovery_codes) = users.confirm_two_factor(user, &req.code).await?;
+    let (user, recovery_codes) = users.confirm_two_factor(user, &req.code).await?;
+    audit
+        .0
+        .with_user(Some(user.id))
+        .event(format!(
+            "{} enabled two-factor authentication",
+            user.user_name
+        ))
+        .await;
     Ok(Json(ConfirmTwoFactorResponse { recovery_codes }))
 }
 
@@ -362,6 +410,7 @@ async fn two_factor_disable(
     CurrentUser(user): CurrentUser,
     tenant: Option<Extension<TenantRef>>,
     db: Option<Extension<DatabaseConnection>>,
+    audit: Audit,
     Json(req): Json<DisableTwoFactorRequest>,
 ) -> Result<Json<Profile>> {
     if !super::password::verify(&req.password, &user.password_hash) {
@@ -375,6 +424,14 @@ async fn two_factor_disable(
     }
     let users = state.users(db.map(|Extension(d)| d));
     let user = users.disable_two_factor(user).await?;
+    audit
+        .0
+        .with_user(Some(user.id))
+        .event(format!(
+            "{} disabled two-factor authentication",
+            user.user_name
+        ))
+        .await;
     Ok(Json(user.into()))
 }
 
@@ -387,6 +444,7 @@ pub struct TenantTwoFactorRequest {
 async fn tenant_two_factor(
     State(state): State<AuthState>,
     authz: Authz,
+    audit: Audit,
     tenant: Option<Extension<TenantRef>>,
     Json(req): Json<TenantTwoFactorRequest>,
 ) -> Result<Json<serde_json::Value>> {
@@ -402,9 +460,19 @@ async fn tenant_two_factor(
         return Err(Error::Forbidden);
     }
     authz.require(permission::names::TENANT_SETTINGS).await?;
+    let before = state.tenant_requires_2fa(Some(&tenant)).await?;
     let tenant = manager
         .set_require_two_factor(tenant.id, req.required)
         .await?;
+    audit
+        .0
+        .updated(
+            "tenant",
+            tenant.id,
+            &serde_json::json!({ "require_two_factor": before }),
+            &serde_json::json!({ "require_two_factor": tenant.require_two_factor }),
+        )
+        .await;
     Ok(Json(serde_json::json!({
         "tenant": tenant.name,
         "require_two_factor": tenant.require_two_factor,
@@ -440,10 +508,12 @@ async fn refresh(
 async fn logout(
     State(state): State<AuthState>,
     db: Option<Extension<DatabaseConnection>>,
+    audit: Audit,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let users = state.users(db.map(|Extension(d)| d));
     users.revoke_refresh_token(&req.refresh_token).await?;
+    audit.0.event("a session logged out").await;
     Ok(Json(serde_json::json!({ "status": "logged_out" })))
 }
 
@@ -459,12 +529,17 @@ async fn change_password(
     State(state): State<AuthState>,
     CurrentUser(user): CurrentUser,
     db: Option<Extension<DatabaseConnection>>,
+    audit: Audit,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<Profile>> {
     let users = state.users(db.map(|Extension(d)| d));
     let user = users
         .change_password(user, &req.current_password, &req.new_password)
         .await?;
+    audit
+        .0
+        .event(format!("{} changed their password", user.user_name))
+        .await;
     Ok(Json(user.into()))
 }
 
@@ -486,6 +561,7 @@ pub struct CreateUserRequest {
 async fn create_user(
     State(state): State<AuthState>,
     authz: Authz,
+    audit: Audit,
     db: Option<Extension<DatabaseConnection>>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<Profile>> {
@@ -505,7 +581,9 @@ async fn create_user(
             phone_number: req.phone_number,
         })
         .await?;
-    Ok(Json(user.into()))
+    let profile: Profile = user.into();
+    audit.0.created("user", profile.id, &profile).await;
+    Ok(Json(profile))
 }
 
 async fn list_users(
@@ -531,6 +609,7 @@ pub struct SetAdminRequest {
 async fn set_user_admin(
     State(state): State<AuthState>,
     authz: Authz,
+    audit: Audit,
     db: Option<Extension<DatabaseConnection>>,
     axum::extract::Path(user_id): axum::extract::Path<i32>,
     Json(req): Json<SetAdminRequest>,
@@ -547,6 +626,7 @@ async fn set_user_admin(
         .await?
         .filter(|u| u.tenant_id == authz.user.tenant_id)
         .ok_or_else(|| Error::NotFound(format!("user {user_id}")))?;
+    let before: Profile = target.clone().into();
     let admin_role = authz
         .roles()
         .ensure_admin_role(authz.user.tenant_id)
@@ -560,7 +640,9 @@ async fn set_user_admin(
             .await?;
     }
     let user = users.set_tenant_admin(target, req.is_admin).await?;
-    Ok(Json(user.into()))
+    let after: Profile = user.into();
+    audit.0.updated("user", after.id, &before, &after).await;
+    Ok(Json(after))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -656,6 +738,7 @@ async fn list_roles(authz: Authz) -> Result<Json<Vec<RoleResponse>>> {
 
 async fn create_role(
     authz: Authz,
+    audit: Audit,
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<Json<RoleResponse>> {
     authz.require(permission::names::ROLES_CREATE).await?;
@@ -668,16 +751,20 @@ async fn create_role(
             &req.permissions,
         )
         .await?;
-    role_response(authz.roles(), role).await.map(Json)
+    let response = role_response(authz.roles(), role).await?;
+    audit.0.created("role", response.id, &response).await;
+    Ok(Json(response))
 }
 
 async fn update_role(
     authz: Authz,
+    audit: Audit,
     axum::extract::Path(role_id): axum::extract::Path<i32>,
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>> {
     authz.require(permission::names::ROLES_EDIT).await?;
     let mut role = tenant_role(&authz, role_id).await?;
+    let before = role_response(authz.roles(), role.clone()).await?;
     if let Some(display_name) = &req.display_name {
         role = authz.roles().update_role(role.id, display_name).await?;
     }
@@ -687,16 +774,21 @@ async fn update_role(
             .set_role_permissions(role.id, permissions)
             .await?;
     }
-    role_response(authz.roles(), role).await.map(Json)
+    let after = role_response(authz.roles(), role).await?;
+    audit.0.updated("role", after.id, &before, &after).await;
+    Ok(Json(after))
 }
 
 async fn delete_role(
     authz: Authz,
+    audit: Audit,
     axum::extract::Path(role_id): axum::extract::Path<i32>,
 ) -> Result<Json<serde_json::Value>> {
     authz.require(permission::names::ROLES_DELETE).await?;
     let role = tenant_role(&authz, role_id).await?;
+    let before = role_response(authz.roles(), role.clone()).await?;
     authz.roles().delete_role(role.id).await?;
+    audit.0.deleted("role", before.id, &before).await;
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
 
@@ -705,6 +797,7 @@ async fn delete_role(
 async fn set_user_roles(
     State(state): State<AuthState>,
     authz: Authz,
+    audit: Audit,
     db: Option<Extension<DatabaseConnection>>,
     axum::extract::Path(user_id): axum::extract::Path<i32>,
     Json(req): Json<SetUserRolesRequest>,
@@ -730,6 +823,19 @@ async fn set_user_roles(
     for role in authz.roles().roles_of(target.id).await? {
         out.push(role_response(authz.roles(), role).await?);
     }
+    let role_names =
+        |roles: &[super::role::Model]| roles.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+    audit
+        .0
+        .updated(
+            "user",
+            target.id,
+            &serde_json::json!({ "roles": role_names(&current) }),
+            &serde_json::json!({
+                "roles": out.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            }),
+        )
+        .await;
     Ok(Json(out))
 }
 
@@ -748,6 +854,7 @@ async fn user_permissions(
 async fn set_user_permissions(
     State(state): State<AuthState>,
     authz: Authz,
+    audit: Audit,
     db: Option<Extension<DatabaseConnection>>,
     axum::extract::Path(user_id): axum::extract::Path<i32>,
     Json(req): Json<SetUserPermissionsRequest>,
@@ -759,11 +866,22 @@ async fn set_user_permissions(
         ));
     }
     let target = tenant_user(&state, &authz, db, user_id).await?;
+    let before = user_permissions_response(&authz, target.id).await?;
     authz
         .roles()
         .set_user_permissions(target.id, &req.granted, &req.denied)
         .await?;
-    user_permissions_response(&authz, target.id).await.map(Json)
+    let after = user_permissions_response(&authz, target.id).await?;
+    audit
+        .0
+        .updated(
+            "user",
+            target.id,
+            &serde_json::json!({ "granted": before.granted, "denied": before.denied }),
+            &serde_json::json!({ "granted": after.granted, "denied": after.denied }),
+        )
+        .await;
+    Ok(Json(after))
 }
 
 /// A user in the caller's tenant, or 404.

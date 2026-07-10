@@ -22,10 +22,12 @@ pub struct Model {
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub duration_ms: Option<i64>,
-    /// `request`, `create`, `update` or `delete`.
+    /// `request`, `create`, `update`, `delete` or `event`.
     pub action: String,
     pub entity_type: Option<String>,
     pub entity_id: Option<String>,
+    /// Human-readable line for `event` rows ("boss logged in").
+    pub message: Option<String>,
     /// Snapshot before the change (`update`/`delete` rows).
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub old_values: Option<Json>,
@@ -44,3 +46,4 @@ pub const ACTION_REQUEST: &str = "request";
 pub const ACTION_CREATE: &str = "create";
 pub const ACTION_UPDATE: &str = "update";
 pub const ACTION_DELETE: &str = "delete";
+pub const ACTION_EVENT: &str = "event";
