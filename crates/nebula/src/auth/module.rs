@@ -64,6 +64,7 @@ impl Module for AuthModule {
             main_db: ctx.require_db(),
             tenants: ctx.tenants(),
         };
+        ctx.add_permissions(super::permission::administration_tree());
         ctx.add_routes(
             Router::new()
                 .route("/auth/register", post(register))

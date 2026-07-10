@@ -10,6 +10,7 @@
 //! }
 //! ```
 
+use crate::auth::permission;
 use crate::config::Config;
 use crate::db;
 use crate::error::{Error, Result};
@@ -129,11 +130,15 @@ impl Kernel {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
         }
+        let (router, permission_defs) = ctx.into_parts();
+        let permissions = Arc::new(permission::Registry::build(permission_defs)?);
+        tracing::info!(count = permissions.len(), "permission registry built");
         let router = crate::web::finalize(
-            ctx.into_router(),
+            router,
             &self.config,
             database.clone(),
             tenants.clone(),
+            permissions.clone(),
         );
 
         Ok(App {
@@ -142,6 +147,7 @@ impl Kernel {
             database,
             currencies,
             tenants,
+            permissions,
         })
     }
 
@@ -159,6 +165,7 @@ pub struct App {
     database: Option<DatabaseConnection>,
     currencies: Arc<CurrencyRegistry>,
     tenants: Option<Arc<TenantManager>>,
+    permissions: Arc<permission::Registry>,
 }
 
 impl App {
@@ -182,6 +189,10 @@ impl App {
 
     pub fn tenants(&self) -> Option<Arc<TenantManager>> {
         self.tenants.clone()
+    }
+
+    pub fn permissions(&self) -> Arc<permission::Registry> {
+        self.permissions.clone()
     }
 
     /// Serve until ctrl-c, then shut down gracefully so in-flight

@@ -41,6 +41,7 @@ pub(crate) fn finalize(
     config: &Config,
     database: Option<sea_orm::DatabaseConnection>,
     tenants: Option<std::sync::Arc<crate::tenancy::TenantManager>>,
+    permissions: std::sync::Arc<crate::auth::permission::Registry>,
 ) -> Router {
     let api = ApiDoc::openapi();
 
@@ -59,6 +60,7 @@ pub(crate) fn finalize(
         router = router.layer(axum::Extension(db));
     }
     router = router.layer(axum::Extension(config.auth.clone()));
+    router = router.layer(axum::Extension(permissions));
 
     router.layer(
         ServiceBuilder::new()

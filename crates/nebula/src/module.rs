@@ -2,6 +2,7 @@
 //! contributing routes (and, over time, jobs, event handlers, entities).
 //! Modules keep the framework open for extension without modification.
 
+use crate::auth::permission::PermissionDef;
 use crate::config::Config;
 use crate::money::CurrencyRegistry;
 use crate::tenancy::TenantManager;
@@ -29,6 +30,7 @@ pub struct ModuleContext<'a> {
     currencies: Arc<CurrencyRegistry>,
     tenants: Option<Arc<TenantManager>>,
     router: Router,
+    permissions: Vec<PermissionDef>,
 }
 
 impl<'a> ModuleContext<'a> {
@@ -44,6 +46,7 @@ impl<'a> ModuleContext<'a> {
             currencies,
             tenants,
             router: Router::new(),
+            permissions: Vec::new(),
         }
     }
 
@@ -82,7 +85,14 @@ impl<'a> ModuleContext<'a> {
         self.router = std::mem::take(&mut self.router).merge(routes);
     }
 
-    pub(crate) fn into_router(self) -> Router {
-        self.router
+    /// Contribute a permission tree. The kernel validates all trees
+    /// together after every module has configured; duplicate or malformed
+    /// names fail the boot.
+    pub fn add_permissions(&mut self, tree: PermissionDef) {
+        self.permissions.push(tree);
+    }
+
+    pub(crate) fn into_parts(self) -> (Router, Vec<PermissionDef>) {
+        (self.router, self.permissions)
     }
 }

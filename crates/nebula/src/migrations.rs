@@ -15,6 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateTenants),
             Box::new(CreateUsers),
             Box::new(CreateRefreshTokens),
+            Box::new(CreateRolesAndPermissions),
         ]
     }
 
@@ -389,4 +390,166 @@ enum RefreshTokens {
     ExpiresAt,
     RevokedAt,
     CreatedAt,
+}
+
+struct CreateRolesAndPermissions;
+
+impl MigrationName for CreateRolesAndPermissions {
+    fn name(&self) -> &str {
+        "m20260710_000004_create_roles_and_permissions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateRolesAndPermissions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Roles::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Roles::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Roles::TenantId).integer().null())
+                    .col(ColumnDef::new(Roles::Name).string_len(64).not_null())
+                    .col(ColumnDef::new(Roles::DisplayName).string().not_null())
+                    .col(
+                        ColumnDef::new(Roles::IsStatic)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Roles::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ux_roles_tenant_name")
+                    .if_not_exists()
+                    .table(Roles::Table)
+                    .col(Roles::TenantId)
+                    .col(Roles::Name)
+                    .unique()
+                    .nulls_not_distinct()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(UserRoles::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(UserRoles::UserId).integer().not_null())
+                    .col(ColumnDef::new(UserRoles::RoleId).integer().not_null())
+                    .primary_key(
+                        Index::create()
+                            .col(UserRoles::UserId)
+                            .col(UserRoles::RoleId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(PermissionGrants::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(PermissionGrants::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(PermissionGrants::Permission)
+                            .string_len(128)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(PermissionGrants::RoleId).integer().null())
+                    .col(ColumnDef::new(PermissionGrants::UserId).integer().null())
+                    .col(
+                        ColumnDef::new(PermissionGrants::IsGranted)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_permission_grants_role")
+                    .if_not_exists()
+                    .table(PermissionGrants::Table)
+                    .col(PermissionGrants::RoleId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_permission_grants_user")
+                    .if_not_exists()
+                    .table(PermissionGrants::Table)
+                    .col(PermissionGrants::UserId)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(PermissionGrants::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(UserRoles::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Roles::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum Roles {
+    Table,
+    Id,
+    TenantId,
+    Name,
+    DisplayName,
+    IsStatic,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum UserRoles {
+    Table,
+    UserId,
+    RoleId,
+}
+
+#[derive(DeriveIden)]
+enum PermissionGrants {
+    Table,
+    Id,
+    Permission,
+    RoleId,
+    UserId,
+    IsGranted,
 }
