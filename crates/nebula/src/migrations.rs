@@ -16,6 +16,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateUsers),
             Box::new(CreateRefreshTokens),
             Box::new(CreateRolesAndPermissions),
+            Box::new(CreateAuditLogs),
         ]
     }
 
@@ -552,4 +553,112 @@ enum PermissionGrants {
     RoleId,
     UserId,
     IsGranted,
+}
+
+struct CreateAuditLogs;
+
+impl MigrationName for CreateAuditLogs {
+    fn name(&self) -> &str {
+        "m20260710_000005_create_audit_logs"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateAuditLogs {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(AuditLogs::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(AuditLogs::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(AuditLogs::TenantId).integer().null())
+                    .col(ColumnDef::new(AuditLogs::UserId).integer().null())
+                    .col(ColumnDef::new(AuditLogs::RequestId).string_len(64).null())
+                    .col(ColumnDef::new(AuditLogs::Method).string_len(16).not_null())
+                    .col(ColumnDef::new(AuditLogs::Path).string().not_null())
+                    .col(ColumnDef::new(AuditLogs::StatusCode).integer().null())
+                    .col(ColumnDef::new(AuditLogs::IpAddress).string_len(64).null())
+                    .col(ColumnDef::new(AuditLogs::UserAgent).string_len(512).null())
+                    .col(ColumnDef::new(AuditLogs::DurationMs).big_integer().null())
+                    .col(ColumnDef::new(AuditLogs::Action).string_len(16).not_null())
+                    .col(ColumnDef::new(AuditLogs::EntityType).string_len(128).null())
+                    .col(ColumnDef::new(AuditLogs::EntityId).string_len(64).null())
+                    .col(ColumnDef::new(AuditLogs::OldValues).json_binary().null())
+                    .col(ColumnDef::new(AuditLogs::NewValues).json_binary().null())
+                    .col(
+                        ColumnDef::new(AuditLogs::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_audit_logs_tenant_created")
+                    .if_not_exists()
+                    .table(AuditLogs::Table)
+                    .col(AuditLogs::TenantId)
+                    .col(AuditLogs::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_audit_logs_entity")
+                    .if_not_exists()
+                    .table(AuditLogs::Table)
+                    .col(AuditLogs::EntityType)
+                    .col(AuditLogs::EntityId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_audit_logs_user")
+                    .if_not_exists()
+                    .table(AuditLogs::Table)
+                    .col(AuditLogs::UserId)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AuditLogs::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum AuditLogs {
+    Table,
+    Id,
+    TenantId,
+    UserId,
+    RequestId,
+    Method,
+    Path,
+    StatusCode,
+    IpAddress,
+    UserAgent,
+    DurationMs,
+    Action,
+    EntityType,
+    EntityId,
+    OldValues,
+    NewValues,
+    CreatedAt,
 }

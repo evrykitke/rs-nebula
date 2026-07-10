@@ -72,6 +72,7 @@ pub struct Config {
     pub rabbitmq: RabbitMqConfig,
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
+    pub audit: AuditConfig,
     pub currencies: Vec<CurrencyConfig>,
 }
 
@@ -86,7 +87,29 @@ impl Default for Config {
             rabbitmq: RabbitMqConfig::default(),
             logging: LoggingConfig::default(),
             auth: AuthConfig::default(),
+            audit: AuditConfig::default(),
             currencies: Vec::new(),
+        }
+    }
+}
+
+/// Audit trail settings. Request bodies are never recorded — snapshots
+/// come from handlers that know which safe view of an entity to log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// Record every mutating HTTP request and entity change.
+    pub enabled: bool,
+    /// Also record read (GET/HEAD) requests. Off by default: reads are
+    /// high-volume and rarely worth a row each.
+    pub include_reads: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            include_reads: false,
         }
     }
 }

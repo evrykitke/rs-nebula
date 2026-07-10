@@ -50,6 +50,13 @@ pub(crate) fn finalize(
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
         .fallback(not_found);
 
+    // Innermost, so it sees the tenant-swapped database connection.
+    if config.audit.enabled {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            config.audit.clone(),
+            crate::audit::middleware::record,
+        ));
+    }
     if let Some(manager) = tenants {
         router = router.layer(axum::middleware::from_fn_with_state(
             manager,

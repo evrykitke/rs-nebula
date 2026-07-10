@@ -210,10 +210,16 @@ impl App {
             "nebula listening on http://{addr}"
         );
 
-        axum::serve(listener, self.router)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .map_err(Error::internal)
+        // Connect info feeds the audit trail's ip fallback when no
+        // proxy header is present.
+        axum::serve(
+            listener,
+            self.router
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(Error::internal)
     }
 }
 
