@@ -7,7 +7,7 @@ server:
   request_timeout_secs: 30
 
 multitenancy:
-  enabled: false
+  enabled: true
 
 logging:
   level: info
