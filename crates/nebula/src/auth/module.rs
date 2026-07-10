@@ -653,8 +653,9 @@ pub struct QueuedJobResponse {
     pub task_id: String,
 }
 
-/// The current company-wide 2FA policy; requires the tenant-settings
-/// permission.
+/// The current company-wide 2FA policy. Readable by any authenticated
+/// user of the tenant — the mandate is what they experience at sign-in,
+/// and the profile page needs it to know whether opting out is possible.
 #[utoipa::path(get, path = "/auth/tenant/two-factor", tag = "auth",
     responses((status = 200, body = TenantTwoFactorResponse)))]
 async fn tenant_two_factor_get(
@@ -668,7 +669,6 @@ async fn tenant_two_factor_get(
     if authz.user.tenant_id != Some(tenant.id) {
         return Err(Error::Forbidden);
     }
-    authz.require(permission::names::TENANT_SETTINGS).await?;
     let required = state.tenant_requires_2fa(Some(&tenant)).await?;
     Ok(Json(TenantTwoFactorResponse {
         tenant: tenant.name,
