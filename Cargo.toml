@@ -16,7 +16,7 @@ thiserror = "2"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["timeout", "catch-panic", "trace", "request-id"] }
+tower-http = { version = "0.6", features = ["timeout", "catch-panic", "trace", "request-id", "cors"] }
 utoipa = { version = "5", features = ["chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-rust_decimal"] }

@@ -96,7 +96,10 @@ impl Module for AuthModule {
                 .route("/auth/two-factor/setup", post(two_factor_setup))
                 .route("/auth/two-factor/confirm", post(two_factor_confirm))
                 .route("/auth/two-factor/disable", post(two_factor_disable))
-                .route("/auth/tenant/two-factor", post(tenant_two_factor))
+                .route(
+                    "/auth/tenant/two-factor",
+                    post(tenant_two_factor).get(tenant_two_factor_get),
+                )
                 .route("/auth/tenant/migrate", post(tenant_migrate))
                 .route("/auth/token/refresh", post(refresh))
                 .route("/auth/logout", post(logout))
@@ -144,6 +147,7 @@ struct AccountApiDoc;
 #[derive(utoipa::OpenApi)]
 #[openapi(paths(
     tenant_two_factor,
+    tenant_two_factor_get,
     tenant_migrate,
     create_user,
     list_users,
@@ -519,6 +523,29 @@ pub struct StatusResponse {
 pub struct QueuedJobResponse {
     pub status: String,
     pub task_id: String,
+}
+
+/// The current company-wide 2FA policy; requires the tenant-settings
+/// permission.
+#[utoipa::path(get, path = "/auth/tenant/two-factor", tag = "auth",
+    responses((status = 200, body = TenantTwoFactorResponse)))]
+async fn tenant_two_factor_get(
+    State(state): State<AuthState>,
+    authz: Authz,
+    tenant: Option<Extension<TenantRef>>,
+) -> Result<Json<TenantTwoFactorResponse>> {
+    let Some(Extension(tenant)) = tenant else {
+        return Err(Error::Validation("a tenant context is required".into()));
+    };
+    if authz.user.tenant_id != Some(tenant.id) {
+        return Err(Error::Forbidden);
+    }
+    authz.require(permission::names::TENANT_SETTINGS).await?;
+    let required = state.tenant_requires_2fa(Some(&tenant)).await?;
+    Ok(Json(TenantTwoFactorResponse {
+        tenant: tenant.name,
+        require_two_factor: required,
+    }))
 }
 
 /// Company-wide policy switch; requires the tenant-settings permission.

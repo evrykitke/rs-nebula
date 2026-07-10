@@ -5,6 +5,9 @@ server:
   host: 127.0.0.1
   port: 5000
   request_timeout_secs: 30
+  # The Angular dev server (ng serve) calls the API cross-origin.
+  cors_origins:
+    - http://localhost:4200
 
 multitenancy:
   enabled: true

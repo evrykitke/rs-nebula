@@ -184,6 +184,9 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub request_timeout_secs: u64,
+    /// Browser origins allowed to call the API cross-origin (the SPA dev
+    /// server, the deployed frontend). Empty disables CORS entirely.
+    pub cors_origins: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -192,6 +195,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".into(),
             port: 5000,
             request_timeout_secs: 30,
+            cors_origins: Vec::new(),
         }
     }
 }

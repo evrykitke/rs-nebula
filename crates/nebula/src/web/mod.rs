@@ -12,6 +12,7 @@ use axum::response::Response;
 use std::time::Duration;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -77,6 +78,10 @@ pub(crate) fn finalize(
         router = router.layer(axum::Extension(jobs));
     }
 
+    if let Some(cors) = cors_layer(config) {
+        router = router.layer(cors);
+    }
+
     router.layer(
         ServiceBuilder::new()
             .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -87,6 +92,31 @@ pub(crate) fn finalize(
                 Duration::from_secs(config.server.request_timeout_secs),
             ))
             .layer(PropagateRequestIdLayer::x_request_id()),
+    )
+}
+
+/// Cross-origin access for browser frontends. Only the origins listed in
+/// `server.cors_origins` are admitted; an empty list means no CORS layer at
+/// all. Misconfigured origins fail the boot rather than silently allowing
+/// nothing.
+fn cors_layer(config: &Config) -> Option<CorsLayer> {
+    let origins = &config.server.cors_origins;
+    if origins.is_empty() {
+        return None;
+    }
+    let origins: Vec<_> = origins
+        .iter()
+        .map(|o| {
+            o.parse()
+                .unwrap_or_else(|e| panic!("invalid server.cors_origins entry {o:?}: {e}"))
+        })
+        .collect();
+    Some(
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+            .expose_headers(tower_http::cors::Any),
     )
 }
 
