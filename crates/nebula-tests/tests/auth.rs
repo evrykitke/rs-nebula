@@ -79,8 +79,9 @@ async fn authentication_end_to_end() {
     .expect("must connect");
     sea_orm::ConnectionTrait::execute_unprepared(
         &admin_db,
-        "DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS tenants; \
-         DROP TABLE IF EXISTS nebula_migrations;",
+        "DROP TABLE IF EXISTS permission_grants; DROP TABLE IF EXISTS user_roles; \
+         DROP TABLE IF EXISTS roles; DROP TABLE IF EXISTS users; \
+         DROP TABLE IF EXISTS tenants; DROP TABLE IF EXISTS nebula_migrations;",
     )
     .await
     .expect("cleanup must work");

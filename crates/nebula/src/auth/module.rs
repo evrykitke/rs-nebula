@@ -17,14 +17,30 @@
 //!   refused while the company mandates 2FA)
 //! - `POST /auth/tenant/two-factor` — tenant admin toggles the
 //!   company-wide 2FA mandate
-//! - `GET /auth/me` — the authenticated profile
+//! - `GET /auth/me` — the authenticated profile;
+//!   `GET /auth/me/permissions` — the caller's effective permissions
+//!
+//! Administration endpoints are guarded by permissions (see
+//! [`super::permission::names`]); registration seeds the static `Admin`
+//! role, which implicitly holds every permission, and assigns it to the
+//! registering user:
+//!
+//! - `/auth/users` — create and list team members
+//! - `/auth/users/{id}/admin` — grant or revoke the Admin role
+//! - `/auth/users/{id}/roles` — set a user's roles
+//! - `/auth/users/{id}/permissions` — per-user grant/deny overrides
+//! - `/auth/roles` + `/auth/roles/{id}` — role CRUD with grants
+//! - `GET /auth/permissions` — the permission definition tree
 //!
 //! Tenant context comes from the tenant resolution middleware: the same
 //! `X-Tenant` header used everywhere else selects whose user store a
 //! request talks to.
 
+use super::authz::Authz;
 use super::jwt::{self, CurrentUser, TokenPurpose, TwoFactorUser};
 use super::manager::{NewUser, TwoFactorSetup, UserManager};
+use super::permission::{self, PermissionDef, Registry};
+use super::role_manager::RoleManager;
 use super::user::{self, Profile};
 use crate::config::AuthConfig;
 use crate::error::{Error, Result};
@@ -79,7 +95,19 @@ impl Module for AuthModule {
                 .route("/auth/password", post(change_password))
                 .route("/auth/users", post(create_user).get(list_users))
                 .route("/auth/users/{id}/admin", axum::routing::put(set_user_admin))
+                .route("/auth/users/{id}/roles", axum::routing::put(set_user_roles))
+                .route(
+                    "/auth/users/{id}/permissions",
+                    get(user_permissions).put(set_user_permissions),
+                )
+                .route("/auth/roles", post(create_role).get(list_roles))
+                .route(
+                    "/auth/roles/{id}",
+                    axum::routing::put(update_role).delete(delete_role),
+                )
+                .route("/auth/permissions", get(permission_tree))
                 .route("/auth/me", get(me))
+                .route("/auth/me/permissions", get(my_permissions))
                 .with_state(state),
         );
     }
@@ -124,9 +152,10 @@ pub struct RegisterResponse {
 }
 
 /// Company registration: the email and password provided here become the
-/// tenant's admin account.
+/// tenant's admin account, seeded with the static `Admin` role.
 async fn register(
     State(state): State<AuthState>,
+    Extension(registry): Extension<Arc<Registry>>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>> {
     let admin = |tenant_id| NewUser {
@@ -159,7 +188,11 @@ async fn register(
                 })
                 .await?;
             let db = manager.connection_for(&tenant).await?;
-            let user = state.users(Some(db)).create(admin(Some(tenant.id))).await?;
+            let user = state
+                .users(Some(db.clone()))
+                .create(admin(Some(tenant.id)))
+                .await?;
+            seed_admin(&db, &registry, Some(tenant.id), user.id).await?;
             Ok(Json(RegisterResponse {
                 tenant_id: Some(tenant.id),
                 user: user.into(),
@@ -167,12 +200,24 @@ async fn register(
         }
         None => {
             let user = state.users(None).create(admin(None)).await?;
+            seed_admin(&state.main_db, &registry, None, user.id).await?;
             Ok(Json(RegisterResponse {
                 tenant_id: None,
                 user: user.into(),
             }))
         }
     }
+}
+
+async fn seed_admin(
+    db: &DatabaseConnection,
+    registry: &Arc<Registry>,
+    tenant_id: Option<i32>,
+    user_id: i32,
+) -> Result<()> {
+    let roles = RoleManager::new(db.clone(), registry.clone());
+    let admin_role = roles.ensure_admin_role(tenant_id).await?;
+    roles.assign_role(user_id, admin_role.id).await
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -338,10 +383,10 @@ pub struct TenantTwoFactorRequest {
     pub required: bool,
 }
 
-/// Company-wide policy switch; tenant admins only.
+/// Company-wide policy switch; requires the tenant-settings permission.
 async fn tenant_two_factor(
     State(state): State<AuthState>,
-    CurrentUser(user): CurrentUser,
+    authz: Authz,
     tenant: Option<Extension<TenantRef>>,
     Json(req): Json<TenantTwoFactorRequest>,
 ) -> Result<Json<serde_json::Value>> {
@@ -353,9 +398,10 @@ async fn tenant_two_factor(
     let Some(Extension(tenant)) = tenant else {
         return Err(Error::Validation("a tenant context is required".into()));
     };
-    if !user.is_tenant_admin || user.tenant_id != Some(tenant.id) {
+    if authz.user.tenant_id != Some(tenant.id) {
         return Err(Error::Forbidden);
     }
+    authz.require(permission::names::TENANT_SETTINGS).await?;
     let tenant = manager
         .set_require_two_factor(tenant.id, req.required)
         .await?;
@@ -436,20 +482,18 @@ pub struct CreateUserRequest {
     pub time_zone: Option<String>,
 }
 
-/// Tenant admins onboard their team here.
+/// Team onboarding; requires the user-creation permission.
 async fn create_user(
     State(state): State<AuthState>,
-    CurrentUser(admin): CurrentUser,
+    authz: Authz,
     db: Option<Extension<DatabaseConnection>>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<Profile>> {
-    if !admin.is_tenant_admin {
-        return Err(Error::Forbidden);
-    }
+    authz.require(permission::names::USERS_CREATE).await?;
     let users = state.users(db.map(|Extension(d)| d));
     let user = users
         .create(NewUser {
-            tenant_id: admin.tenant_id,
+            tenant_id: authz.user.tenant_id,
             user_name: req.user_name,
             email: req.email,
             password: req.password,
@@ -466,14 +510,12 @@ async fn create_user(
 
 async fn list_users(
     State(state): State<AuthState>,
-    CurrentUser(admin): CurrentUser,
+    authz: Authz,
     db: Option<Extension<DatabaseConnection>>,
 ) -> Result<Json<Vec<Profile>>> {
-    if !admin.is_tenant_admin {
-        return Err(Error::Forbidden);
-    }
+    authz.require(permission::names::USERS_VIEW).await?;
     let users = state.users(db.map(|Extension(d)| d));
-    let all = users.find_all(admin.tenant_id).await?;
+    let all = users.find_all(authz.user.tenant_id).await?;
     Ok(Json(all.into_iter().map(Profile::from).collect()))
 }
 
@@ -482,21 +524,19 @@ pub struct SetAdminRequest {
     pub is_admin: bool,
 }
 
-/// Admin rights start with whoever registered the company; this is how
-/// they are granted to or revoked from anyone later. Admins cannot
-/// demote themselves, so a tenant can never lose its last admin by
-/// accident.
+/// Admin rights start with whoever registered the company; this grants
+/// or revokes the static `Admin` role (which implicitly holds every
+/// permission) for anyone later. Admins cannot demote themselves, so a
+/// tenant can never lose its last admin by accident.
 async fn set_user_admin(
     State(state): State<AuthState>,
-    CurrentUser(admin): CurrentUser,
+    authz: Authz,
     db: Option<Extension<DatabaseConnection>>,
     axum::extract::Path(user_id): axum::extract::Path<i32>,
     Json(req): Json<SetAdminRequest>,
 ) -> Result<Json<Profile>> {
-    if !admin.is_tenant_admin {
-        return Err(Error::Forbidden);
-    }
-    if admin.id == user_id && !req.is_admin {
+    authz.require(permission::names::USERS_PERMISSIONS).await?;
+    if authz.user.id == user_id && !req.is_admin {
         return Err(Error::Validation(
             "you cannot revoke your own admin rights; grant another admin first".into(),
         ));
@@ -505,8 +545,268 @@ async fn set_user_admin(
     let target = users
         .find_by_id(user_id)
         .await?
-        .filter(|u| u.tenant_id == admin.tenant_id)
+        .filter(|u| u.tenant_id == authz.user.tenant_id)
         .ok_or_else(|| Error::NotFound(format!("user {user_id}")))?;
+    let admin_role = authz
+        .roles()
+        .ensure_admin_role(authz.user.tenant_id)
+        .await?;
+    if req.is_admin {
+        authz.roles().assign_role(target.id, admin_role.id).await?;
+    } else {
+        authz
+            .roles()
+            .unassign_role(target.id, admin_role.id)
+            .await?;
+    }
     let user = users.set_tenant_admin(target, req.is_admin).await?;
     Ok(Json(user.into()))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SetUserRolesRequest {
+    pub role_ids: Vec<i32>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RoleResponse {
+    pub id: i32,
+    pub name: String,
+    pub display_name: String,
+    pub is_static: bool,
+    /// Explicit grants; static roles implicitly hold every permission.
+    pub permissions: Vec<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateRoleRequest {
+    pub name: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateRoleRequest {
+    pub display_name: Option<String>,
+    pub permissions: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SetUserPermissionsRequest {
+    /// Permissions granted beyond what the user's roles give.
+    #[serde(default)]
+    pub granted: Vec<String>,
+    /// Permissions denied even when a role grants them.
+    #[serde(default)]
+    pub denied: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct UserPermissionsResponse {
+    pub roles: Vec<RoleResponse>,
+    pub granted: Vec<String>,
+    pub denied: Vec<String>,
+    /// Fully resolved: roles unioned, overrides applied, deny wins.
+    pub effective: Vec<String>,
+}
+
+/// The full permission definition tree, for admin UIs.
+async fn permission_tree(authz: Authz) -> Result<Json<Vec<PermissionDef>>> {
+    authz.require(permission::names::ROLES_VIEW).await?;
+    Ok(Json(authz.registry().tree().to_vec()))
+}
+
+/// The caller's own effective permissions — any authenticated user.
+async fn my_permissions(authz: Authz) -> Result<Json<Vec<String>>> {
+    let mut names: Vec<String> = authz.granted_permissions().await?.into_iter().collect();
+    names.sort();
+    Ok(Json(names))
+}
+
+async fn role_response(roles: &RoleManager, role: super::role::Model) -> Result<RoleResponse> {
+    let permissions = roles.role_permissions(role.id).await?;
+    Ok(RoleResponse {
+        id: role.id,
+        name: role.name,
+        display_name: role.display_name,
+        is_static: role.is_static,
+        permissions,
+    })
+}
+
+/// A role in the caller's tenant, or 404 — one tenant must never see or
+/// touch another tenant's roles.
+async fn tenant_role(authz: &Authz, role_id: i32) -> Result<super::role::Model> {
+    let role = authz.roles().find_by_id(role_id).await?;
+    if role.tenant_id != authz.user.tenant_id {
+        return Err(Error::NotFound("role".into()));
+    }
+    Ok(role)
+}
+
+async fn list_roles(authz: Authz) -> Result<Json<Vec<RoleResponse>>> {
+    authz.require(permission::names::ROLES_VIEW).await?;
+    let mut out = Vec::new();
+    for role in authz.roles().find_all(authz.user.tenant_id).await? {
+        out.push(role_response(authz.roles(), role).await?);
+    }
+    Ok(Json(out))
+}
+
+async fn create_role(
+    authz: Authz,
+    Json(req): Json<CreateRoleRequest>,
+) -> Result<Json<RoleResponse>> {
+    authz.require(permission::names::ROLES_CREATE).await?;
+    let role = authz
+        .roles()
+        .create_role(
+            authz.user.tenant_id,
+            &req.name,
+            &req.display_name,
+            &req.permissions,
+        )
+        .await?;
+    role_response(authz.roles(), role).await.map(Json)
+}
+
+async fn update_role(
+    authz: Authz,
+    axum::extract::Path(role_id): axum::extract::Path<i32>,
+    Json(req): Json<UpdateRoleRequest>,
+) -> Result<Json<RoleResponse>> {
+    authz.require(permission::names::ROLES_EDIT).await?;
+    let mut role = tenant_role(&authz, role_id).await?;
+    if let Some(display_name) = &req.display_name {
+        role = authz.roles().update_role(role.id, display_name).await?;
+    }
+    if let Some(permissions) = &req.permissions {
+        authz
+            .roles()
+            .set_role_permissions(role.id, permissions)
+            .await?;
+    }
+    role_response(authz.roles(), role).await.map(Json)
+}
+
+async fn delete_role(
+    authz: Authz,
+    axum::extract::Path(role_id): axum::extract::Path<i32>,
+) -> Result<Json<serde_json::Value>> {
+    authz.require(permission::names::ROLES_DELETE).await?;
+    let role = tenant_role(&authz, role_id).await?;
+    authz.roles().delete_role(role.id).await?;
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+/// Replace a user's role set. Changing your own roles is refused — an
+/// admin locking themselves out is never one call away.
+async fn set_user_roles(
+    State(state): State<AuthState>,
+    authz: Authz,
+    db: Option<Extension<DatabaseConnection>>,
+    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    Json(req): Json<SetUserRolesRequest>,
+) -> Result<Json<Vec<RoleResponse>>> {
+    authz.require(permission::names::USERS_PERMISSIONS).await?;
+    if authz.user.id == user_id {
+        return Err(Error::Validation("you cannot change your own roles".into()));
+    }
+    let target = tenant_user(&state, &authz, db, user_id).await?;
+    for role_id in &req.role_ids {
+        tenant_role(&authz, *role_id).await?;
+    }
+    let current = authz.roles().roles_of(target.id).await?;
+    for role in &current {
+        if !req.role_ids.contains(&role.id) {
+            authz.roles().unassign_role(target.id, role.id).await?;
+        }
+    }
+    for role_id in &req.role_ids {
+        authz.roles().assign_role(target.id, *role_id).await?;
+    }
+    let mut out = Vec::new();
+    for role in authz.roles().roles_of(target.id).await? {
+        out.push(role_response(authz.roles(), role).await?);
+    }
+    Ok(Json(out))
+}
+
+async fn user_permissions(
+    State(state): State<AuthState>,
+    authz: Authz,
+    db: Option<Extension<DatabaseConnection>>,
+    axum::extract::Path(user_id): axum::extract::Path<i32>,
+) -> Result<Json<UserPermissionsResponse>> {
+    authz.require(permission::names::USERS_PERMISSIONS).await?;
+    let target = tenant_user(&state, &authz, db, user_id).await?;
+    user_permissions_response(&authz, target.id).await.map(Json)
+}
+
+/// Replace a user's per-user overrides. Like roles, never on yourself.
+async fn set_user_permissions(
+    State(state): State<AuthState>,
+    authz: Authz,
+    db: Option<Extension<DatabaseConnection>>,
+    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    Json(req): Json<SetUserPermissionsRequest>,
+) -> Result<Json<UserPermissionsResponse>> {
+    authz.require(permission::names::USERS_PERMISSIONS).await?;
+    if authz.user.id == user_id {
+        return Err(Error::Validation(
+            "you cannot change your own permissions".into(),
+        ));
+    }
+    let target = tenant_user(&state, &authz, db, user_id).await?;
+    authz
+        .roles()
+        .set_user_permissions(target.id, &req.granted, &req.denied)
+        .await?;
+    user_permissions_response(&authz, target.id).await.map(Json)
+}
+
+/// A user in the caller's tenant, or 404.
+async fn tenant_user(
+    state: &AuthState,
+    authz: &Authz,
+    db: Option<Extension<DatabaseConnection>>,
+    user_id: i32,
+) -> Result<user::Model> {
+    state
+        .users(db.map(|Extension(d)| d))
+        .find_by_id(user_id)
+        .await?
+        .filter(|u| u.tenant_id == authz.user.tenant_id)
+        .ok_or_else(|| Error::NotFound(format!("user {user_id}")))
+}
+
+async fn user_permissions_response(authz: &Authz, user_id: i32) -> Result<UserPermissionsResponse> {
+    let mut roles = Vec::new();
+    for role in authz.roles().roles_of(user_id).await? {
+        roles.push(role_response(authz.roles(), role).await?);
+    }
+    let (mut granted, mut denied) = (Vec::new(), Vec::new());
+    for row in authz.roles().user_overrides(user_id).await? {
+        if row.is_granted {
+            granted.push(row.permission);
+        } else {
+            denied.push(row.permission);
+        }
+    }
+    granted.sort();
+    denied.sort();
+    let mut effective: Vec<String> = authz
+        .roles()
+        .granted_permissions(user_id)
+        .await?
+        .into_iter()
+        .collect();
+    effective.sort();
+    Ok(UserPermissionsResponse {
+        roles,
+        granted,
+        denied,
+        effective,
+    })
 }

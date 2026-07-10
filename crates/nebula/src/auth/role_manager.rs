@@ -38,6 +38,7 @@ impl RoleManager {
         tenant_id: Option<i32>,
         name: &str,
         display_name: &str,
+        permissions: &[String],
     ) -> Result<role::Model> {
         let name = name.trim();
         let display_name = display_name.trim();
@@ -51,10 +52,12 @@ impl RoleManager {
                 "role display name must be 1-128 characters".into(),
             ));
         }
+        self.validate_names(permissions)?;
         if self.find_by_name(tenant_id, name).await?.is_some() {
             return Err(Error::Conflict(format!("role {name:?} already exists")));
         }
-        Ok(role::ActiveModel {
+        let tx = self.db.begin().await?;
+        let role = role::ActiveModel {
             tenant_id: Set(tenant_id),
             name: Set(name.to_string()),
             display_name: Set(display_name.to_string()),
@@ -62,8 +65,21 @@ impl RoleManager {
             created_at: Set(Utc::now()),
             ..Default::default()
         }
-        .insert(&self.db)
-        .await?)
+        .insert(&tx)
+        .await?;
+        for permission in permissions {
+            permission_grant::ActiveModel {
+                permission: Set(permission.clone()),
+                role_id: Set(Some(role.id)),
+                user_id: Set(None),
+                is_granted: Set(true),
+                ..Default::default()
+            }
+            .insert(&tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(role)
     }
 
     /// Find or create the static `Admin` role for a tenant. Called at
