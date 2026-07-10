@@ -82,6 +82,12 @@ impl Module for AuthModule {
             tenants: ctx.tenants(),
         };
         ctx.add_permissions(super::permission::administration_tree());
+        ctx.add_api(crate::module::build_openapi(|| {
+            <AccountApiDoc as utoipa::OpenApi>::openapi()
+        }));
+        ctx.add_api(crate::module::build_openapi(|| {
+            <AdminApiDoc as utoipa::OpenApi>::openapi()
+        }));
         ctx.add_routes(
             Router::new()
                 .route("/auth/register", post(register))
@@ -114,6 +120,44 @@ impl Module for AuthModule {
         );
     }
 }
+
+/// The auth module's OpenAPI contribution — the source client generators
+/// (NSwag) build the `auth` service proxy from. Split into two documents
+/// merged at boot: the derive expands each into one giant expression, and
+/// keeping them moderate keeps unoptimized builds within stack limits.
+#[derive(utoipa::OpenApi)]
+#[openapi(paths(
+    register,
+    login,
+    login_two_factor,
+    two_factor_setup,
+    two_factor_confirm,
+    two_factor_disable,
+    refresh,
+    logout,
+    change_password,
+    me,
+    my_permissions,
+))]
+struct AccountApiDoc;
+
+#[derive(utoipa::OpenApi)]
+#[openapi(paths(
+    tenant_two_factor,
+    tenant_migrate,
+    create_user,
+    list_users,
+    set_user_admin,
+    set_user_roles,
+    user_permissions,
+    set_user_permissions,
+    create_role,
+    list_roles,
+    update_role,
+    delete_role,
+    permission_tree,
+))]
+struct AdminApiDoc;
 
 impl AuthState {
     /// The user store for the current request's context.
@@ -155,6 +199,9 @@ pub struct RegisterResponse {
 
 /// Company registration: the email and password provided here become the
 /// tenant's admin account, seeded with the static `Admin` role.
+#[utoipa::path(post, path = "/auth/register", tag = "auth",
+    request_body = RegisterRequest,
+    responses((status = 200, body = RegisterResponse)))]
 async fn register(
     State(state): State<AuthState>,
     Extension(registry): Extension<Arc<Registry>>,
@@ -262,6 +309,9 @@ pub enum LoginResponse {
     TwoFactorSetupRequired { two_factor_token: String },
 }
 
+#[utoipa::path(post, path = "/auth/login", tag = "auth",
+    request_body = LoginRequest,
+    responses((status = 200, body = LoginResponse)))]
 async fn login(
     State(state): State<AuthState>,
     tenant: Option<Extension<TenantRef>>,
@@ -318,6 +368,9 @@ pub struct TwoFactorLoginRequest {
     pub code: String,
 }
 
+#[utoipa::path(post, path = "/auth/login/two-factor", tag = "auth",
+    request_body = TwoFactorLoginRequest,
+    responses((status = 200, body = LoginResponse)))]
 async fn login_two_factor(
     State(state): State<AuthState>,
     TwoFactorUser(user): TwoFactorUser,
@@ -356,6 +409,8 @@ async fn setup_user(
     Err(Error::Unauthorized)
 }
 
+#[utoipa::path(post, path = "/auth/two-factor/setup", tag = "auth",
+    responses((status = 200, body = TwoFactorSetup)))]
 async fn two_factor_setup(
     State(state): State<AuthState>,
     current: Result<CurrentUser, axum::response::Response>,
@@ -379,6 +434,9 @@ pub struct ConfirmTwoFactorResponse {
     pub recovery_codes: Vec<String>,
 }
 
+#[utoipa::path(post, path = "/auth/two-factor/confirm", tag = "auth",
+    request_body = ConfirmTwoFactorRequest,
+    responses((status = 200, body = ConfirmTwoFactorResponse)))]
 async fn two_factor_confirm(
     State(state): State<AuthState>,
     current: Result<CurrentUser, axum::response::Response>,
@@ -406,6 +464,9 @@ pub struct DisableTwoFactorRequest {
     pub password: String,
 }
 
+#[utoipa::path(post, path = "/auth/two-factor/disable", tag = "auth",
+    request_body = DisableTwoFactorRequest,
+    responses((status = 200, body = Profile)))]
 async fn two_factor_disable(
     State(state): State<AuthState>,
     CurrentUser(user): CurrentUser,
@@ -441,14 +502,36 @@ pub struct TenantTwoFactorRequest {
     pub required: bool,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct TenantTwoFactorResponse {
+    pub tenant: String,
+    pub require_two_factor: bool,
+}
+
+/// Generic acknowledgement for operations without a richer result.
+#[derive(Serialize, ToSchema)]
+pub struct StatusResponse {
+    pub status: String,
+}
+
+/// A background job was accepted onto a queue.
+#[derive(Serialize, ToSchema)]
+pub struct QueuedJobResponse {
+    pub status: String,
+    pub task_id: String,
+}
+
 /// Company-wide policy switch; requires the tenant-settings permission.
+#[utoipa::path(post, path = "/auth/tenant/two-factor", tag = "auth",
+    request_body = TenantTwoFactorRequest,
+    responses((status = 200, body = TenantTwoFactorResponse)))]
 async fn tenant_two_factor(
     State(state): State<AuthState>,
     authz: Authz,
     audit: Audit,
     tenant: Option<Extension<TenantRef>>,
     Json(req): Json<TenantTwoFactorRequest>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<TenantTwoFactorResponse>> {
     let Some(manager) = &state.tenants else {
         return Err(Error::Validation(
             "multitenancy is not enabled on this deployment".into(),
@@ -474,20 +557,22 @@ async fn tenant_two_factor(
             &serde_json::json!({ "require_two_factor": tenant.require_two_factor }),
         )
         .await;
-    Ok(Json(serde_json::json!({
-        "tenant": tenant.name,
-        "require_two_factor": tenant.require_two_factor,
-    })))
+    Ok(Json(TenantTwoFactorResponse {
+        tenant: tenant.name,
+        require_two_factor: tenant.require_two_factor,
+    }))
 }
 
 /// Queue a background migration of the caller's tenant database — how a
 /// tenant picks up newly deployed features without waiting for the next
 /// restart. Needs `jobs.enabled`.
+#[utoipa::path(post, path = "/auth/tenant/migrate", tag = "auth",
+    responses((status = 200, body = QueuedJobResponse)))]
 async fn tenant_migrate(
     authz: Authz,
     audit: Audit,
     jobs: Option<Extension<crate::jobs::Jobs>>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<QueuedJobResponse>> {
     authz.require(permission::names::TENANT_SETTINGS).await?;
     let Some(Extension(jobs)) = jobs else {
         return Err(Error::Validation(
@@ -509,11 +594,14 @@ async fn tenant_migrate(
             authz.user.user_name
         ))
         .await;
-    Ok(Json(
-        serde_json::json!({ "status": "queued", "task_id": task_id }),
-    ))
+    Ok(Json(QueuedJobResponse {
+        status: "queued".into(),
+        task_id,
+    }))
 }
 
+#[utoipa::path(get, path = "/auth/me", tag = "auth",
+    responses((status = 200, body = Profile)))]
 async fn me(CurrentUser(user): CurrentUser) -> Json<Profile> {
     Json(user.into())
 }
@@ -525,6 +613,9 @@ pub struct RefreshRequest {
 
 /// Exchange a refresh token for a fresh access/refresh pair. The old
 /// token is revoked; reusing it later revokes every session of the user.
+#[utoipa::path(post, path = "/auth/token/refresh", tag = "auth",
+    request_body = RefreshRequest,
+    responses((status = 200, body = LoginResponse)))]
 async fn refresh(
     State(state): State<AuthState>,
     db: Option<Extension<DatabaseConnection>>,
@@ -540,16 +631,21 @@ async fn refresh(
     }))
 }
 
+#[utoipa::path(post, path = "/auth/logout", tag = "auth",
+    request_body = RefreshRequest,
+    responses((status = 200, body = StatusResponse)))]
 async fn logout(
     State(state): State<AuthState>,
     db: Option<Extension<DatabaseConnection>>,
     audit: Audit,
     Json(req): Json<RefreshRequest>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<StatusResponse>> {
     let users = state.users(db.map(|Extension(d)| d));
     users.revoke_refresh_token(&req.refresh_token).await?;
     audit.0.event("a session logged out").await;
-    Ok(Json(serde_json::json!({ "status": "logged_out" })))
+    Ok(Json(StatusResponse {
+        status: "logged_out".into(),
+    }))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -560,6 +656,9 @@ pub struct ChangePasswordRequest {
 
 /// Changing the password rotates the security stamp and revokes all
 /// refresh tokens — every other session has to sign in again.
+#[utoipa::path(post, path = "/auth/password", tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses((status = 200, body = Profile)))]
 async fn change_password(
     State(state): State<AuthState>,
     CurrentUser(user): CurrentUser,
@@ -593,6 +692,9 @@ pub struct CreateUserRequest {
 }
 
 /// Team onboarding; requires the user-creation permission.
+#[utoipa::path(post, path = "/auth/users", tag = "auth",
+    request_body = CreateUserRequest,
+    responses((status = 200, body = Profile)))]
 async fn create_user(
     State(state): State<AuthState>,
     authz: Authz,
@@ -621,6 +723,8 @@ async fn create_user(
     Ok(Json(profile))
 }
 
+#[utoipa::path(get, path = "/auth/users", tag = "auth",
+    responses((status = 200, body = Vec<Profile>)))]
 async fn list_users(
     State(state): State<AuthState>,
     authz: Authz,
@@ -641,6 +745,10 @@ pub struct SetAdminRequest {
 /// or revokes the static `Admin` role (which implicitly holds every
 /// permission) for anyone later. Admins cannot demote themselves, so a
 /// tenant can never lose its last admin by accident.
+#[utoipa::path(put, path = "/auth/users/{id}/admin", tag = "auth",
+    params(("id" = i32, Path, description = "User id")),
+    request_body = SetAdminRequest,
+    responses((status = 200, body = Profile)))]
 async fn set_user_admin(
     State(state): State<AuthState>,
     authz: Authz,
@@ -729,12 +837,16 @@ pub struct UserPermissionsResponse {
 }
 
 /// The full permission definition tree, for admin UIs.
+#[utoipa::path(get, path = "/auth/permissions", tag = "auth",
+    responses((status = 200, body = Vec<PermissionDef>)))]
 async fn permission_tree(authz: Authz) -> Result<Json<Vec<PermissionDef>>> {
     authz.require(permission::names::ROLES_VIEW).await?;
     Ok(Json(authz.registry().tree().to_vec()))
 }
 
 /// The caller's own effective permissions — any authenticated user.
+#[utoipa::path(get, path = "/auth/me/permissions", tag = "auth",
+    responses((status = 200, body = Vec<String>)))]
 async fn my_permissions(authz: Authz) -> Result<Json<Vec<String>>> {
     let mut names: Vec<String> = authz.granted_permissions().await?.into_iter().collect();
     names.sort();
@@ -762,6 +874,8 @@ async fn tenant_role(authz: &Authz, role_id: i32) -> Result<super::role::Model> 
     Ok(role)
 }
 
+#[utoipa::path(get, path = "/auth/roles", tag = "auth",
+    responses((status = 200, body = Vec<RoleResponse>)))]
 async fn list_roles(authz: Authz) -> Result<Json<Vec<RoleResponse>>> {
     authz.require(permission::names::ROLES_VIEW).await?;
     let mut out = Vec::new();
@@ -771,6 +885,9 @@ async fn list_roles(authz: Authz) -> Result<Json<Vec<RoleResponse>>> {
     Ok(Json(out))
 }
 
+#[utoipa::path(post, path = "/auth/roles", tag = "auth",
+    request_body = CreateRoleRequest,
+    responses((status = 200, body = RoleResponse)))]
 async fn create_role(
     authz: Authz,
     audit: Audit,
@@ -791,6 +908,10 @@ async fn create_role(
     Ok(Json(response))
 }
 
+#[utoipa::path(put, path = "/auth/roles/{id}", tag = "auth",
+    params(("id" = i32, Path, description = "Role id")),
+    request_body = UpdateRoleRequest,
+    responses((status = 200, body = RoleResponse)))]
 async fn update_role(
     authz: Authz,
     audit: Audit,
@@ -814,21 +935,30 @@ async fn update_role(
     Ok(Json(after))
 }
 
+#[utoipa::path(delete, path = "/auth/roles/{id}", tag = "auth",
+    params(("id" = i32, Path, description = "Role id")),
+    responses((status = 200, body = StatusResponse)))]
 async fn delete_role(
     authz: Authz,
     audit: Audit,
     axum::extract::Path(role_id): axum::extract::Path<i32>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<StatusResponse>> {
     authz.require(permission::names::ROLES_DELETE).await?;
     let role = tenant_role(&authz, role_id).await?;
     let before = role_response(authz.roles(), role.clone()).await?;
     authz.roles().delete_role(role.id).await?;
     audit.0.deleted("role", before.id, &before).await;
-    Ok(Json(serde_json::json!({ "status": "deleted" })))
+    Ok(Json(StatusResponse {
+        status: "deleted".into(),
+    }))
 }
 
 /// Replace a user's role set. Changing your own roles is refused — an
 /// admin locking themselves out is never one call away.
+#[utoipa::path(put, path = "/auth/users/{id}/roles", tag = "auth",
+    params(("id" = i32, Path, description = "User id")),
+    request_body = SetUserRolesRequest,
+    responses((status = 200, body = Vec<RoleResponse>)))]
 async fn set_user_roles(
     State(state): State<AuthState>,
     authz: Authz,
@@ -874,6 +1004,9 @@ async fn set_user_roles(
     Ok(Json(out))
 }
 
+#[utoipa::path(get, path = "/auth/users/{id}/permissions", tag = "auth",
+    params(("id" = i32, Path, description = "User id")),
+    responses((status = 200, body = UserPermissionsResponse)))]
 async fn user_permissions(
     State(state): State<AuthState>,
     authz: Authz,
@@ -886,6 +1019,10 @@ async fn user_permissions(
 }
 
 /// Replace a user's per-user overrides. Like roles, never on yourself.
+#[utoipa::path(put, path = "/auth/users/{id}/permissions", tag = "auth",
+    params(("id" = i32, Path, description = "User id")),
+    request_body = SetUserPermissionsRequest,
+    responses((status = 200, body = UserPermissionsResponse)))]
 async fn set_user_permissions(
     State(state): State<AuthState>,
     authz: Authz,

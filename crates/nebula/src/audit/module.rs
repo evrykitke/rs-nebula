@@ -48,6 +48,9 @@ impl Module for AuditModule {
         ctx.add_permissions(PermissionDef::new(names::AUDIT_LOGS, "Audit logs").child(
             PermissionDef::new(names::AUDIT_LOGS_VIEW, "View audit logs"),
         ));
+        ctx.add_api(crate::module::build_openapi(|| {
+            <ApiDoc as utoipa::OpenApi>::openapi()
+        }));
         let state = AuditState {
             config: ctx.config().audit.clone(),
             tenants: ctx.tenants(),
@@ -63,7 +66,14 @@ impl Module for AuditModule {
     }
 }
 
-#[derive(Deserialize)]
+/// The audit module's OpenAPI contribution — the source client generators
+/// (NSwag) build the `audit` service proxy from.
+#[derive(utoipa::OpenApi)]
+#[openapi(paths(list_logs, get_log, get_log_diff, get_retention, set_retention))]
+struct ApiDoc;
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct LogQuery {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
@@ -72,6 +82,9 @@ pub struct LogQuery {
     pub user_id: Option<i32>,
 }
 
+#[utoipa::path(get, path = "/audit/logs", tag = "audit",
+    params(LogQuery),
+    responses((status = 200, body = Vec<log::Model>)))]
 async fn list_logs(
     authz: Authz,
     Extension(db): Extension<DatabaseConnection>,
@@ -95,6 +108,9 @@ async fn list_logs(
     Ok(Json(select.all(&db).await?))
 }
 
+#[utoipa::path(get, path = "/audit/logs/{id}", tag = "audit",
+    params(("id" = i64, Path, description = "Audit log entry id")),
+    responses((status = 200, body = log::Model)))]
 async fn get_log(
     authz: Authz,
     Extension(db): Extension<DatabaseConnection>,
@@ -104,7 +120,7 @@ async fn get_log(
     tenant_log(&db, authz.user.tenant_id, id).await.map(Json)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct LogDiff {
     pub id: i64,
     pub action: String,
@@ -114,6 +130,9 @@ pub struct LogDiff {
     pub changes: Vec<FieldChange>,
 }
 
+#[utoipa::path(get, path = "/audit/logs/{id}/diff", tag = "audit",
+    params(("id" = i64, Path, description = "Audit log entry id")),
+    responses((status = 200, body = LogDiff)))]
 async fn get_log_diff(
     authz: Authz,
     Extension(db): Extension<DatabaseConnection>,
@@ -149,13 +168,13 @@ fn tenant_filter(tenant_id: Option<i32>) -> sea_orm::sea_query::SimpleExpr {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RetentionRequest {
     /// Days to keep audit rows; null reverts to the system default.
     pub retention_days: Option<i32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct RetentionResponse {
     /// The tenant's override, when one is set.
     pub retention_days: Option<i32>,
@@ -187,6 +206,8 @@ impl AuditState {
     }
 }
 
+#[utoipa::path(get, path = "/audit/retention", tag = "audit",
+    responses((status = 200, body = RetentionResponse)))]
 async fn get_retention(
     State(state): State<AuditState>,
     authz: Authz,
@@ -200,6 +221,9 @@ async fn get_retention(
     Ok(Json(state.response(tenant.audit_retention_days)))
 }
 
+#[utoipa::path(put, path = "/audit/retention", tag = "audit",
+    request_body = RetentionRequest,
+    responses((status = 200, body = RetentionResponse)))]
 async fn set_retention(
     State(state): State<AuditState>,
     authz: Authz,

@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct FieldChange {
     pub field: String,
     #[serde(skip_serializing_if = "Option::is_none")]

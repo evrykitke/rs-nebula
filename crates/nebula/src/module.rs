@@ -39,6 +39,7 @@ pub struct ModuleContext<'a> {
     router: Router,
     permissions: Vec<PermissionDef>,
     workers: Vec<WorkerRegistration>,
+    api_docs: Vec<utoipa::openapi::OpenApi>,
 }
 
 impl<'a> ModuleContext<'a> {
@@ -58,6 +59,7 @@ impl<'a> ModuleContext<'a> {
             router: Router::new(),
             permissions: Vec::new(),
             workers: Vec::new(),
+            api_docs: Vec::new(),
         }
     }
 
@@ -128,7 +130,43 @@ impl<'a> ModuleContext<'a> {
         self.workers.push(Box::new(register));
     }
 
-    pub(crate) fn into_parts(self) -> (Router, Vec<PermissionDef>, Vec<WorkerRegistration>) {
-        (self.router, self.permissions, self.workers)
+    /// Contribute an OpenAPI document describing the module's endpoints;
+    /// merged into the application document served at
+    /// `/api-docs/openapi.json` (the input for client generators).
+    pub fn add_api(&mut self, api: utoipa::openapi::OpenApi) {
+        self.api_docs.push(api);
     }
+
+    pub(crate) fn into_parts(self) -> ModuleParts {
+        ModuleParts {
+            router: self.router,
+            permissions: self.permissions,
+            workers: self.workers,
+            api_docs: self.api_docs,
+        }
+    }
+}
+
+/// Build an OpenAPI document on a dedicated thread with a large stack.
+/// The `OpenApi` derive expands to a single deeply-nested expression, and
+/// evaluating it for a module with many endpoints can overflow the
+/// default stack in unoptimized builds.
+pub fn build_openapi<F>(build: F) -> utoipa::openapi::OpenApi
+where
+    F: FnOnce() -> utoipa::openapi::OpenApi + Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(build)
+        .expect("failed to spawn the openapi builder thread")
+        .join()
+        .expect("openapi construction panicked")
+}
+
+/// Everything the modules contributed, handed back to the kernel.
+pub(crate) struct ModuleParts {
+    pub router: Router,
+    pub permissions: Vec<PermissionDef>,
+    pub workers: Vec<WorkerRegistration>,
+    pub api_docs: Vec<utoipa::openapi::OpenApi>,
 }

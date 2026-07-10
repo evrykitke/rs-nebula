@@ -145,20 +145,21 @@ impl Kernel {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
         }
-        let (router, permission_defs, worker_regs) = ctx.into_parts();
-        let permissions = Arc::new(permission::Registry::build(permission_defs)?);
+        let parts = ctx.into_parts();
+        let permissions = Arc::new(permission::Registry::build(parts.permissions)?);
         tracing::info!(count = permissions.len(), "permission registry built");
         let router = crate::web::finalize(
-            router,
+            parts.router,
             &self.config,
             database.clone(),
             tenants.clone(),
             permissions.clone(),
             jobs.clone(),
+            parts.api_docs,
         );
 
         let monitor = match &jobs {
-            Some(client) => Some(self.build_monitor(client, &database, &tenants, worker_regs)),
+            Some(client) => Some(self.build_monitor(client, &database, &tenants, parts.workers)),
             None => None,
         };
 

@@ -15,7 +15,10 @@ pub struct PermissionDef {
     /// Dot-separated unique name, e.g. `Pages.Sales.Invoices.Post`.
     pub name: String,
     pub display_name: String,
+    /// `no_recursion` stops utoipa's schema builder from recursing into
+    /// the self-referential type forever.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(no_recursion)]
     pub children: Vec<PermissionDef>,
 }
 

@@ -7,8 +7,9 @@
 use sea_orm::entity::prelude::*;
 use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, utoipa::ToSchema)]
 #[sea_orm(table_name = "audit_logs")]
+#[schema(as = AuditLog)]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
@@ -34,6 +35,9 @@ pub struct Model {
     /// Snapshot after the change (`create`/`update` rows).
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub new_values: Option<Json>,
+    /// The sea_orm alias hides the chrono type from utoipa's derive, so
+    /// the schema type is spelled out.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     pub created_at: DateTimeUtc,
 }
 

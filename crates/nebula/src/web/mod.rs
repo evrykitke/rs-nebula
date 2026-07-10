@@ -43,8 +43,12 @@ pub(crate) fn finalize(
     tenants: Option<std::sync::Arc<crate::tenancy::TenantManager>>,
     permissions: std::sync::Arc<crate::auth::permission::Registry>,
     jobs: Option<crate::jobs::Jobs>,
+    api_docs: Vec<utoipa::openapi::OpenApi>,
 ) -> Router {
-    let api = ApiDoc::openapi();
+    let mut api = ApiDoc::openapi();
+    for doc in api_docs {
+        api.merge(doc);
+    }
 
     let mut router = router
         .merge(health::routes(config, database.clone()))
