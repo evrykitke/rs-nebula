@@ -9,6 +9,7 @@ use sea_orm::entity::prelude::*;
 use sea_orm::{DatabaseConnection, QueryOrder, Set};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, serde::Serialize, utoipa::ToSchema)]
+#[schema(as = Currency)]
 #[sea_orm(table_name = "currencies")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
