@@ -20,3 +20,5 @@ chrono.workspace = true
 rust_decimal.workspace = true
 sea-orm.workspace = true
 sea-orm-migration.workspace = true
+serde.workspace = true
+uuid.workspace = true

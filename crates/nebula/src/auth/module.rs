@@ -91,6 +91,7 @@ impl Module for AuthModule {
                 .route("/auth/two-factor/confirm", post(two_factor_confirm))
                 .route("/auth/two-factor/disable", post(two_factor_disable))
                 .route("/auth/tenant/two-factor", post(tenant_two_factor))
+                .route("/auth/tenant/migrate", post(tenant_migrate))
                 .route("/auth/token/refresh", post(refresh))
                 .route("/auth/logout", post(logout))
                 .route("/auth/password", post(change_password))
@@ -477,6 +478,40 @@ async fn tenant_two_factor(
         "tenant": tenant.name,
         "require_two_factor": tenant.require_two_factor,
     })))
+}
+
+/// Queue a background migration of the caller's tenant database — how a
+/// tenant picks up newly deployed features without waiting for the next
+/// restart. Needs `jobs.enabled`.
+async fn tenant_migrate(
+    authz: Authz,
+    audit: Audit,
+    jobs: Option<Extension<crate::jobs::Jobs>>,
+) -> Result<Json<serde_json::Value>> {
+    authz.require(permission::names::TENANT_SETTINGS).await?;
+    let Some(Extension(jobs)) = jobs else {
+        return Err(Error::Validation(
+            "background jobs are not enabled on this deployment".into(),
+        ));
+    };
+    let task_id = jobs
+        .enqueue(
+            crate::jobs::TENANT_MIGRATION_QUEUE,
+            crate::jobs::MigrateTenants {
+                tenant_id: authz.user.tenant_id,
+            },
+        )
+        .await?;
+    audit
+        .0
+        .event(format!(
+            "{} queued a tenant database migration",
+            authz.user.user_name
+        ))
+        .await;
+    Ok(Json(
+        serde_json::json!({ "status": "queued", "task_id": task_id }),
+    ))
 }
 
 async fn me(CurrentUser(user): CurrentUser) -> Json<Profile> {

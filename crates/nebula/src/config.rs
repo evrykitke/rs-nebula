@@ -73,6 +73,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
     pub audit: AuditConfig,
+    pub jobs: JobsConfig,
     pub currencies: Vec<CurrencyConfig>,
 }
 
@@ -88,7 +89,28 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             auth: AuthConfig::default(),
             audit: AuditConfig::default(),
+            jobs: JobsConfig::default(),
             currencies: Vec::new(),
+        }
+    }
+}
+
+/// Background job settings. Workers connect through `redis.url`; boot
+/// fails fast when jobs are enabled but Redis is unreachable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JobsConfig {
+    /// Run the apalis job workers alongside the web host.
+    pub enabled: bool,
+    /// Concurrent jobs per worker.
+    pub concurrency: usize,
+}
+
+impl Default for JobsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            concurrency: 2,
         }
     }
 }

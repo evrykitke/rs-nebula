@@ -14,10 +14,12 @@ use crate::auth::permission;
 use crate::config::Config;
 use crate::db;
 use crate::error::{Error, Result};
+use crate::jobs::Jobs;
 use crate::logging::{self, LoggingError};
 use crate::module::{Module, ModuleContext};
 use crate::money::CurrencyRegistry;
 use crate::tenancy::TenantManager;
+use apalis::prelude::{Monitor, WorkerBuilder, WorkerFactoryFn};
 use axum::Router;
 use sea_orm::DatabaseConnection;
 use sea_orm_migration::MigratorTrait;
@@ -29,7 +31,7 @@ use tokio::net::TcpListener;
 /// Type-erased migration runner so the kernel does not carry the
 /// application's migrator type around. Shared so the same migrations
 /// can run on the main and each tenant database.
-type MigrationRunner = Arc<
+pub(crate) type MigrationRunner = Arc<
     dyn Fn(DatabaseConnection) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
 >;
 
@@ -120,17 +122,30 @@ impl Kernel {
 
         let currencies = Arc::new(CurrencyRegistry::from_config(&self.config.currencies)?);
 
+        let jobs = if self.config.jobs.enabled {
+            let conn = apalis_redis::connect(self.config.redis.url.expose())
+                .await
+                .map_err(|e| {
+                    Error::internal(format!("jobs are enabled but Redis is unreachable: {e}"))
+                })?;
+            tracing::info!("job queue connected to redis");
+            Some(Jobs::new(conn))
+        } else {
+            None
+        };
+
         let mut ctx = ModuleContext::new(
             &self.config,
             database.clone(),
             currencies.clone(),
             tenants.clone(),
+            jobs.clone(),
         );
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
         }
-        let (router, permission_defs) = ctx.into_parts();
+        let (router, permission_defs, worker_regs) = ctx.into_parts();
         let permissions = Arc::new(permission::Registry::build(permission_defs)?);
         tracing::info!(count = permissions.len(), "permission registry built");
         let router = crate::web::finalize(
@@ -139,7 +154,13 @@ impl Kernel {
             database.clone(),
             tenants.clone(),
             permissions.clone(),
+            jobs.clone(),
         );
+
+        let monitor = match &jobs {
+            Some(client) => Some(self.build_monitor(client, &database, &tenants, worker_regs)),
+            None => None,
+        };
 
         Ok(App {
             config: self.config,
@@ -148,12 +169,62 @@ impl Kernel {
             currencies,
             tenants,
             permissions,
+            jobs,
+            monitor,
         })
     }
 
     /// Boot and serve until shutdown.
     pub async fn run(self) -> Result<()> {
         self.init().await?.serve().await
+    }
+
+    /// Assemble the apalis monitor: built-in workers (audit pruner cron,
+    /// tenant migrations) plus every module-contributed registration.
+    fn build_monitor(
+        &self,
+        jobs: &Jobs,
+        database: &Option<DatabaseConnection>,
+        tenants: &Option<Arc<TenantManager>>,
+        worker_regs: Vec<crate::module::WorkerRegistration>,
+    ) -> Monitor {
+        let mut monitor = Monitor::new();
+
+        if let Some(manager) = tenants {
+            let ctx = crate::jobs::MigrationContext {
+                tenants: manager.clone(),
+                app_migrations: self.migrations.clone(),
+            };
+            monitor = monitor.register(
+                WorkerBuilder::new("nebula-tenant-migrations")
+                    .data(ctx)
+                    .backend(jobs.storage::<crate::jobs::MigrateTenants>(
+                        crate::jobs::TENANT_MIGRATION_QUEUE,
+                    ))
+                    .build_fn(crate::jobs::run_tenant_migrations),
+            );
+        }
+
+        if let (Some(db), true) = (database, self.config.audit.enabled) {
+            let ctx = crate::audit::pruner::PruneContext {
+                db: db.clone(),
+                tenants: tenants.clone(),
+                config: self.config.audit.clone(),
+            };
+            let schedule =
+                crate::audit::pruner::interval_schedule(self.config.audit.prune_interval_secs);
+            monitor = monitor.register(
+                WorkerBuilder::new("nebula-audit-pruner")
+                    .data(ctx)
+                    .backend(apalis_cron::CronStream::new(schedule))
+                    .build_fn(crate::audit::pruner::prune_tick),
+            );
+        }
+
+        for register in worker_regs {
+            monitor = register(monitor);
+        }
+        monitor
     }
 }
 
@@ -166,6 +237,8 @@ pub struct App {
     currencies: Arc<CurrencyRegistry>,
     tenants: Option<Arc<TenantManager>>,
     permissions: Arc<permission::Registry>,
+    jobs: Option<Jobs>,
+    monitor: Option<Monitor>,
 }
 
 impl App {
@@ -195,10 +268,34 @@ impl App {
         self.permissions.clone()
     }
 
+    /// The job client, when `jobs.enabled` is on.
+    pub fn jobs(&self) -> Option<Jobs> {
+        self.jobs.clone()
+    }
+
+    /// Start the job workers (idempotent; `serve` calls this). Answers
+    /// whether a monitor was started — tests drive workers with this
+    /// without binding a socket.
+    pub fn start_jobs(&mut self) -> bool {
+        let Some(monitor) = self.monitor.take() else {
+            return false;
+        };
+        tracing::info!("starting job workers");
+        tokio::spawn(async move {
+            if let Err(e) = monitor.run_with_signal(tokio::signal::ctrl_c()).await {
+                tracing::error!(error = %e, "job monitor exited with an error");
+            }
+        });
+        true
+    }
+
     /// Serve until ctrl-c, then shut down gracefully so in-flight
     /// requests complete instead of being severed.
-    pub async fn serve(self) -> Result<()> {
-        if let (Some(db), true) = (&self.database, self.config.audit.enabled) {
+    pub async fn serve(mut self) -> Result<()> {
+        let jobs_started = self.start_jobs();
+        // Without the job system the audit pruner falls back to a plain
+        // in-process interval.
+        if !jobs_started && let (Some(db), true) = (&self.database, self.config.audit.enabled) {
             crate::audit::pruner::spawn(
                 db.clone(),
                 self.tenants.clone(),

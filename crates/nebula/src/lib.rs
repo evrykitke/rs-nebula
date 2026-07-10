@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod jobs;
 pub mod kernel;
 pub mod logging;
 pub mod migrations;
@@ -26,6 +27,11 @@ pub use rust_decimal::Decimal;
 /// Re-exported so applications use the same SeaORM the framework links.
 pub use sea_orm;
 pub use sea_orm_migration;
+
+/// Re-exported so applications build workers against the same apalis.
+pub use apalis;
+
+pub use jobs::Jobs;
 
 pub use audit::AuditModule;
 pub use auth::{AuthModule, CurrentUser as AuthUser, UserManager};

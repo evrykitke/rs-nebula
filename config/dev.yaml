@@ -9,6 +9,10 @@ server:
 multitenancy:
   enabled: true
 
+# Workers connect through redis.url (docker compose up -d).
+jobs:
+  enabled: true
+
 logging:
   level: info
   format: pretty

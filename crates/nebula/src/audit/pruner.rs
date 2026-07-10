@@ -3,8 +3,9 @@
 //! `audit.retention_days` (30); each tenant may override it via
 //! `PUT /audit/retention`, capped at `audit.retention_max_days` (six
 //! months). The job runs every `audit.prune_interval_secs` while the
-//! application serves; [`prune_once`] is public so tests and operators
-//! can trigger a pass directly.
+//! application serves — as an apalis cron worker when `jobs.enabled`,
+//! otherwise on a plain interval; [`prune_once`] is public so tests and
+//! operators can trigger a pass directly.
 
 use super::log;
 use crate::config::AuditConfig;
@@ -78,4 +79,43 @@ pub(crate) fn spawn(
             }
         }
     });
+}
+
+/// The cron tick when the pruner runs as an apalis worker.
+#[derive(Debug, Default, Clone)]
+pub struct PruneTick;
+
+/// Worker state for [`prune_tick`].
+#[derive(Clone)]
+pub(crate) struct PruneContext {
+    pub db: DatabaseConnection,
+    pub tenants: Option<Arc<TenantManager>>,
+    pub config: AuditConfig,
+}
+
+pub(crate) async fn prune_tick(
+    _tick: PruneTick,
+    ctx: apalis::prelude::Data<PruneContext>,
+) -> Result<()> {
+    let deleted = prune_once(&ctx.db, ctx.tenants.as_ref(), &ctx.config).await?;
+    if deleted > 0 {
+        tracing::info!(deleted, "pruned expired audit log rows");
+    }
+    Ok(())
+}
+
+/// `prune_interval_secs` as a cron schedule for the apalis worker.
+pub(crate) fn interval_schedule(secs: u64) -> apalis_cron::Schedule {
+    let secs = secs.max(1);
+    let expr = if secs % 86_400 == 0 {
+        "0 0 0 * * *".to_string()
+    } else if secs % 3600 == 0 {
+        format!("0 0 */{} * * *", (secs / 3600).clamp(1, 23))
+    } else if secs % 60 == 0 {
+        format!("0 */{} * * * *", (secs / 60).clamp(1, 59))
+    } else {
+        format!("*/{} * * * * *", secs.clamp(1, 59))
+    };
+    expr.parse()
+        .expect("generated cron expression must be valid")
 }

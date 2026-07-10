@@ -4,11 +4,17 @@
 
 use crate::auth::permission::PermissionDef;
 use crate::config::Config;
+use crate::jobs::Jobs;
 use crate::money::CurrencyRegistry;
 use crate::tenancy::TenantManager;
+use apalis::prelude::Monitor;
 use axum::Router;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
+
+/// A deferred worker registration: applied to the kernel's apalis
+/// monitor after every module has configured.
+pub(crate) type WorkerRegistration = Box<dyn FnOnce(Monitor) -> Monitor + Send>;
 
 /// A composable unit of application functionality.
 ///
@@ -29,8 +35,10 @@ pub struct ModuleContext<'a> {
     database: Option<DatabaseConnection>,
     currencies: Arc<CurrencyRegistry>,
     tenants: Option<Arc<TenantManager>>,
+    jobs: Option<Jobs>,
     router: Router,
     permissions: Vec<PermissionDef>,
+    workers: Vec<WorkerRegistration>,
 }
 
 impl<'a> ModuleContext<'a> {
@@ -39,14 +47,17 @@ impl<'a> ModuleContext<'a> {
         database: Option<DatabaseConnection>,
         currencies: Arc<CurrencyRegistry>,
         tenants: Option<Arc<TenantManager>>,
+        jobs: Option<Jobs>,
     ) -> Self {
         Self {
             config,
             database,
             currencies,
             tenants,
+            jobs,
             router: Router::new(),
             permissions: Vec::new(),
+            workers: Vec::new(),
         }
     }
 
@@ -92,7 +103,32 @@ impl<'a> ModuleContext<'a> {
         self.permissions.push(tree);
     }
 
-    pub(crate) fn into_parts(self) -> (Router, Vec<PermissionDef>) {
-        (self.router, self.permissions)
+    /// The job client, when `jobs.enabled` is on — for enqueueing and
+    /// for building worker backends via [`Jobs::storage`].
+    pub fn jobs(&self) -> Option<Jobs> {
+        self.jobs.clone()
+    }
+
+    /// Contribute a background worker. The registration runs against the
+    /// kernel's apalis monitor after all modules configure; it is
+    /// silently dropped when jobs are disabled.
+    ///
+    /// ```ignore
+    /// let jobs = ctx.jobs().expect("this module requires jobs.enabled");
+    /// let storage = jobs.storage::<SendEmail>("emails");
+    /// ctx.add_worker(move |monitor| {
+    ///     monitor.register(
+    ///         WorkerBuilder::new("emails")
+    ///             .backend(storage)
+    ///             .build_fn(send_email),
+    ///     )
+    /// });
+    /// ```
+    pub fn add_worker(&mut self, register: impl FnOnce(Monitor) -> Monitor + Send + 'static) {
+        self.workers.push(Box::new(register));
+    }
+
+    pub(crate) fn into_parts(self) -> (Router, Vec<PermissionDef>, Vec<WorkerRegistration>) {
+        (self.router, self.permissions, self.workers)
     }
 }
