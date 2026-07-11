@@ -23,6 +23,10 @@ impl ReportDefinition for WorkspaceOverview {
         "Workspace Overview"
     }
 
+    fn group(&self) -> &'static str {
+        "Workspace"
+    }
+
     fn default_format(&self) -> ReportFormat {
         ReportFormat::Modern
     }
@@ -205,6 +209,10 @@ impl ReportDefinition for SampleRegister {
 
     fn title(&self) -> &'static str {
         "Sample Register"
+    }
+
+    fn group(&self) -> &'static str {
+        "Workspace"
     }
 
     fn outputs(&self) -> &'static [ReportOutput] {

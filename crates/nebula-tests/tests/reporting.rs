@@ -133,10 +133,16 @@ async fn run(url: &str) -> Result<(), String> {
         .map_err(|e| format!("register pdf failed: {e}"))?;
     assert_pdf(&rendered.bytes, "register (pdf)")?;
     dump("sample-register.pdf", &rendered.bytes);
-    reporting
+    let xlsx = reporting
         .render(&render_cx(&app), "sample-register", None, ReportOutput::Excel)
         .await
         .map_err(|e| format!("register excel failed: {e}"))?;
+    if xlsx.bytes.len() < 200 || &xlsx.bytes[..2] != b"PK" {
+        return Err("register Excel is not a valid xlsx (missing ZIP magic)".into());
+    }
+    if xlsx.extension != "xlsx" {
+        return Err(format!("expected xlsx extension, got {}", xlsx.extension));
+    }
 
     // The overview does not support Excel.
     if reporting

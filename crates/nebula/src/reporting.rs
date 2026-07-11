@@ -680,6 +680,12 @@ pub trait ReportDefinition: Send + Sync {
     fn name(&self) -> &'static str;
     /// Human title shown in the UI and on the document.
     fn title(&self) -> &'static str;
+    /// The group this report belongs to (usually the owning app/module,
+    /// e.g. "Sales", "Accounting"). The viewer groups the catalogue into
+    /// one collapsible accordion per group.
+    fn group(&self) -> &'static str {
+        "General"
+    }
     /// The default theme when the caller doesn't pick one.
     fn default_format(&self) -> ReportFormat {
         ReportFormat::Modern
@@ -752,6 +758,7 @@ pub struct RenderCx {
 pub struct ReportInfo {
     pub name: String,
     pub title: String,
+    pub group: String,
     pub outputs: Vec<ReportOutput>,
     pub default_format: ReportFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -834,6 +841,7 @@ impl Reporting {
             .map(|d| ReportInfo {
                 name: d.name().to_string(),
                 title: d.title().to_string(),
+                group: d.group().to_string(),
                 outputs: d.outputs().to_vec(),
                 default_format: d.default_format(),
                 requires_permission: d.permission().map(str::to_string),
@@ -1042,12 +1050,21 @@ mod renderers {
     }
 
     pub(super) fn excel_renderer() -> Arc<dyn ReportRenderer> {
-        Arc::new(DebugRenderer)
+        #[cfg(feature = "reporting")]
+        {
+            Arc::new(super::excel_backend::XlsxRenderer::new())
+        }
+        #[cfg(not(feature = "reporting"))]
+        {
+            Arc::new(DebugRenderer)
+        }
     }
 
     /// A placeholder that serializes the assembled document to JSON, so the
     /// end-to-end pipeline (declare → resolve datasources → build widgets)
-    /// can be verified before the real backends are wired.
+    /// can be verified before the real backends are wired. Used only when
+    /// the `reporting` feature is off.
+    #[allow(dead_code)]
     struct DebugRenderer;
 
     impl ReportRenderer for DebugRenderer {
@@ -2049,6 +2066,110 @@ mod typst_backend {
             .collect::<String>()
             .to_ascii_lowercase();
         if clean.is_empty() { "png".into() } else { clean }
+    }
+}
+
+/// The Excel backend: every [`Table`] in the document becomes a worksheet
+/// (headers and totals bold). Non-table widgets are skipped — Excel is for
+/// list/tabular data, which is why the engine only offers it for reports
+/// that opt in.
+#[cfg(feature = "reporting")]
+mod excel_backend {
+    use super::*;
+    use rust_xlsxwriter::{Format, Workbook, XlsxError};
+
+    pub(super) struct XlsxRenderer;
+
+    impl XlsxRenderer {
+        pub(super) fn new() -> Self {
+            Self
+        }
+    }
+
+    impl ReportRenderer for XlsxRenderer {
+        fn render(&self, doc: &Document) -> Result<Rendered> {
+            let mut workbook = Workbook::new();
+            let bold = Format::new().set_bold();
+
+            let mut tables = Vec::new();
+            collect_tables(&doc.report.widgets, &mut tables);
+
+            if tables.is_empty() {
+                let ws = workbook.add_worksheet();
+                ws.write(0, 0, doc.report.title.as_str()).map_err(xerr)?;
+                ws.write(1, 0, "This report has no tabular data to export to Excel.")
+                    .map_err(xerr)?;
+            } else {
+                for (i, table) in tables.iter().enumerate() {
+                    let ws = workbook.add_worksheet();
+                    let _ = ws.set_name(sheet_name(table.title.as_deref(), i));
+                    let mut row = 0u32;
+                    for (c, col) in table.columns.iter().enumerate() {
+                        ws.write_with_format(row, c as u16, col.label.as_str(), &bold)
+                            .map_err(xerr)?;
+                    }
+                    row += 1;
+                    for r in &table.rows {
+                        for (c, cell) in r.iter().enumerate() {
+                            ws.write(row, c as u16, cell.as_str()).map_err(xerr)?;
+                        }
+                        row += 1;
+                    }
+                    if let Some(totals) = &table.totals {
+                        for (c, cell) in totals.iter().enumerate() {
+                            ws.write_with_format(row, c as u16, cell.as_str(), &bold)
+                                .map_err(xerr)?;
+                        }
+                    }
+                    let _ = ws.autofit();
+                }
+            }
+
+            let bytes = workbook.save_to_buffer().map_err(xerr)?;
+            Ok(Rendered {
+                bytes,
+                content_type:
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                extension: "xlsx",
+            })
+        }
+    }
+
+    /// Depth-first collection of every table, descending into groups and
+    /// columns so a table nested in a layout widget still exports.
+    fn collect_tables<'a>(widgets: &'a [Widget], out: &mut Vec<&'a Table>) {
+        for w in widgets {
+            match w {
+                Widget::Table(t) => out.push(t),
+                Widget::Group(g) => collect_tables(&g.widgets, out),
+                Widget::Columns { columns, .. } => {
+                    for col in columns {
+                        collect_tables(col, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A worksheet name Excel accepts: no `\ / ? * [ ] :`, at most 31 chars.
+    fn sheet_name(title: Option<&str>, index: usize) -> String {
+        let base = title.unwrap_or("Sheet");
+        let clean: String = base
+            .chars()
+            .filter(|c| !matches!(c, '\\' | '/' | '?' | '*' | '[' | ']' | ':'))
+            .take(28)
+            .collect();
+        let clean = clean.trim();
+        if clean.is_empty() {
+            format!("Sheet{}", index + 1)
+        } else {
+            clean.to_string()
+        }
+    }
+
+    fn xerr(e: XlsxError) -> Error {
+        Error::internal(format!("Excel export failed: {e}"))
     }
 }
 
