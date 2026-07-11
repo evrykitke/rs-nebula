@@ -160,6 +160,7 @@ impl Kernel {
         };
 
         let events = crate::events::Events::new();
+        let storage = crate::storage::Storage::new(&self.config.files);
 
         let mut ctx = ModuleContext::new(
             &self.config,
@@ -168,6 +169,7 @@ impl Kernel {
             tenants.clone(),
             jobs.clone(),
             events.clone(),
+            storage.clone(),
         );
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
@@ -192,6 +194,7 @@ impl Kernel {
             permissions.clone(),
             jobs.clone(),
             events.clone(),
+            storage.clone(),
             parts.api_docs,
         );
 
@@ -209,6 +212,7 @@ impl Kernel {
             permissions,
             jobs,
             events,
+            storage,
             monitor,
         })
     }
@@ -278,6 +282,7 @@ pub struct App {
     permissions: Arc<permission::Registry>,
     jobs: Option<Jobs>,
     events: crate::events::Events,
+    storage: crate::storage::Storage,
     monitor: Option<Monitor>,
 }
 
@@ -316,6 +321,11 @@ impl App {
     /// The event bus.
     pub fn events(&self) -> crate::events::Events {
         self.events.clone()
+    }
+
+    /// The public file store.
+    pub fn storage(&self) -> crate::storage::Storage {
+        self.storage.clone()
     }
 
     /// Start the integration-event consumer (idempotent; `serve` calls

@@ -99,8 +99,9 @@ impl Default for Config {
     }
 }
 
-/// Public file storage: uploads land under `{root}/{tenant-id}/…` and
-/// the whole root is served at `/public`.
+/// Public file storage: uploads land under
+/// `{root}/{tenant-slug}/{id}/{resource}` and the whole root is served
+/// at `/public`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FilesConfig {

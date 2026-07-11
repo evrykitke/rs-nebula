@@ -5,10 +5,11 @@
 
 use super::authz::Authz;
 use super::manager::UserManager;
-use crate::config::{AuthConfig, FilesConfig};
+use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use crate::events::Events;
 use crate::module::ModuleContext;
+use crate::storage::Storage;
 use crate::tenancy::{TenantManager, TenantRef};
 use axum::Extension;
 use sea_orm::DatabaseConnection;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub(crate) struct AuthState {
     pub(crate) config: AuthConfig,
-    pub(crate) files: FilesConfig,
+    pub(crate) storage: Storage,
     pub(crate) main_db: DatabaseConnection,
     pub(crate) tenants: Option<Arc<TenantManager>>,
     pub(crate) events: Events,
@@ -27,7 +28,7 @@ impl AuthState {
     pub(crate) fn from_ctx(ctx: &ModuleContext) -> Self {
         Self {
             config: ctx.config().auth.clone(),
-            files: ctx.config().files.clone(),
+            storage: ctx.storage(),
             main_db: ctx.require_db(),
             tenants: ctx.tenants(),
             events: ctx.events(),

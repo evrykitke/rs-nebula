@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::events::Events;
 use crate::jobs::Jobs;
 use crate::money::CurrencyRegistry;
+use crate::storage::Storage;
 use crate::tenancy::TenantManager;
 use apalis::prelude::Monitor;
 use axum::Router;
@@ -92,6 +93,7 @@ pub struct ModuleContext<'a> {
     tenants: Option<Arc<TenantManager>>,
     jobs: Option<Jobs>,
     events: Events,
+    storage: Storage,
     router: Router,
     permissions: Vec<PermissionDef>,
     workers: Vec<WorkerRegistration>,
@@ -106,6 +108,7 @@ impl<'a> ModuleContext<'a> {
         tenants: Option<Arc<TenantManager>>,
         jobs: Option<Jobs>,
         events: Events,
+        storage: Storage,
     ) -> Self {
         Self {
             config,
@@ -114,6 +117,7 @@ impl<'a> ModuleContext<'a> {
             tenants,
             jobs,
             events,
+            storage,
             router: Router::new(),
             permissions: Vec::new(),
             workers: Vec::new(),
@@ -173,6 +177,12 @@ impl<'a> ModuleContext<'a> {
     /// `configure`, keep the (cheap) clone for publishing at runtime.
     pub fn events(&self) -> Events {
         self.events.clone()
+    }
+
+    /// The public file store rooted at `files.root` and served at
+    /// `/public` — tenant uploads live in per-tenant containers.
+    pub fn storage(&self) -> Storage {
+        self.storage.clone()
     }
 
     /// Contribute a background worker. The registration runs against the

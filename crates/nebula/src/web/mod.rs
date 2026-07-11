@@ -45,6 +45,7 @@ pub(crate) fn finalize(
     permissions: std::sync::Arc<crate::auth::permission::Registry>,
     jobs: Option<crate::jobs::Jobs>,
     events: crate::events::Events,
+    storage: crate::storage::Storage,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 ) -> Router {
     let mut api = ApiDoc::openapi();
@@ -55,11 +56,11 @@ pub(crate) fn finalize(
     let mut router = router
         .merge(health::routes(config, database.clone()))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
-        // Public files (tenant logos, uploads under {root}/{tenant-id}/).
-        .nest_service(
-            "/public",
-            tower_http::services::ServeDir::new(&config.files.root),
-        )
+        // Public files: uploads under {root}/{tenant-slug}/{id}/{resource}.
+        // Served with nosniff + a locked-down CSP so a stored file can
+        // never execute as a document, even if it slipped past upload
+        // validation (defense in depth — see storage::guard).
+        .nest_service("/public", public_files(&config.files.root))
         .fallback(not_found);
 
     // Innermost, so it sees the tenant-swapped database connection.
@@ -84,6 +85,7 @@ pub(crate) fn finalize(
         router = router.layer(axum::Extension(jobs));
     }
     router = router.layer(axum::Extension(events));
+    router = router.layer(axum::Extension(storage));
 
     if let Some(cors) = cors_layer(config) {
         router = router.layer(cors);
@@ -100,6 +102,33 @@ pub(crate) fn finalize(
             ))
             .layer(PropagateRequestIdLayer::x_request_id()),
     )
+}
+
+/// The `/public` static-file service with its hardening headers stamped
+/// on every response.
+fn public_files(
+    root: &str,
+) -> tower_http::set_header::SetResponseHeader<
+    tower_http::set_header::SetResponseHeader<
+        tower_http::services::ServeDir,
+        axum::http::HeaderValue,
+    >,
+    axum::http::HeaderValue,
+> {
+    use axum::http::{HeaderName, HeaderValue};
+    use tower_http::set_header::SetResponseHeaderLayer;
+
+    let header = |(name, value): (&'static str, &'static str)| {
+        SetResponseHeaderLayer::overriding(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        )
+    };
+    let [nosniff, csp] = crate::storage::guard::response_headers();
+    ServiceBuilder::new()
+        .layer(header(nosniff))
+        .layer(header(csp))
+        .service(tower_http::services::ServeDir::new(root))
 }
 
 /// Cross-origin access for browser frontends. Only the origins listed in

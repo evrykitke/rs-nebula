@@ -2,7 +2,7 @@
 //! currency table (anonymous list, custom currencies, undeletable system
 //! rows), a currency chosen at registration, the company profile
 //! (display name, tax identifiers, default currency) and the logo
-//! upload served back from `/public/{tenant-id}/`.
+//! upload served back from `/public/{slug}/{id}/`.
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -271,31 +271,67 @@ async fn company_setup_end_to_end() {
     assert_eq!(body["tax_pin"], "A012345678Z");
     assert_eq!(body["vat_number"], "VAT-99");
 
-    // -- Logo upload: stored under the tenant's public folder and served
-    //    back; wrong file types are refused.
+    // -- Logo upload: stored at /public/{slug}/{id}/logo.{ext} and served
+    //    back; executables and svg (a script container) are refused.
     let (status, body) = upload(&router, "/auth/tenant/logo", &boss, "virus.exe", b"MZ").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "exe must be refused: {body}");
+    let (status, body) =
+        upload(&router, "/auth/tenant/logo", &boss, "logo.svg", b"<svg onload=alert(1)/>").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "svg must be refused: {body}");
+    // The name lies: a .png carrying HTML. Content validation must catch
+    // it — otherwise /public serves stored XSS.
+    let (status, body) = upload(
+        &router,
+        "/auth/tenant/logo",
+        &boss,
+        "logo.png",
+        b"<!DOCTYPE html><script>alert(document.cookie)</script>",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "html-as-png must be refused: {body}");
 
     let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
     let (status, body) = upload(&router, "/auth/tenant/logo", &boss, "logo.png", png).await;
     assert_eq!(status, StatusCode::OK, "logo upload failed: {body}");
     let logo_url = body["logo_url"].as_str().unwrap().to_string();
-    assert_eq!(logo_url, format!("/public/{tenant_id}/logo.png"));
+    assert!(
+        logo_url.starts_with(&format!("/public/{TENANT}/")) && logo_url.ends_with("/logo.png"),
+        "slug/id/resource layout, got {logo_url}"
+    );
+    assert!(!logo_url.contains(&tenant_id), "the slug replaced the tenant id");
 
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(&logo_url)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "logo must be served");
-    let served = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let fetch = |url: String| {
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(&url)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            (status, to_bytes(response.into_body(), usize::MAX).await.unwrap())
+        }
+    };
+    let (status, served) = fetch(logo_url.clone()).await;
+    assert_eq!(status, StatusCode::OK, "logo must be served");
     assert_eq!(&served[..], png, "served bytes must match the upload");
+
+    // -- Re-uploading replaces the logo: new id, new URL, old file gone.
+    let png2: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 9, 9, 9];
+    let (status, body) = upload(&router, "/auth/tenant/logo", &boss, "rebrand.png", png2).await;
+    assert_eq!(status, StatusCode::OK, "second upload failed: {body}");
+    let second_url = body["logo_url"].as_str().unwrap().to_string();
+    assert_ne!(second_url, logo_url, "every upload gets a fresh URL");
+    let (status, served) = fetch(second_url).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&served[..], png2);
+    let (status, _) = fetch(logo_url).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the stale logo must be removed");
 
     // -- Custom currencies: admins add and remove them; system rows and
     //    plain users are refused.

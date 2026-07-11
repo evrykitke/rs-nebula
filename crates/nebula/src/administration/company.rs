@@ -222,12 +222,13 @@ async fn tenant_profile_update(
 #[derive(ToSchema)]
 #[allow(dead_code)]
 pub struct LogoUpload {
-    /// The image file: png, jpg, svg or webp, at most 1 MiB.
+    /// The image file: png, jpg or webp, at most 1 MiB. SVG is refused —
+    /// it is a script container, and `/public` serves it same-origin.
     #[schema(value_type = String, format = Binary)]
     pub file: String,
 }
 
-/// Stores the logo at `{files.root}/{tenant-id}/logo.{ext}`; it is then
+/// Stores the logo at `{files.root}/{slug}/{id}/logo.{ext}`; it is then
 /// served from the `logo_url` in the profile response.
 #[utoipa::path(post, path = "/auth/tenant/logo", tag = "auth",
     request_body(content = LogoUpload, content_type = "multipart/form-data"),
@@ -242,9 +243,8 @@ async fn tenant_logo_upload(
     let (manager, tenant) = state.tenant_context(&authz, tenant)?;
     authz.require(permission::names::TENANT_SETTINGS).await?;
 
-    const ALLOWED: [&str; 5] = ["png", "jpg", "jpeg", "svg", "webp"];
     const MAX_BYTES: usize = 1024 * 1024;
-    let mut upload: Option<(String, axum::body::Bytes)> = None;
+    let mut data: Option<axum::body::Bytes> = None;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -253,55 +253,40 @@ async fn tenant_logo_upload(
         if field.name() != Some("file") {
             continue;
         }
-        let ext = field
-            .file_name()
-            .and_then(|n| n.rsplit('.').next())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default();
-        if !ALLOWED.contains(&ext.as_str()) {
-            return Err(Error::Validation(
-                "the logo must be a png, jpg, svg or webp file".into(),
-            ));
-        }
-        let data = field
-            .bytes()
-            .await
-            .map_err(|e| Error::Validation(format!("failed to read the upload: {e}")))?;
-        if data.is_empty() {
-            return Err(Error::Validation("the uploaded file is empty".into()));
-        }
-        if data.len() > MAX_BYTES {
-            return Err(Error::Validation("the logo must be at most 1 MiB".into()));
-        }
-        upload = Some((ext, data));
+        data = Some(
+            field
+                .bytes()
+                .await
+                .map_err(|e| Error::Validation(format!("failed to read the upload: {e}")))?,
+        );
         break;
     }
-    let Some((ext, data)) = upload else {
+    let Some(data) = data else {
         return Err(Error::Validation(
             "a multipart field named \"file\" is required".into(),
         ));
     };
+    // Trust the content, not the file name: the bytes must actually be an
+    // allowed raster image, and we store it under the format's own
+    // extension. This is what stops a `logo.png` that is really an SVG or
+    // HTML from becoming stored XSS on same-origin `/public`.
+    let format = crate::storage::guard_image(&data, MAX_BYTES)?;
 
-    let root = std::path::Path::new(&state.files.root);
-    let dir = root.join(tenant.id.to_string());
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| Error::internal(format!("could not create the upload directory: {e}")))?;
     let before = manager
         .find_by_id(tenant.id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("tenant {}", tenant.id)))?;
-    let relative = format!("{}/logo.{ext}", tenant.id);
-    tokio::fs::write(dir.join(format!("logo.{ext}")), &data)
-        .await
-        .map_err(|e| Error::internal(format!("could not store the logo: {e}")))?;
-    // A previous logo with a different extension would otherwise linger.
-    if let Some(old) = before.logo_path.as_deref()
-        && old != relative
-    {
-        let _ = tokio::fs::remove_file(root.join(old)).await;
+    let stored = state
+        .storage
+        .tenant(&tenant)
+        .store(&format!("logo.{}", format.extension()), &data)
+        .await?;
+    // Every upload lands under a fresh id, so the previous file (possibly
+    // still on the pre-slug layout) is always stale.
+    if let Some(old) = before.logo_path.as_deref() {
+        let _ = state.storage.remove(old).await;
     }
-    let updated = manager.set_logo_path(tenant.id, Some(relative)).await?;
+    let updated = manager.set_logo_path(tenant.id, Some(stored.path)).await?;
     audit
         .0
         .updated(

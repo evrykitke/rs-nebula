@@ -6,3 +6,6 @@
 
 # Machine-local cargo config (e.g. a custom build.target-dir)
 .cargo/
+
+# Runtime file storage (tenant uploads) — data, not source
+/public/
