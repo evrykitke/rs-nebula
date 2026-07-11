@@ -387,6 +387,14 @@ pub struct LoggingConfig {
     /// A `tracing` filter directive, e.g. `info` or `nebula=debug,info`.
     pub level: String,
     pub format: LogFormat,
+    /// Also append logs to this file (the console output is unaffected).
+    /// Empty means console only. Relative paths are resolved against the
+    /// process working directory, e.g. `var/dev.log`.
+    pub file: String,
+    /// Roll the log file over once it reaches this many bytes: the current
+    /// file is moved aside to `<file>.1` (replacing any previous roll) and
+    /// a fresh file is started, so a single file never grows without bound.
+    pub max_file_bytes: u64,
 }
 
 impl Default for LoggingConfig {
@@ -394,6 +402,8 @@ impl Default for LoggingConfig {
         Self {
             level: "info".into(),
             format: LogFormat::Pretty,
+            file: String::new(),
+            max_file_bytes: 5 * 1024 * 1024,
         }
     }
 }

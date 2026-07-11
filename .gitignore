@@ -9,3 +9,6 @@
 
 # Runtime file storage (tenant uploads) — data, not source
 /public/
+
+# Runtime server logs (logging.file, e.g. var/dev.log)
+/var/

@@ -28,6 +28,8 @@ events:
 logging:
   level: info
   format: pretty
+  # Mirror console output to a rolling file under var/ (rolled at 5 MiB).
+  file: var/dev.log
 
 currencies:
   - { code: KES, minor_units: 2 }
