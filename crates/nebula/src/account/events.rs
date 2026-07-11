@@ -17,7 +17,6 @@ pub struct UserRegistered {
 impl Event for UserRegistered {
     const NAME: &'static str = "account.user_registered";
 }
-
 /// An administrator onboarded a team member.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserCreated {
