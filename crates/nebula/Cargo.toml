@@ -6,7 +6,20 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = ["reporting"]
+# The reporting engine's heavy render backends (Typst for PDF). Off = the
+# engine still builds and serves, but renders a JSON debug dump.
+reporting = ["dep:typst", "dep:typst-pdf", "dep:typst-layout", "dep:typst-as-lib"]
+
 [dependencies]
+typst = { version = "0.15", optional = true }
+typst-pdf = { version = "0.15", optional = true }
+typst-layout = { version = "0.15", optional = true }
+typst-as-lib = { version = "0.16", default-features = false, features = [
+    "typst-kit-fonts",
+    "typst-kit-embed-fonts",
+], optional = true }
 axum.workspace = true
 tokio.workspace = true
 tower.workspace = true

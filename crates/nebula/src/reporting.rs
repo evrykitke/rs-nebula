@@ -992,9 +992,16 @@ mod renderers {
     use super::*;
 
     /// The PDF renderer. Typst-backed when the `reporting` feature is on;
-    /// a debug JSON dump otherwise (and for now, until the theme lands).
+    /// a debug JSON dump otherwise.
     pub(super) fn pdf_renderer() -> Arc<dyn ReportRenderer> {
-        Arc::new(DebugRenderer)
+        #[cfg(feature = "reporting")]
+        {
+            Arc::new(super::typst_backend::TypstRenderer::new())
+        }
+        #[cfg(not(feature = "reporting"))]
+        {
+            Arc::new(DebugRenderer)
+        }
     }
 
     pub(super) fn excel_renderer() -> Arc<dyn ReportRenderer> {
@@ -1071,6 +1078,705 @@ mod settings_store {
     }
 }
 
+/// The Typst PDF backend: walks the document into Typst markup (with the
+/// theme baked in per [`ReportFormat`]) and compiles it to a PDF. Images
+/// (the logo, image widgets) are handed to Typst as virtual static files.
+#[cfg(feature = "reporting")]
+mod typst_backend {
+    use super::*;
+    use typst_as_lib::TypstEngine;
+    use typst_as_lib::typst_kit_options::TypstKitFontOptions;
+    use typst_layout::PagedDocument;
+
+    pub(super) struct TypstRenderer;
+
+    impl TypstRenderer {
+        pub(super) fn new() -> Self {
+            Self
+        }
+    }
+
+    impl ReportRenderer for TypstRenderer {
+        fn render(&self, doc: &Document) -> Result<Rendered> {
+            let mut assets: Vec<(String, Vec<u8>)> = Vec::new();
+            let source = emit(doc, &mut assets);
+
+            // The resolver takes `&str` file ids; borrow the owned names.
+            let resolver: Vec<(&str, Vec<u8>)> = assets
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+                .collect();
+
+            let engine = TypstEngine::builder()
+                .main_file(source)
+                .search_fonts_with(
+                    TypstKitFontOptions::default()
+                        .include_system_fonts(false)
+                        .include_embedded_fonts(true),
+                )
+                .with_static_file_resolver(resolver)
+                .build();
+
+            let compiled = engine.compile::<PagedDocument>();
+            let document = compiled
+                .output
+                .map_err(|e| Error::internal(format!("report typesetting failed: {e}")))?;
+            let pdf = typst_pdf::pdf(&document, &Default::default())
+                .map_err(|e| Error::internal(format!("report PDF export failed: {e:?}")))?;
+            Ok(Rendered { bytes: pdf, content_type: "application/pdf", extension: "pdf" })
+        }
+    }
+
+    /// Per-format look. Sizes are Typst length literals; colours are hex
+    /// without the leading `#`.
+    struct Theme {
+        body: &'static str,
+        h1: &'static str,
+        h2: &'static str,
+        h3: &'static str,
+        small: &'static str,
+        accent: &'static str,
+        muted: &'static str,
+        rule: &'static str,
+        header_fill: &'static str,
+        top_margin: &'static str,
+        leading: &'static str,
+        zebra: bool,
+    }
+
+    fn theme(format: ReportFormat) -> Theme {
+        match format {
+            // Roomy, colourful, larger type.
+            ReportFormat::Modern => Theme {
+                body: "10.5pt",
+                h1: "20pt",
+                h2: "14pt",
+                h3: "11pt",
+                small: "8.5pt",
+                accent: "2563eb",
+                muted: "6b7280",
+                rule: "e5e7eb",
+                header_fill: "f8fafc",
+                top_margin: "3.2cm",
+                leading: "0.75em",
+                zebra: true,
+            },
+            // Dense, near-monochrome, thin rules — an RDLC-style list look.
+            ReportFormat::Compact => Theme {
+                body: "8.5pt",
+                h1: "14pt",
+                h2: "10.5pt",
+                h3: "9pt",
+                small: "7pt",
+                accent: "111827",
+                muted: "6b7280",
+                rule: "d1d5db",
+                header_fill: "ffffff",
+                top_margin: "2.4cm",
+                leading: "0.55em",
+                zebra: false,
+            },
+            // Classic, restrained, serif-heavy corporate stationery.
+            ReportFormat::Corporate => Theme {
+                body: "10pt",
+                h1: "18pt",
+                h2: "13pt",
+                h3: "10.5pt",
+                small: "8pt",
+                accent: "1f2937",
+                muted: "4b5563",
+                rule: "9ca3af",
+                header_fill: "f3f4f6",
+                top_margin: "3.4cm",
+                leading: "0.7em",
+                zebra: false,
+            },
+        }
+    }
+
+    fn color(hex: &str) -> String {
+        format!("rgb(\"#{hex}\")")
+    }
+
+    /// A Typst string value, escaped and rendered literally (no markup
+    /// interpretation) when inserted into content.
+    fn lit(text: &str) -> String {
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\r', "")
+            .replace('\n', "\\n");
+        format!("#\"{escaped}\"")
+    }
+
+    fn align_word(a: Align) -> &'static str {
+        match a {
+            Align::Start => "left",
+            Align::Center => "center",
+            Align::End => "right",
+        }
+    }
+
+    fn emit(doc: &Document, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        let t = theme(doc.format);
+        let mut s = String::new();
+
+        // Page setup: margins, running header/footer, optional watermark.
+        s.push_str("#set page(paper: \"a4\"");
+        if doc.report.orientation == Orientation::Landscape {
+            s.push_str(", flipped: true");
+        }
+        s.push_str(", margin: (top: ");
+        s.push_str(t.top_margin);
+        s.push_str(", bottom: 2.4cm, left: 1.8cm, right: 1.8cm)");
+        s.push_str(", header: [");
+        s.push_str(&header(doc, &t, assets));
+        s.push_str("]");
+        s.push_str(", footer: [");
+        s.push_str(&footer(doc, &t));
+        s.push_str("]");
+        if let Some(mark) = doc.watermark.as_deref().filter(|m| !m.is_empty()) {
+            s.push_str(", background: place(center + horizon, rotate(-45deg, text(size: 96pt, fill: rgb(\"#9ca3af35\"), weight: \"bold\")[");
+            s.push_str(&lit(mark));
+            s.push_str("]))");
+        }
+        s.push_str(")\n");
+
+        s.push_str("#set text(font: (\"Libertinus Serif\",), size: ");
+        s.push_str(t.body);
+        s.push_str(", fill: ");
+        s.push_str(&color("111827"));
+        s.push_str(")\n");
+        s.push_str("#set par(leading: ");
+        s.push_str(t.leading);
+        s.push_str(", justify: false)\n\n");
+
+        // Title block.
+        s.push_str("#text(size: ");
+        s.push_str(t.h1);
+        s.push_str(", weight: \"bold\", fill: ");
+        s.push_str(&color(t.accent));
+        s.push_str(")[");
+        s.push_str(&lit(&doc.report.title));
+        s.push_str("]\n");
+        if let Some(sub) = &doc.report.subtitle {
+            s.push_str("\n#text(size: ");
+            s.push_str(t.small);
+            s.push_str(", fill: ");
+            s.push_str(&color(t.muted));
+            s.push_str(")[");
+            s.push_str(&lit(sub));
+            s.push_str("]\n");
+        }
+        s.push_str("\n#v(0.6em)\n");
+
+        for widget in &doc.report.widgets {
+            s.push_str(&widget_markup(widget, &t, assets));
+            s.push('\n');
+        }
+        s
+    }
+
+    fn header(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        let company = &doc.company;
+        let mut left = String::new();
+        if let Some(logo) = &company.logo {
+            if let Some(bytes) = base64_decode(&logo.data_base64) {
+                let name = format!("logo.{}", sanitize_ext(&logo.format));
+                assets.push((name.clone(), bytes));
+                left.push_str("#image(");
+                left.push_str(&lit(&name));
+                left.push_str(", height: 1.1cm)");
+            }
+        }
+        if left.is_empty() && !company.name.is_empty() {
+            left.push_str("#text(size: ");
+            left.push_str(t.h3);
+            left.push_str(", weight: \"bold\")[");
+            left.push_str(&lit(&company.name));
+            left.push_str("]");
+        }
+
+        let mut right = String::new();
+        right.push_str("#align(right, text(size: ");
+        right.push_str(t.small);
+        right.push_str(", fill: ");
+        right.push_str(&color(t.muted));
+        right.push_str(")[");
+        if company.logo.is_some() && !company.name.is_empty() {
+            right.push_str("#strong[");
+            right.push_str(&lit(&company.name));
+            right.push_str("] \\ ");
+        }
+        if let Some(pin) = &company.tax_pin {
+            right.push_str(&lit(&format!("PIN: {pin}")));
+            right.push_str(" \\ ");
+        }
+        if let Some(vat) = &company.vat_number {
+            right.push_str(&lit(&format!("VAT: {vat}")));
+        }
+        right.push_str("])");
+
+        let mut h = String::new();
+        h.push_str("#block(width: 100%, inset: 8pt, fill: ");
+        h.push_str(&color(t.header_fill));
+        h.push_str(", stroke: (bottom: 0.6pt + ");
+        h.push_str(&color(t.rule));
+        h.push_str("))[#grid(columns: (1fr, 1fr), align: (left + horizon, right + horizon), [");
+        h.push_str(&left);
+        h.push_str("], [");
+        h.push_str(&right);
+        h.push_str("])]");
+        h
+    }
+
+    fn footer(doc: &Document, t: &Theme) -> String {
+        let mut f = String::new();
+        f.push_str("#block(width: 100%, inset: (top: 6pt), stroke: (top: 0.6pt + ");
+        f.push_str(&color(t.rule));
+        f.push_str("))[#text(size: ");
+        f.push_str(t.small);
+        f.push_str(", fill: ");
+        f.push_str(&color(t.muted));
+        f.push_str(")[#grid(columns: (1fr, 1fr), [");
+        if !doc.company.name.is_empty() {
+            f.push_str(&lit(&doc.company.name));
+        }
+        f.push_str("], align(right)[#context [Page #counter(page).display() of #counter(page).final().first()]])]]");
+        f
+    }
+
+    /// Emit a list of widgets into one content string (for columns/groups).
+    fn children(widgets: &[Widget], t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        let mut s = String::new();
+        for w in widgets {
+            s.push_str(&widget_markup(w, t, assets));
+            s.push('\n');
+        }
+        s
+    }
+
+    fn widget_markup(widget: &Widget, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        match widget {
+            Widget::Heading { level, text } => {
+                let size = match level {
+                    1 => t.h1,
+                    2 => t.h2,
+                    _ => t.h3,
+                };
+                format!(
+                    "#block(above: 0.9em, below: 0.5em)[#text(size: {size}, weight: \"bold\", fill: {})[{}]]",
+                    color(t.accent),
+                    lit(text)
+                )
+            }
+            Widget::Text { text, style } => {
+                let (size, weight, fill) = match style {
+                    TextStyle::Normal => (t.body, "regular", color("111827")),
+                    TextStyle::Muted => (t.small, "regular", color(t.muted)),
+                    TextStyle::Strong => (t.body, "bold", color("111827")),
+                    TextStyle::Small => (t.small, "regular", color("111827")),
+                };
+                format!(
+                    "#block(below: 0.5em)[#text(size: {size}, weight: \"{weight}\", fill: {fill})[{}]]",
+                    lit(text)
+                )
+            }
+            Widget::List { ordered, items } => {
+                let func = if *ordered { "enum" } else { "list" };
+                let mut s = format!("#{func}(");
+                for item in items {
+                    s.push('[');
+                    s.push_str(&lit(item));
+                    s.push_str("], ");
+                }
+                s.push(')');
+                s
+            }
+            Widget::KeyValues { title, items, columns } => {
+                let mut s = String::new();
+                if let Some(title) = title {
+                    s.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets));
+                    s.push('\n');
+                }
+                let cols = (*columns).max(1) as usize;
+                s.push_str("#grid(columns: (");
+                for _ in 0..cols {
+                    s.push_str("auto, 1fr, ");
+                }
+                s.push_str("), column-gutter: 10pt, row-gutter: 4pt,\n");
+                for kv in items {
+                    s.push_str("[#text(fill: ");
+                    s.push_str(&color(t.muted));
+                    s.push_str(", size: ");
+                    s.push_str(t.small);
+                    s.push_str(")[");
+                    s.push_str(&lit(&kv.label));
+                    s.push_str("]], [");
+                    s.push_str(&lit(&kv.value));
+                    s.push_str("], ");
+                }
+                s.push_str(")");
+                s
+            }
+            Widget::Metrics { items } => {
+                let mut s = String::from("#grid(columns: (");
+                for _ in items {
+                    s.push_str("1fr, ");
+                }
+                s.push_str("), gutter: 8pt,\n");
+                for m in items {
+                    s.push_str("[#block(width: 100%, inset: 8pt, radius: 4pt, stroke: 0.6pt + ");
+                    s.push_str(&color(t.rule));
+                    s.push_str(")[#text(size: ");
+                    s.push_str(t.small);
+                    s.push_str(", fill: ");
+                    s.push_str(&color(t.muted));
+                    s.push_str(")[");
+                    s.push_str(&lit(&m.label));
+                    s.push_str("] \\ #text(size: ");
+                    s.push_str(t.h2);
+                    s.push_str(", weight: \"bold\")[");
+                    s.push_str(&lit(&m.value));
+                    s.push_str("]");
+                    if let Some(cap) = &m.caption {
+                        let fill = match m.trend {
+                            Some(Trend::Up) => "16a34a",
+                            Some(Trend::Down) => "dc2626",
+                            _ => t.muted,
+                        };
+                        s.push_str(" \\ #text(size: ");
+                        s.push_str(t.small);
+                        s.push_str(", fill: ");
+                        s.push_str(&color(fill));
+                        s.push_str(")[");
+                        s.push_str(&lit(cap));
+                        s.push_str("]");
+                    }
+                    s.push_str("]], ");
+                }
+                s.push(')');
+                s
+            }
+            Widget::Table(table) => table_markup(table, t),
+            Widget::Chart(chart) => chart_markup(chart, t),
+            Widget::Image(image) => {
+                if let Some(bytes) = base64_decode(&image.data_base64) {
+                    let name = format!("asset-{}.{}", assets.len(), sanitize_ext(&image.format));
+                    assets.push((name.clone(), bytes));
+                    let mut s = format!(
+                        "#align({})[#image({}, width: 60%)",
+                        align_word(image.align),
+                        lit(&name)
+                    );
+                    if let Some(cap) = &image.caption {
+                        s.push_str(" \\ #text(size: ");
+                        s.push_str(t.small);
+                        s.push_str(", fill: ");
+                        s.push_str(&color(t.muted));
+                        s.push_str(")[");
+                        s.push_str(&lit(cap));
+                        s.push_str("]");
+                    }
+                    s.push(']');
+                    s
+                } else {
+                    String::new()
+                }
+            }
+            Widget::Callout(callout) => {
+                let (fill, border) = match callout.style {
+                    CalloutStyle::Info => ("eff6ff", "3b82f6"),
+                    CalloutStyle::Success => ("f0fdf4", "22c55e"),
+                    CalloutStyle::Warning => ("fffbeb", "f59e0b"),
+                    CalloutStyle::Muted => ("f9fafb", "9ca3af"),
+                };
+                let mut s = format!(
+                    "#block(width: 100%, fill: {}, stroke: (left: 3pt + {}), inset: 8pt, radius: 2pt, above: 0.6em, below: 0.6em)[",
+                    color(fill),
+                    color(border)
+                );
+                if let Some(title) = &callout.title {
+                    s.push_str("#strong[");
+                    s.push_str(&lit(title));
+                    s.push_str("] \\ ");
+                }
+                s.push_str(&lit(&callout.text));
+                s.push(']');
+                s
+            }
+            Widget::Progress(p) => {
+                let pct = (p.value.clamp(0.0, 1.0) * 100.0).round() as i64;
+                let mut s = String::from("#block(below: 0.6em)[");
+                s.push_str("#text(size: ");
+                s.push_str(t.small);
+                s.push_str(")[");
+                s.push_str(&lit(&p.label));
+                s.push_str("] \\ #box(width: 100%, height: 9pt, radius: 4pt, fill: ");
+                s.push_str(&color(t.rule));
+                s.push_str(")[#box(width: ");
+                s.push_str(&pct.to_string());
+                s.push_str("%, height: 9pt, radius: 4pt, fill: ");
+                s.push_str(&color(t.accent));
+                s.push_str(")]");
+                if let Some(cap) = &p.caption {
+                    s.push_str(" #text(size: ");
+                    s.push_str(t.small);
+                    s.push_str(", fill: ");
+                    s.push_str(&color(t.muted));
+                    s.push_str(")[");
+                    s.push_str(&lit(cap));
+                    s.push_str("]");
+                }
+                s.push(']');
+                s
+            }
+            Widget::QrCode { data, caption } => placeholder_box("QR", data, caption.as_deref(), t),
+            Widget::Barcode { data, caption, .. } => {
+                placeholder_box("BARCODE", data, caption.as_deref(), t)
+            }
+            Widget::Signatures { items } => {
+                let mut s = String::from("#v(1.2cm)\n#grid(columns: (");
+                for _ in items {
+                    s.push_str("1fr, ");
+                }
+                s.push_str("), gutter: 24pt,\n");
+                for sig in items {
+                    s.push_str("[#line(length: 100%, stroke: 0.6pt) #text(size: ");
+                    s.push_str(t.small);
+                    s.push_str(")[");
+                    s.push_str(&lit(&sig.label));
+                    if let Some(name) = &sig.name {
+                        s.push_str(" \\ ");
+                        s.push_str(&lit(name));
+                    }
+                    if sig.dated {
+                        s.push_str(" \\ ");
+                        s.push_str(&lit("Date: ____________"));
+                    }
+                    s.push_str("]], ");
+                }
+                s.push(')');
+                s
+            }
+            Widget::Columns { columns, widths } => {
+                let mut s = String::from("#grid(columns: (");
+                if widths.len() == columns.len() && !widths.is_empty() {
+                    for w in widths {
+                        s.push_str(&w.to_string());
+                        s.push_str("fr, ");
+                    }
+                } else {
+                    for _ in columns {
+                        s.push_str("1fr, ");
+                    }
+                }
+                s.push_str("), column-gutter: 14pt,\n");
+                for col in columns {
+                    s.push('[');
+                    s.push_str(&children(col, t, assets));
+                    s.push_str("], ");
+                }
+                s.push(')');
+                s
+            }
+            Widget::Group(group) => {
+                let inner = children(&group.widgets, t, assets);
+                let mut s = String::new();
+                let body = if let Some(title) = &group.title {
+                    let mut b = String::new();
+                    b.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets));
+                    b.push('\n');
+                    b.push_str(&inner);
+                    b
+                } else {
+                    inner
+                };
+                if group.boxed {
+                    s.push_str("#block(width: 100%, inset: 10pt, radius: 4pt, stroke: 0.6pt + ");
+                    s.push_str(&color(t.rule));
+                    s.push_str(", above: 0.6em, below: 0.6em)[");
+                    s.push_str(&body);
+                    s.push(']');
+                } else {
+                    s.push_str("#block(above: 0.4em, below: 0.4em)[");
+                    s.push_str(&body);
+                    s.push(']');
+                }
+                s
+            }
+            Widget::Divider => {
+                format!("#line(length: 100%, stroke: 0.6pt + {})", color(t.rule))
+            }
+            Widget::Spacer { size } => {
+                let v = match size {
+                    SpaceSize::Small => "0.4em",
+                    SpaceSize::Medium => "1em",
+                    SpaceSize::Large => "2em",
+                };
+                format!("#v({v})")
+            }
+            Widget::PageBreak => "#pagebreak()".to_string(),
+        }
+    }
+
+    fn table_markup(table: &Table, t: &Theme) -> String {
+        let mut s = String::new();
+        if let Some(title) = &table.title {
+            s.push_str("#text(size: ");
+            s.push_str(t.h3);
+            s.push_str(", weight: \"bold\")[");
+            s.push_str(&lit(title));
+            s.push_str("]\n#v(0.3em)\n");
+        }
+        s.push_str("#table(\n  columns: ");
+        s.push_str(&table.columns.len().to_string());
+        s.push_str(",\n  align: (");
+        for c in &table.columns {
+            s.push_str(align_word(c.align));
+            s.push_str(", ");
+        }
+        s.push_str("),\n  stroke: (x, y) => (bottom: 0.5pt + ");
+        s.push_str(&color(t.rule));
+        s.push_str("),\n  inset: 5pt,\n");
+        if t.zebra {
+            s.push_str("  fill: (x, y) => if calc.odd(y) { ");
+            s.push_str(&color("f9fafb"));
+            s.push_str(" },\n");
+        }
+        // Header row.
+        s.push_str("  table.header(");
+        for c in &table.columns {
+            s.push_str("[#text(fill: ");
+            s.push_str(&color(t.accent));
+            s.push_str(", weight: \"bold\", size: ");
+            s.push_str(t.small);
+            s.push_str(")[");
+            s.push_str(&lit(&c.label));
+            s.push_str("]], ");
+        }
+        s.push_str("),\n");
+        // Body rows.
+        for row in &table.rows {
+            s.push_str("  ");
+            for cell in row {
+                s.push('[');
+                s.push_str(&lit(cell));
+                s.push_str("], ");
+            }
+            s.push('\n');
+        }
+        // Totals as a bold footer row.
+        if let Some(totals) = &table.totals {
+            s.push_str("  table.footer(");
+            for cell in totals {
+                s.push_str("[#strong[");
+                s.push_str(&lit(cell));
+                s.push_str("]], ");
+            }
+            s.push_str("),\n");
+        }
+        s.push_str(")");
+        s
+    }
+
+    /// A native bar rendering of a chart's first series — a lightweight
+    /// stand-in until SVG chart rendering lands.
+    fn chart_markup(chart: &Chart, t: &Theme) -> String {
+        let mut s = String::new();
+        if let Some(title) = &chart.title {
+            s.push_str("#text(size: ");
+            s.push_str(t.h3);
+            s.push_str(", weight: \"bold\")[");
+            s.push_str(&lit(title));
+            s.push_str("]\n#v(0.3em)\n");
+        }
+        let series = chart.series.first();
+        let max = series
+            .map(|s| s.values.iter().cloned().fold(0.0_f64, f64::max))
+            .unwrap_or(0.0);
+        s.push_str("#grid(columns: (6em, 1fr, 4em), column-gutter: 8pt, row-gutter: 5pt,\n");
+        if let Some(series) = series {
+            for (i, value) in series.values.iter().enumerate() {
+                let label = chart.labels.get(i).cloned().unwrap_or_default();
+                let pct = if max > 0.0 {
+                    (value / max * 100.0).round() as i64
+                } else {
+                    0
+                };
+                s.push_str("[#text(size: ");
+                s.push_str(t.small);
+                s.push_str(")[");
+                s.push_str(&lit(&label));
+                s.push_str("]], [#box(width: ");
+                s.push_str(&pct.to_string());
+                s.push_str("%, height: 9pt, radius: 2pt, fill: ");
+                s.push_str(&color(t.accent));
+                s.push_str(")], [#align(right, text(size: ");
+                s.push_str(t.small);
+                s.push_str(")[");
+                s.push_str(&lit(&format_number(*value)));
+                s.push_str("])], ");
+            }
+        }
+        s.push(')');
+        if chart.series.len() > 1 {
+            s.push_str("\n#text(size: ");
+            s.push_str(t.small);
+            s.push_str(", fill: ");
+            s.push_str(&color(t.muted));
+            s.push_str(")[");
+            s.push_str(&lit(&format!(
+                "Showing series \"{}\" of {}.",
+                chart.series[0].name,
+                chart.series.len()
+            )));
+            s.push(']');
+        }
+        s
+    }
+
+    fn placeholder_box(kind: &str, data: &str, caption: Option<&str>, t: &Theme) -> String {
+        let mut s = String::from("#block(inset: 8pt, radius: 4pt, stroke: 0.6pt + ");
+        s.push_str(&color(t.rule));
+        s.push_str(")[#text(size: ");
+        s.push_str(t.small);
+        s.push_str(", fill: ");
+        s.push_str(&color(t.muted));
+        s.push_str(")[");
+        s.push_str(&lit(&format!("[{kind}] {data}")));
+        s.push(']');
+        if let Some(cap) = caption {
+            s.push_str(" \\ #text(size: ");
+            s.push_str(t.small);
+            s.push_str(")[");
+            s.push_str(&lit(cap));
+            s.push(']');
+        }
+        s.push(']');
+        s
+    }
+
+    fn format_number(v: f64) -> String {
+        if v.fract() == 0.0 {
+            format!("{}", v as i64)
+        } else {
+            format!("{v:.1}")
+        }
+    }
+
+    /// A safe file extension for a virtual asset name.
+    fn sanitize_ext(ext: &str) -> String {
+        let clean: String = ext
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(5)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if clean.is_empty() { "png".into() } else { clean }
+    }
+}
+
 /// Minimal base64 (standard alphabet, padded) so the model can carry image
 /// bytes without pulling a dependency for one small use.
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1100,6 +1806,38 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Decode standard base64 (padded), ignoring whitespace. Returns `None` on
+/// malformed input.
+#[cfg(feature = "reporting")]
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in text.as_bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        let v = val(c)? as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,6 +1849,14 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[cfg(feature = "reporting")]
+    #[test]
+    fn base64_round_trips() {
+        for sample in [&b""[..], b"f", b"fo", b"foo", b"foobar", &[0u8, 255, 16, 32, 64]] {
+            assert_eq!(base64_decode(&base64_encode(sample)).unwrap(), sample);
+        }
     }
 
     #[test]

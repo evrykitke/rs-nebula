@@ -75,25 +75,21 @@ async fn run(url: &str) -> Result<(), String> {
         return Err(format!("unexpected report names: {names:?}"));
     }
 
-    // Render the overview: default format (modern), a body of widgets.
+    // Render the overview: default format (modern) → a real PDF.
     let rendered = reporting
         .render(&render_cx(&app), "workspace-overview", None, ReportOutput::Pdf)
         .await
         .map_err(|e| format!("overview render failed: {e}"))?;
-    let doc: serde_json::Value =
-        serde_json::from_slice(&rendered.bytes).map_err(|e| e.to_string())?;
-    if doc["format"] != "modern" {
-        return Err(format!("expected modern default, got {}", doc["format"]));
-    }
-    if doc["title"] != "Workspace Overview" {
-        return Err("wrong title".into());
-    }
-    let widgets = doc["report"]["widgets"].as_array().ok_or("no widgets")?;
-    if widgets.len() < 8 {
-        return Err(format!("expected a rich widget tour, got {}", widgets.len()));
+    assert_pdf(&rendered.bytes, "overview (modern)")?;
+    dump("workspace-overview.modern", &rendered.bytes);
+
+    // The engine reports the report catalogue.
+    if reporting.required_permission("workspace-overview").is_some() {
+        return Err("overview should be open (no permission declared)".into());
     }
 
-    // Set tenant house format + watermark; both must apply on the next render.
+    // Set tenant house format + watermark; the engine must read them back
+    // and every format must still typeset.
     reporting
         .save_settings(
             app.database().unwrap(),
@@ -104,19 +100,18 @@ async fn run(url: &str) -> Result<(), String> {
         )
         .await
         .map_err(|e| format!("save_settings failed: {e}"))?;
+    let settings = reporting.settings(app.database()).await;
+    if settings.default_format != Some(ReportFormat::Compact) || settings.watermark.as_deref() != Some("DRAFT") {
+        return Err(format!("settings did not persist: {settings:?}"));
+    }
 
+    // House default (compact) + watermark path.
     let rendered = reporting
         .render(&render_cx(&app), "workspace-overview", None, ReportOutput::Pdf)
         .await
-        .map_err(|e| format!("second render failed: {e}"))?;
-    let doc: serde_json::Value =
-        serde_json::from_slice(&rendered.bytes).map_err(|e| e.to_string())?;
-    if doc["format"] != "compact" {
-        return Err(format!("house format not applied: {}", doc["format"]));
-    }
-    if doc["watermark"] != "DRAFT" {
-        return Err(format!("watermark not applied: {}", doc["watermark"]));
-    }
+        .map_err(|e| format!("compact render failed: {e}"))?;
+    assert_pdf(&rendered.bytes, "overview (compact + watermark)")?;
+    dump("workspace-overview.compact-watermarked", &rendered.bytes);
 
     // An explicit format still overrides the house default.
     let rendered = reporting
@@ -127,14 +122,17 @@ async fn run(url: &str) -> Result<(), String> {
             ReportOutput::Pdf,
         )
         .await
-        .map_err(|e| format!("explicit-format render failed: {e}"))?;
-    let doc: serde_json::Value =
-        serde_json::from_slice(&rendered.bytes).map_err(|e| e.to_string())?;
-    if doc["format"] != "corporate" {
-        return Err(format!("explicit format ignored: {}", doc["format"]));
-    }
+        .map_err(|e| format!("corporate render failed: {e}"))?;
+    assert_pdf(&rendered.bytes, "overview (corporate)")?;
+    dump("workspace-overview.corporate", &rendered.bytes);
 
-    // The list report supports Excel.
+    // The list report renders to PDF and to Excel.
+    let rendered = reporting
+        .render(&render_cx(&app), "sample-register", None, ReportOutput::Pdf)
+        .await
+        .map_err(|e| format!("register pdf failed: {e}"))?;
+    assert_pdf(&rendered.bytes, "register (pdf)")?;
+    dump("sample-register.pdf", &rendered.bytes);
     reporting
         .render(&render_cx(&app), "sample-register", None, ReportOutput::Excel)
         .await
@@ -165,5 +163,23 @@ fn swap_database(url: &str, database: &str) -> String {
     match url.rsplit_once('/') {
         Some((prefix, _)) => format!("{prefix}/{database}"),
         None => format!("{url}/{database}"),
+    }
+}
+
+fn assert_pdf(bytes: &[u8], what: &str) -> Result<(), String> {
+    if bytes.len() < 800 {
+        return Err(format!("{what}: PDF too small ({} bytes)", bytes.len()));
+    }
+    if &bytes[..5] != b"%PDF-" {
+        return Err(format!("{what}: not a PDF"));
+    }
+    Ok(())
+}
+
+/// When REPORT_OUT_DIR is set, write the rendered PDFs there for eyeballing.
+fn dump(name: &str, bytes: &[u8]) {
+    if let Ok(dir) = std::env::var("REPORT_OUT_DIR") {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(format!("{dir}/{name}.pdf"), bytes);
     }
 }
