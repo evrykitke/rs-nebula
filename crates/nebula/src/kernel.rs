@@ -55,8 +55,44 @@ impl Migrations {
     }
 
     /// Bring `db` fully up to date: framework, then application, then
-    /// module SQL migrations.
+    /// module SQL migrations — under a lock so concurrent instances don't
+    /// race.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` is not safe when two connections run it
+    /// at once: Postgres raises a duplicate-key error on `pg_type`. Two app
+    /// instances booting against the same fresh database (or concurrently
+    /// provisioning tenant databases) would hit exactly that. So the whole
+    /// run is serialized behind a session-level advisory lock held on one
+    /// pinned connection; other instances block on the same key and then
+    /// find every migration already applied. Advisory locks are scoped to
+    /// the database, so each tenant database coordinates independently.
     pub(crate) async fn apply(&self, db: &DatabaseConnection) -> Result<()> {
+        let mut lock = db
+            .get_postgres_connection_pool()
+            .acquire()
+            .await
+            .map_err(|e| {
+                Error::internal(format!("could not acquire a connection to lock migrations: {e}"))
+            })?;
+        sea_orm::sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(MIGRATION_LOCK_KEY)
+            .execute(&mut *lock)
+            .await
+            .map_err(|e| Error::internal(format!("could not take the migration lock: {e}")))?;
+
+        let result = self.run_migrations(db).await;
+
+        // Release explicitly; dropping the pinned connection would end the
+        // session and release it anyway, but this returns it to the pool
+        // usable.
+        let _ = sea_orm::sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(MIGRATION_LOCK_KEY)
+            .execute(&mut *lock)
+            .await;
+        result
+    }
+
+    async fn run_migrations(&self, db: &DatabaseConnection) -> Result<()> {
         crate::migrations::Migrator::up(db, None)
             .await
             .map_err(Error::from)?;
@@ -67,6 +103,10 @@ impl Migrations {
         Ok(())
     }
 }
+
+/// Shared key for the migration advisory lock. Arbitrary, but identical
+/// across instances so they contend on the same lock.
+const MIGRATION_LOCK_KEY: i64 = 0x6E65_6275_6C61_4D47; // "nebulaMG"
 
 /// Composes and boots a Nebula application.
 pub struct Kernel {
