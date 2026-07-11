@@ -38,7 +38,6 @@ pub use sea_orm_migration;
 pub use apalis;
 
 pub use jobs::Jobs;
-
 pub use account::AccountModule;
 pub use administration::AdministrationModule;
 pub use auth::{CurrentUser as AuthUser, UserManager};

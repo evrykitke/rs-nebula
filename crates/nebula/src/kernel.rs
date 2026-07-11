@@ -168,7 +168,10 @@ impl Kernel {
         tracing::info!(count = currencies.len(), "currency registry built");
 
         let jobs = if self.config.jobs.enabled {
-            let conn = apalis_redis::connect(self.config.redis.url.expose())
+            // Same bounded connect as the cache: apalis_redis::connect uses
+            // ConnectionManager's defaults (six retries, no timeout), which
+            // would hang the boot on a wrong redis.url instead of failing.
+            let conn = crate::cache::connect_manager(self.config.redis.url.expose())
                 .await
                 .map_err(|e| {
                     Error::internal(format!("jobs are enabled but Redis is unreachable: {e}"))

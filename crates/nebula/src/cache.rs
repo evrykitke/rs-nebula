@@ -29,6 +29,23 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Open a Redis [`ConnectionManager`] that **fails fast** instead of
+/// hanging the boot. `ConnectionManager`'s defaults (six retries, no
+/// connect timeout) let a wrong host block startup indefinitely, so every
+/// Redis consumer in the framework — the cache here and the job queue —
+/// connects through this bounded helper. Once established the manager
+/// reconnects on its own, so a *later* Redis blip does not take the
+/// process down. Callers add their own "what for" context to the error.
+pub(crate) async fn connect_manager(url: &str) -> redis::RedisResult<ConnectionManager> {
+    let client = redis::Client::open(url)?;
+    let settings = redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(Duration::from_secs(3))
+        .set_response_timeout(Duration::from_secs(3))
+        .set_number_of_retries(2)
+        .set_max_delay(500);
+    ConnectionManager::new_with_config(client, settings).await
+}
+
 /// The application cache. Cheap to clone (shares one multiplexed,
 /// auto-reconnecting Redis connection); one per application.
 #[derive(Clone)]
@@ -74,18 +91,9 @@ impl Cache {
     /// manager reconnects on its own, so a *later* Redis blip degrades to
     /// misses rather than taking the process down.
     pub async fn connect(redis: &RedisConfig, config: &CacheConfig) -> Result<Self> {
-        let client = redis::Client::open(redis.url.expose())
-            .map_err(|e| Error::internal(format!("invalid redis.url for the cache: {e}")))?;
-        let settings = redis::aio::ConnectionManagerConfig::new()
-            .set_connection_timeout(Duration::from_secs(3))
-            .set_response_timeout(Duration::from_secs(3))
-            .set_number_of_retries(2)
-            .set_max_delay(500);
-        let manager = ConnectionManager::new_with_config(client, settings)
+        let manager = connect_manager(redis.url.expose())
             .await
-            .map_err(|e| {
-                Error::internal(format!("cache is enabled but Redis is unreachable: {e}"))
-            })?;
+            .map_err(|e| Error::internal(format!("cache is enabled but Redis is unreachable: {e}")))?;
         Ok(Self {
             inner: Arc::new(Inner {
                 manager: Some(manager),
