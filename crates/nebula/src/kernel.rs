@@ -372,7 +372,9 @@ pub struct KernelBuilder {
 }
 
 impl KernelBuilder {
-    /// Register a module. Modules are configured in registration order.
+    /// Register a module. Declared dependencies are registered
+    /// automatically; modules configure dependencies-first, then in
+    /// registration order.
     pub fn add_module(mut self, module: impl Module) -> Self {
         self.modules.push(Box::new(module));
         self
@@ -409,9 +411,13 @@ impl KernelBuilder {
             Err(e) => return Err(e.into()),
         }
 
+        // Pull in declared dependencies and order them ahead of their
+        // dependents; a registration mistake fails here, not at runtime.
+        let modules = crate::module::resolve(self.modules)?;
+
         Ok(Kernel {
             config,
-            modules: self.modules,
+            modules,
             migrations: self.migrations,
         })
     }

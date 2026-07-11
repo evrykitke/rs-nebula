@@ -7,8 +7,10 @@
 //!   `delete` snapshots of the client-safe view of an entity
 //! - [`diff`] — field-level comparison of two snapshots, powering the
 //!   what-changed view
-//! - [`AuditModule`] — ready-made trail endpoints with a per-entry
-//!   what-changed diff view, guarded by `Pages.Administration.AuditLogs.View`
+//!
+//! The trail's HTTP endpoints (browse, diff view, retention) live in
+//! the administration module, guarded by
+//! `Pages.Administration.AuditLogs.View`.
 //!
 //! Request bodies are never recorded — they can carry passwords.
 //! Audit writes are failure-contained: they log errors, they do not
@@ -17,10 +19,8 @@
 pub mod diff;
 pub mod log;
 pub(crate) mod middleware;
-pub mod module;
 pub mod pruner;
 pub mod recorder;
 
 pub use diff::{FieldChange, diff};
-pub use module::AuditModule;
 pub use recorder::{Audit, Recorder, RequestInfo};

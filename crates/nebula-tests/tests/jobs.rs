@@ -8,7 +8,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use nebula::apalis::prelude::*;
 use nebula::config::{Config, DatabaseConfig};
-use nebula::{AuditModule, AuthModule, Kernel, Module, ModuleContext, db};
+use nebula::{AdministrationModule, Kernel, Module, ModuleContext, db};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -128,8 +128,7 @@ async fn background_jobs_end_to_end() {
 
     let mut app = Kernel::builder()
         .with_config(config)
-        .add_module(AuthModule)
-        .add_module(AuditModule)
+        .add_module(AdministrationModule)
         .add_module(CountingModule {
             queue: queue.clone(),
             counter: counter.clone(),

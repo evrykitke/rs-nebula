@@ -1,6 +1,12 @@
 //! The module system: applications are composed from modules, each
 //! contributing routes (and, over time, jobs, event handlers, entities).
 //! Modules keep the framework open for extension without modification.
+//!
+//! A module is a bounded context (Administration, Accounting, Sales) —
+//! not an individual feature. Modules declare what they build on via
+//! [`Module::depends_on`]; the kernel walks the graph, deduplicates by
+//! name, and configures dependencies first, so an application registers
+//! only its top-level modules and `main.rs` stays a one-liner.
 
 use crate::auth::permission::PermissionDef;
 use crate::config::Config;
@@ -22,11 +28,59 @@ pub(crate) type WorkerRegistration = Box<dyn FnOnce(Monitor) -> Monitor + Send>;
 /// [`ModuleContext`] passed to [`Module::configure`]; the kernel calls
 /// each module once during boot, in registration order.
 pub trait Module: Send + Sync + 'static {
-    /// Unique, human-readable module name (used in boot logs).
+    /// Unique, human-readable module name (used in boot logs and for
+    /// deduplication when several modules depend on the same one).
     fn name(&self) -> &'static str;
+
+    /// Modules this one requires. The kernel registers them
+    /// automatically and configures them before this module, so an
+    /// application never has to know a module's transitive needs.
+    fn depends_on(&self) -> Vec<Box<dyn Module>> {
+        Vec::new()
+    }
 
     /// Register the module's contributions.
     fn configure(&self, ctx: &mut ModuleContext);
+}
+
+/// Resolve the registration list into configuration order: dependencies
+/// first, duplicates (by name) dropped, cycles rejected at boot.
+pub(crate) fn resolve(
+    modules: Vec<Box<dyn Module>>,
+) -> crate::error::Result<Vec<Box<dyn Module>>> {
+    fn visit(
+        module: Box<dyn Module>,
+        seen: &mut std::collections::HashSet<&'static str>,
+        path: &mut Vec<&'static str>,
+        ordered: &mut Vec<Box<dyn Module>>,
+    ) -> crate::error::Result<()> {
+        let name = module.name();
+        if seen.contains(name) {
+            return Ok(());
+        }
+        if path.contains(&name) {
+            return Err(crate::error::Error::internal(format!(
+                "module dependency cycle: {} -> {name}",
+                path.join(" -> ")
+            )));
+        }
+        path.push(name);
+        for dependency in module.depends_on() {
+            visit(dependency, seen, path, ordered)?;
+        }
+        path.pop();
+        seen.insert(name);
+        ordered.push(module);
+        Ok(())
+    }
+
+    let mut ordered = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut path = Vec::new();
+    for module in modules {
+        visit(module, &mut seen, &mut path, &mut ordered)?;
+    }
+    Ok(ordered)
 }
 
 /// Collects module contributions during boot.

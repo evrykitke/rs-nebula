@@ -8,7 +8,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use nebula::auth::permission::{self, PermissionDef, Registry, names};
 use nebula::config::{Config, DatabaseConfig};
-use nebula::{AuthModule, Kernel, db};
+use nebula::{AdministrationModule, Kernel, db};
 use tower::ServiceExt;
 
 async fn send(
@@ -92,7 +92,7 @@ async fn authorization_end_to_end() {
 
     let app = Kernel::builder()
         .with_config(config)
-        .add_module(AuthModule)
+        .add_module(AdministrationModule)
         .build()
         .unwrap()
         .init()

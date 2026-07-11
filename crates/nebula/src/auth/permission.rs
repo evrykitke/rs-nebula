@@ -103,7 +103,7 @@ impl Registry {
     }
 }
 
-/// Permission names the auth module defines for its own endpoints.
+/// Permission names of the administration module's endpoints.
 pub mod names {
     pub const ADMINISTRATION: &str = "Pages.Administration";
     pub const USERS: &str = "Pages.Administration.Users";
@@ -118,9 +118,12 @@ pub mod names {
     pub const ROLES_EDIT: &str = "Pages.Administration.Roles.Edit";
     pub const ROLES_DELETE: &str = "Pages.Administration.Roles.Delete";
     pub const TENANT_SETTINGS: &str = "Pages.Administration.Tenant.Settings";
+    pub const AUDIT_LOGS: &str = "Pages.Administration.AuditLogs";
+    pub const AUDIT_LOGS_VIEW: &str = "Pages.Administration.AuditLogs.View";
 }
 
-/// The administration permission tree contributed by [`crate::auth::AuthModule`].
+/// The permission tree contributed by
+/// [`crate::administration::AdministrationModule`].
 pub fn administration_tree() -> PermissionDef {
     use names::*;
     PermissionDef::new(ADMINISTRATION, "Administration")
@@ -145,5 +148,9 @@ pub fn administration_tree() -> PermissionDef {
         .child(
             PermissionDef::new("Pages.Administration.Tenant", "Tenant administration")
                 .child(PermissionDef::new(TENANT_SETTINGS, "Tenant settings")),
+        )
+        .child(
+            PermissionDef::new(AUDIT_LOGS, "Audit logs")
+                .child(PermissionDef::new(AUDIT_LOGS_VIEW, "View audit logs")),
         )
 }

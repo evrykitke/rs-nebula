@@ -2,9 +2,10 @@
 //!
 //! Currencies are not hardcoded — they live in the `currencies` table
 //! ([`currency`]), pre-populated with the world's system currencies by a
-//! framework migration, extendable through [`CurrencyModule`]'s endpoints
-//! and, for app-specific units, the `currencies:` configuration section.
-//! The kernel builds a [`CurrencyRegistry`] from both at boot.
+//! framework migration, extendable through the administration module's
+//! `/currencies` endpoints and, for app-specific units, the
+//! `currencies:` configuration section. The kernel builds a
+//! [`CurrencyRegistry`] from both at boot.
 //!
 //! The rules that prevent the classic ERP money bugs:
 //!
@@ -18,9 +19,6 @@
 //!   back to the whole.
 
 pub mod currency;
-pub mod module;
-
-pub use module::CurrencyModule;
 
 use crate::config::CurrencyConfig;
 use crate::error::{Error, Result};

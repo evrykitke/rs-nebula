@@ -9,7 +9,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use nebula::audit::{FieldChange, diff};
 use nebula::config::{Config, DatabaseConfig};
-use nebula::{AuditModule, AuthModule, Kernel, db};
+use nebula::{AdministrationModule, Kernel, db};
 use tower::ServiceExt;
 
 const CLIENT_IP: &str = "203.0.113.9";
@@ -99,8 +99,7 @@ async fn audit_trail_end_to_end() {
 
     let app = Kernel::builder()
         .with_config(config)
-        .add_module(AuthModule)
-        .add_module(AuditModule)
+        .add_module(AdministrationModule)
         .build()
         .unwrap()
         .init()

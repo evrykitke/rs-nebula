@@ -1,4 +1,4 @@
-//! Ready-made audit trail endpoints, guarded by their own permission:
+//! Audit trail endpoints, guarded by `Pages.Administration.AuditLogs.View`:
 //!
 //! - `GET /audit/logs` — the trail, newest first, with paging and
 //!   filters (`action`, `entity_type`, `user_id`)
@@ -10,13 +10,12 @@
 //!
 //! Rows are tenant-scoped: a tenant only ever sees its own trail.
 
-use super::diff::{FieldChange, diff};
-use super::log;
+use crate::audit::diff::{FieldChange, diff};
+use crate::audit::log;
 use crate::auth::Authz;
-use crate::auth::permission::{self, PermissionDef};
+use crate::auth::permission;
 use crate::config::AuditConfig;
 use crate::error::{Error, Result};
-use crate::module::{Module, ModuleContext};
 use crate::tenancy::TenantManager;
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
@@ -25,49 +24,27 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOr
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Permission names the audit module defines.
-pub mod names {
-    pub const AUDIT_LOGS: &str = "Pages.Administration.AuditLogs";
-    pub const AUDIT_LOGS_VIEW: &str = "Pages.Administration.AuditLogs.View";
-}
-
-pub struct AuditModule;
-
 #[derive(Clone)]
 struct AuditState {
     config: AuditConfig,
     tenants: Option<Arc<TenantManager>>,
 }
 
-impl Module for AuditModule {
-    fn name(&self) -> &'static str {
-        "audit"
-    }
-
-    fn configure(&self, ctx: &mut ModuleContext) {
-        ctx.add_permissions(PermissionDef::new(names::AUDIT_LOGS, "Audit logs").child(
-            PermissionDef::new(names::AUDIT_LOGS_VIEW, "View audit logs"),
-        ));
-        ctx.add_api(crate::module::build_openapi(|| {
-            <ApiDoc as utoipa::OpenApi>::openapi()
-        }));
-        let state = AuditState {
-            config: ctx.config().audit.clone(),
-            tenants: ctx.tenants(),
-        };
-        ctx.add_routes(
-            Router::new()
-                .route("/audit/logs", get(list_logs))
-                .route("/audit/logs/{id}", get(get_log))
-                .route("/audit/logs/{id}/diff", get(get_log_diff))
-                .route("/audit/retention", get(get_retention).put(set_retention))
-                .with_state(state),
-        );
-    }
+pub(super) fn routes(config: AuditConfig, tenants: Option<Arc<TenantManager>>) -> Router {
+    Router::new()
+        .route("/audit/logs", get(list_logs))
+        .route("/audit/logs/{id}", get(get_log))
+        .route("/audit/logs/{id}/diff", get(get_log_diff))
+        .route("/audit/retention", get(get_retention).put(set_retention))
+        .with_state(AuditState { config, tenants })
 }
 
-/// The audit module's OpenAPI contribution — the source client generators
-/// (NSwag) build the `audit` service proxy from.
+pub(super) fn api() -> utoipa::openapi::OpenApi {
+    crate::module::build_openapi(|| <ApiDoc as utoipa::OpenApi>::openapi())
+}
+
+/// The audit endpoints' OpenAPI contribution — the source client
+/// generators (NSwag) build the `audit` service proxy from.
 #[derive(utoipa::OpenApi)]
 #[openapi(paths(list_logs, get_log, get_log_diff, get_retention, set_retention))]
 struct ApiDoc;
@@ -90,7 +67,7 @@ async fn list_logs(
     Extension(db): Extension<DatabaseConnection>,
     Query(query): Query<LogQuery>,
 ) -> Result<Json<Vec<log::Model>>> {
-    authz.require(names::AUDIT_LOGS_VIEW).await?;
+    authz.require(permission::names::AUDIT_LOGS_VIEW).await?;
     let mut select = log::Entity::find()
         .filter(tenant_filter(authz.user.tenant_id))
         .order_by_desc(log::Column::Id)
@@ -116,7 +93,7 @@ async fn get_log(
     Extension(db): Extension<DatabaseConnection>,
     Path(id): Path<i64>,
 ) -> Result<Json<log::Model>> {
-    authz.require(names::AUDIT_LOGS_VIEW).await?;
+    authz.require(permission::names::AUDIT_LOGS_VIEW).await?;
     tenant_log(&db, authz.user.tenant_id, id).await.map(Json)
 }
 
@@ -138,7 +115,7 @@ async fn get_log_diff(
     Extension(db): Extension<DatabaseConnection>,
     Path(id): Path<i64>,
 ) -> Result<Json<LogDiff>> {
-    authz.require(names::AUDIT_LOGS_VIEW).await?;
+    authz.require(permission::names::AUDIT_LOGS_VIEW).await?;
     let row = tenant_log(&db, authz.user.tenant_id, id).await?;
     Ok(Json(LogDiff {
         id: row.id,
@@ -201,7 +178,10 @@ impl AuditState {
             retention_days,
             system_default_days: self.config.retention_days,
             max_days: self.config.retention_max_days,
-            effective_days: super::pruner::effective_retention(&self.config, retention_days),
+            effective_days: crate::audit::pruner::effective_retention(
+                &self.config,
+                retention_days,
+            ),
         }
     }
 }

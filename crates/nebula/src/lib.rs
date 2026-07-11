@@ -3,6 +3,8 @@
 //! Inspired by ASP.NET Boilerplate: applications are composed from modules,
 //! bootstrapped by a kernel, and configured rather than hardcoded.
 
+pub mod account;
+pub mod administration;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -33,13 +35,14 @@ pub use apalis;
 
 pub use jobs::Jobs;
 
-pub use audit::AuditModule;
-pub use auth::{AuthModule, CurrentUser as AuthUser, UserManager};
+pub use account::AccountModule;
+pub use administration::AdministrationModule;
+pub use auth::{CurrentUser as AuthUser, UserManager};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use kernel::{App, Kernel};
 pub use module::{Module, ModuleContext};
-pub use money::{Currency, CurrencyModule, CurrencyRegistry, Money};
+pub use money::{Currency, CurrencyRegistry, Money};
 pub use repository::Repository;
 pub use tenancy::middleware::{CurrentTenant, TenantDb};
 pub use tenancy::{TenantManager, TenantRef};

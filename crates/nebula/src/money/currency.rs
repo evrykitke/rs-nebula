@@ -1,8 +1,8 @@
 //! The currency table, stored in the main database. Pre-populated by a
 //! framework migration with the world's currencies (`is_system: true`,
-//! undeletable); deployments add their own units through
-//! [`super::CurrencyModule`]'s endpoints. Tenants pick their default
-//! currency from this list.
+//! undeletable); deployments add their own units through the
+//! administration module's `/currencies` endpoints. Tenants pick their
+//! default currency from this list.
 
 use crate::error::{Error, Result};
 use sea_orm::entity::prelude::*;

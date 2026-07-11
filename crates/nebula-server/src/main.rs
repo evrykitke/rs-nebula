@@ -1,11 +1,10 @@
-use nebula::{AuditModule, AuthModule, CurrencyModule, Kernel};
+use nebula::{AdministrationModule, Kernel};
 
 #[tokio::main]
 async fn main() -> nebula::Result<()> {
+    // AccountModule comes in through AdministrationModule's depends_on.
     Kernel::builder()
-        .add_module(AuthModule)
-        .add_module(AuditModule)
-        .add_module(CurrencyModule)
+        .add_module(AdministrationModule)
         .build()?
         .run()
         .await
