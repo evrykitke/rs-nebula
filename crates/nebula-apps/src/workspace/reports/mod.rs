@@ -216,7 +216,7 @@ impl ReportDefinition for SampleRegister {
     }
 
     fn outputs(&self) -> &'static [ReportOutput] {
-        &[ReportOutput::Pdf, ReportOutput::Excel]
+        &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
 
     fn build(&self, _data: &ReportData) -> Result<Report> {

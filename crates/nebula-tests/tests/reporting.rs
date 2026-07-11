@@ -144,6 +144,52 @@ async fn run(url: &str) -> Result<(), String> {
         return Err(format!("expected xlsx extension, got {}", xlsx.extension));
     }
 
+    // The themed in-app preview: one SVG per page, matching the PDF layout.
+    let pages = reporting
+        .preview(&render_cx(&app), "workspace-overview", Some(ReportFormat::Modern))
+        .await
+        .map_err(|e| format!("overview preview failed: {e}"))?;
+    if pages.is_empty() {
+        return Err("preview produced no pages".into());
+    }
+    for (i, page) in pages.iter().enumerate() {
+        if !page.trim_start().starts_with("<svg") {
+            return Err(format!("preview page {i} is not SVG"));
+        }
+    }
+    dump_text("workspace-overview.preview.p1", "svg", pages[0].as_bytes());
+
+    // The interactive datatable output: the register's table, flattened with
+    // per-column hints for the viewer.
+    let tables = reporting
+        .datatables(&render_cx(&app), "sample-register", None)
+        .await
+        .map_err(|e| format!("register datatables failed: {e}"))?;
+    if tables.tables.len() != 1 {
+        return Err(format!("expected 1 datatable, got {}", tables.tables.len()));
+    }
+    let table = &tables.tables[0];
+    if table.rows.is_empty() || table.columns.len() != 5 {
+        return Err(format!(
+            "unexpected datatable shape: {} cols, {} rows",
+            table.columns.len(),
+            table.rows.len()
+        ));
+    }
+    // The "Amount" column is right-aligned, so it must be flagged numeric.
+    if !table.columns[3].numeric {
+        return Err("Amount column should be numeric".into());
+    }
+
+    // The overview declares no table output, so datatables must reject it.
+    if reporting
+        .datatables(&render_cx(&app), "workspace-overview", None)
+        .await
+        .is_ok()
+    {
+        return Err("overview should reject the table output".into());
+    }
+
     // The overview does not support Excel.
     if reporting
         .render(&render_cx(&app), "workspace-overview", None, ReportOutput::Excel)
@@ -187,5 +233,13 @@ fn dump(name: &str, bytes: &[u8]) {
     if let Ok(dir) = std::env::var("REPORT_OUT_DIR") {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(format!("{dir}/{name}.pdf"), bytes);
+    }
+}
+
+/// Like [`dump`], but for text artefacts (SVG preview pages).
+fn dump_text(name: &str, ext: &str, bytes: &[u8]) {
+    if let Ok(dir) = std::env::var("REPORT_OUT_DIR") {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(format!("{dir}/{name}.{ext}"), bytes);
     }
 }

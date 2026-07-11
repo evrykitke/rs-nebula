@@ -529,13 +529,17 @@ impl ReportFormat {
     }
 }
 
-/// The output file kind. Excel is only meaningful for table/list reports.
+/// The output kind. `Excel` and `Table` are only meaningful for table/list
+/// reports: `Excel` is a downloadable workbook; `Table` is an interactive,
+/// in-app datatable (sortable/filterable/paginated by the client) served as
+/// JSON — a "list report" the user works with on screen rather than a file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportOutput {
     #[default]
     Pdf,
     Excel,
+    Table,
 }
 
 impl ReportOutput {
@@ -543,6 +547,7 @@ impl ReportOutput {
         match s.to_ascii_lowercase().as_str() {
             "pdf" => Some(ReportOutput::Pdf),
             "excel" | "xlsx" => Some(ReportOutput::Excel),
+            "table" | "html" => Some(ReportOutput::Table),
             _ => None,
         }
     }
@@ -765,6 +770,83 @@ pub struct ReportInfo {
     pub requires_permission: Option<String>,
 }
 
+/// The interactive list-report payload: every table in a report, flattened
+/// out of its widgets, for the viewer to render as sortable/filterable
+/// datatables. This is the `table` output — an on-screen list report rather
+/// than a downloadable file, but it lives in the reporting engine so a report
+/// is authored once and offered as PDF, Excel, and/or an interactive table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTables {
+    pub title: String,
+    pub tables: Vec<DataTable>,
+}
+
+/// One table in a [`ReportTables`] payload — the [`Table`] widget model
+/// reshaped with the per-column hints a datatable UI needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub columns: Vec<DataColumn>,
+    pub rows: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataColumn {
+    pub label: String,
+    pub align: Align,
+    /// Numeric columns sort by value (not lexically) and align to the end.
+    pub numeric: bool,
+}
+
+impl From<&Table> for DataTable {
+    fn from(table: &Table) -> Self {
+        DataTable {
+            title: table.title.clone(),
+            columns: table
+                .columns
+                .iter()
+                .map(|c| DataColumn {
+                    label: c.label.clone(),
+                    align: c.align,
+                    numeric: c.align == Align::End,
+                })
+                .collect(),
+            rows: table.rows.clone(),
+            totals: table.totals.clone(),
+        }
+    }
+}
+
+/// Flatten a built document's tables into the interactive datatable payload.
+fn tables_of(doc: &Document) -> ReportTables {
+    let mut tables = Vec::new();
+    collect_tables(&doc.report.widgets, &mut tables);
+    ReportTables {
+        title: doc.report.title.clone(),
+        tables: tables.into_iter().map(DataTable::from).collect(),
+    }
+}
+
+/// Depth-first collection of every table in a widget tree, descending into
+/// layout widgets (groups, columns) so nested tables still surface.
+fn collect_tables<'a>(widgets: &'a [Widget], out: &mut Vec<&'a Table>) {
+    for w in widgets {
+        match w {
+            Widget::Table(t) => out.push(t),
+            Widget::Group(g) => collect_tables(&g.widgets, out),
+            Widget::Columns { columns, .. } => {
+                for col in columns {
+                    collect_tables(col, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The reporting engine: a registry of report definitions plus the
 /// renderers, shared like the other primitives (cheap `Arc` clone).
 #[derive(Clone)]
@@ -865,7 +947,8 @@ impl Reporting {
             .inner
             .reports
             .get(name)
-            .ok_or_else(|| Error::NotFound(format!("report {name:?}")))?;
+            .ok_or_else(|| Error::NotFound(format!("report {name:?}")))?
+            .clone();
 
         if !def.outputs().contains(&output) {
             return Err(Error::Validation(format!(
@@ -873,6 +956,85 @@ impl Reporting {
             )));
         }
 
+        let doc = self.document(cx, def.as_ref(), format).await?;
+
+        match output {
+            ReportOutput::Pdf => self.inner.pdf.render(&doc),
+            ReportOutput::Excel => self.inner.excel.render(&doc),
+            ReportOutput::Table => {
+                let tables = tables_of(&doc);
+                let bytes = serde_json::to_vec(&tables)
+                    .map_err(|e| Error::internal(e.to_string()))?;
+                Ok(Rendered { bytes, content_type: "application/json", extension: "json" })
+            }
+        }
+    }
+
+    /// Build a report and return its tables as an interactive datatable
+    /// payload (the `table` output), for the viewer's list-report view. Uses
+    /// the same document pipeline as PDF/Excel, so one report definition
+    /// serves every output.
+    pub async fn datatables(
+        &self,
+        cx: &RenderCx,
+        name: &str,
+        format: Option<ReportFormat>,
+    ) -> Result<ReportTables> {
+        let def = self
+            .inner
+            .reports
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("report {name:?}")))?
+            .clone();
+
+        if !def.outputs().contains(&ReportOutput::Table) {
+            return Err(Error::Validation(format!(
+                "report {name:?} does not support the table output"
+            )));
+        }
+
+        let doc = self.document(cx, def.as_ref(), format).await?;
+        Ok(tables_of(&doc))
+    }
+
+    /// Render a report to one themed SVG per page, for the in-app viewer. The
+    /// preview always uses the PDF layout (there is no Excel preview), so the
+    /// pages match a PDF download exactly. Requires the `reporting` feature.
+    pub async fn preview(
+        &self,
+        cx: &RenderCx,
+        name: &str,
+        format: Option<ReportFormat>,
+    ) -> Result<Vec<String>> {
+        let def = self
+            .inner
+            .reports
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("report {name:?}")))?
+            .clone();
+
+        let doc = self.document(cx, def.as_ref(), format).await?;
+
+        #[cfg(feature = "reporting")]
+        {
+            typst_backend::render_svg(&doc)
+        }
+        #[cfg(not(feature = "reporting"))]
+        {
+            let _ = doc;
+            Err(Error::internal("report preview requires the reporting feature"))
+        }
+    }
+
+    /// Resolve a report's format and datasources and assemble the [`Document`]
+    /// that the renderers consume. Shared by [`render`](Self::render) and
+    /// [`preview`](Self::preview).
+    async fn document(
+        &self,
+        cx: &RenderCx,
+        def: &dyn ReportDefinition,
+        format: Option<ReportFormat>,
+    ) -> Result<Document> {
         let settings = self.settings(cx.db.as_ref()).await;
         let format = format
             .or(settings.default_format)
@@ -896,18 +1058,13 @@ impl Reporting {
         }
 
         let report = def.build(&data)?;
-        let doc = Document {
+        Ok(Document {
             company,
             title: def.title().to_string(),
             report,
             format,
             watermark: settings.watermark,
-        };
-
-        match output {
-            ReportOutput::Pdf => self.inner.pdf.render(&doc),
-            ReportOutput::Excel => self.inner.excel.render(&doc),
-        }
+        })
     }
 
     /// The tenant's report settings, or defaults when unset or unreadable
@@ -954,6 +1111,16 @@ pub(crate) fn routes() -> Router {
         .route("/reports", get(list_reports))
         .route("/reports/settings", get(get_settings).put(put_settings))
         .route("/reports/{name}", get(render_report))
+        .route("/reports/{name}/preview", get(preview_report))
+        .route("/reports/{name}/table", get(table_report))
+}
+
+/// The themed in-app preview: the report's pages as SVG, for the viewer to
+/// render inside the app's own chrome (instead of the browser's native PDF
+/// viewer). One string per page.
+#[derive(Debug, Serialize)]
+struct ReportPreview {
+    pages: Vec<String>,
 }
 
 async fn list_reports(
@@ -1027,6 +1194,61 @@ async fn render_report(
         rendered.bytes,
     )
         .into_response())
+}
+
+async fn preview_report(
+    Extension(reporting): Extension<Reporting>,
+    authz: Authz,
+    db: Option<Extension<DatabaseConnection>>,
+    tenant: Option<Extension<TenantRef>>,
+    Path(name): Path<String>,
+    Query(params): Query<RenderParams>,
+) -> Result<Json<ReportPreview>> {
+    if let Some(required) = reporting.required_permission(&name) {
+        authz.require(required).await?;
+    }
+
+    let format = match params.format.as_deref() {
+        Some(s) => Some(
+            ReportFormat::parse(s)
+                .ok_or_else(|| Error::Validation(format!("unknown report format {s:?}")))?,
+        ),
+        None => None,
+    };
+
+    let cx = RenderCx {
+        db: db.map(|e| e.0),
+        tenant: tenant.map(|e| e.0),
+    };
+    let pages = reporting.preview(&cx, &name, format).await?;
+    Ok(Json(ReportPreview { pages }))
+}
+
+async fn table_report(
+    Extension(reporting): Extension<Reporting>,
+    authz: Authz,
+    db: Option<Extension<DatabaseConnection>>,
+    tenant: Option<Extension<TenantRef>>,
+    Path(name): Path<String>,
+    Query(params): Query<RenderParams>,
+) -> Result<Json<ReportTables>> {
+    if let Some(required) = reporting.required_permission(&name) {
+        authz.require(required).await?;
+    }
+
+    let format = match params.format.as_deref() {
+        Some(s) => Some(
+            ReportFormat::parse(s)
+                .ok_or_else(|| Error::Validation(format!("unknown report format {s:?}")))?,
+        ),
+        None => None,
+    };
+
+    let cx = RenderCx {
+        db: db.map(|e| e.0),
+        tenant: tenant.map(|e| e.0),
+    };
+    Ok(Json(reporting.datatables(&cx, &name, format).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,6 +1401,41 @@ mod typst_backend {
                 .map_err(|e| Error::internal(format!("report PDF export failed: {e:?}")))?;
             Ok(Rendered { bytes: pdf, content_type: "application/pdf", extension: "pdf" })
         }
+    }
+
+    /// Compile the same document Typst uses for the PDF, but export one SVG
+    /// per page — the source of the themed in-app preview. Reusing the PDF
+    /// layout keeps the preview and the download pixel-identical.
+    pub(super) fn render_svg(doc: &Document) -> Result<Vec<String>> {
+        let mut assets: Vec<(String, Vec<u8>)> = Vec::new();
+        let source = emit(doc, &mut assets);
+
+        let resolver: Vec<(&str, Vec<u8>)> = assets
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect();
+
+        let engine = TypstEngine::builder()
+            .main_file(source)
+            .search_fonts_with(
+                TypstKitFontOptions::default()
+                    .include_system_fonts(false)
+                    .include_embedded_fonts(true),
+            )
+            .with_static_file_resolver(resolver)
+            .build();
+
+        let document = engine
+            .compile::<PagedDocument>()
+            .output
+            .map_err(|e| Error::internal(format!("report typesetting failed: {e}")))?;
+
+        let opts = typst_svg::SvgOptions::default();
+        Ok(document
+            .pages()
+            .iter()
+            .map(|page| typst_svg::svg(page, &opts))
+            .collect())
     }
 
     /// Per-format look. Sizes are Typst length literals; colours are hex
@@ -2132,23 +2389,6 @@ mod excel_backend {
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 extension: "xlsx",
             })
-        }
-    }
-
-    /// Depth-first collection of every table, descending into groups and
-    /// columns so a table nested in a layout widget still exports.
-    fn collect_tables<'a>(widgets: &'a [Widget], out: &mut Vec<&'a Table>) {
-        for w in widgets {
-            match w {
-                Widget::Table(t) => out.push(t),
-                Widget::Group(g) => collect_tables(&g.widgets, out),
-                Widget::Columns { columns, .. } => {
-                    for col in columns {
-                        collect_tables(col, out);
-                    }
-                }
-                _ => {}
-            }
         }
     }
 
