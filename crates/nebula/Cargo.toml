@@ -34,5 +34,6 @@ tracing-subscriber.workspace = true
 apalis.workspace = true
 apalis-redis.workspace = true
 apalis-cron.workspace = true
+redis.workspace = true
 lapin.workspace = true
 futures-lite.workspace = true

@@ -69,6 +69,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub multitenancy: MultitenancyConfig,
     pub redis: RedisConfig,
+    pub cache: CacheConfig,
     pub rabbitmq: RabbitMqConfig,
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
@@ -88,6 +89,7 @@ impl Default for Config {
             database: DatabaseConfig::default(),
             multitenancy: MultitenancyConfig::default(),
             redis: RedisConfig::default(),
+            cache: CacheConfig::default(),
             rabbitmq: RabbitMqConfig::default(),
             logging: LoggingConfig::default(),
             auth: AuthConfig::default(),
@@ -330,6 +332,33 @@ pub struct RedisConfig {
     pub url: Secret,
 }
 
+/// Redis-backed caching. Connects through `redis.url` (shared with the
+/// job queue). When off, the cache is a transparent no-op — reads always
+/// miss and writes are dropped — so modules can use it unconditionally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheConfig {
+    /// Cache through Redis. Off: every operation degrades to a no-op.
+    /// On but Redis unreachable at boot fails fast, like the job queue.
+    pub enabled: bool,
+    /// Key namespace shared by every entry, so several applications (or
+    /// environments) can share one Redis without colliding.
+    pub prefix: String,
+    /// Expiry applied by the convenience methods that don't take one
+    /// (`cached`, `set_default`); explicit `get_or_set`/`set` override it.
+    pub default_ttl_secs: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prefix: "nebula".into(),
+            default_ttl_secs: 300,
+        }
+    }
+}
+
 impl Default for RedisConfig {
     fn default() -> Self {
         Self {
@@ -442,6 +471,23 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "migrations.root must not be empty".into(),
             ));
+        }
+        if self.cache.enabled {
+            if self.redis.url.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "cache.enabled requires redis.url".into(),
+                ));
+            }
+            if self.cache.prefix.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "cache.prefix must not be empty".into(),
+                ));
+            }
+            if self.cache.default_ttl_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "cache.default_ttl_secs must be at least 1".into(),
+                ));
+            }
         }
         if self.events.distributed {
             if self.rabbitmq.url.is_empty() {

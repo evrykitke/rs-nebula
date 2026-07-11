@@ -9,6 +9,7 @@
 //! only its top-level modules and `main.rs` stays a one-liner.
 
 use crate::auth::permission::PermissionDef;
+use crate::cache::Cache;
 use crate::config::Config;
 use crate::events::Events;
 use crate::jobs::Jobs;
@@ -94,6 +95,7 @@ pub struct ModuleContext<'a> {
     jobs: Option<Jobs>,
     events: Events,
     storage: Storage,
+    cache: Cache,
     router: Router,
     permissions: Vec<PermissionDef>,
     workers: Vec<WorkerRegistration>,
@@ -109,6 +111,7 @@ impl<'a> ModuleContext<'a> {
         jobs: Option<Jobs>,
         events: Events,
         storage: Storage,
+        cache: Cache,
     ) -> Self {
         Self {
             config,
@@ -118,6 +121,7 @@ impl<'a> ModuleContext<'a> {
             jobs,
             events,
             storage,
+            cache,
             router: Router::new(),
             permissions: Vec::new(),
             workers: Vec::new(),
@@ -183,6 +187,13 @@ impl<'a> ModuleContext<'a> {
     /// `/public` — tenant uploads live in per-tenant containers.
     pub fn storage(&self) -> Storage {
         self.storage.clone()
+    }
+
+    /// The application cache. Take a [`Scope`](crate::cache::Scope) from
+    /// it (`cache.tenant(&tenant)`, `cache.scope("…")`, `cache.global()`).
+    /// A no-op when `cache.enabled` is off, so it is always safe to use.
+    pub fn cache(&self) -> Cache {
+        self.cache.clone()
     }
 
     /// Contribute a background worker. The registration runs against the

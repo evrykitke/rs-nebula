@@ -2329,6 +2329,7 @@ dependencies = [
  "jsonwebtoken",
  "lapin",
  "rand 0.8.6",
+ "redis",
  "rust_decimal",
  "sea-orm",
  "sea-orm-migration",

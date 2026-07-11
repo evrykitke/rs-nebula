@@ -16,6 +16,10 @@ multitenancy:
 jobs:
   enabled: true
 
+# Read-through caching through redis.url (docker compose up -d).
+cache:
+  enabled: true
+
 # Integration events through RabbitMQ (docker compose up -d); the broker
 # URL with credentials lives in dev.local.yaml.
 events:

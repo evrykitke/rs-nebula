@@ -182,6 +182,14 @@ impl Kernel {
         let events = crate::events::Events::new();
         let storage = crate::storage::Storage::new(&self.config.files);
 
+        let cache = if self.config.cache.enabled {
+            let cache = crate::cache::Cache::connect(&self.config.redis, &self.config.cache).await?;
+            tracing::info!("cache connected to redis");
+            cache
+        } else {
+            crate::cache::Cache::disabled(&self.config.cache)
+        };
+
         let mut ctx = ModuleContext::new(
             &self.config,
             database.clone(),
@@ -190,6 +198,7 @@ impl Kernel {
             jobs.clone(),
             events.clone(),
             storage.clone(),
+            cache.clone(),
         );
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
@@ -215,6 +224,7 @@ impl Kernel {
             jobs.clone(),
             events.clone(),
             storage.clone(),
+            cache.clone(),
             parts.api_docs,
         );
 
@@ -239,6 +249,7 @@ impl Kernel {
             jobs,
             events,
             storage,
+            cache,
             monitor,
         })
     }
@@ -310,6 +321,7 @@ pub struct App {
     jobs: Option<Jobs>,
     events: crate::events::Events,
     storage: crate::storage::Storage,
+    cache: crate::cache::Cache,
     monitor: Option<Monitor>,
 }
 
@@ -353,6 +365,11 @@ impl App {
     /// The public file store.
     pub fn storage(&self) -> crate::storage::Storage {
         self.storage.clone()
+    }
+
+    /// The application cache.
+    pub fn cache(&self) -> crate::cache::Cache {
+        self.cache.clone()
     }
 
     /// Start the integration-event consumer (idempotent; `serve` calls
