@@ -15,7 +15,7 @@ use std::time::Duration;
 pub async fn connect(config: &DatabaseConfig) -> Result<DatabaseConnection> {
     if config.url.is_empty() {
         return Err(Error::internal(
-            "database.url is not configured; set it in nebula.{env}.toml or NEBULA__DATABASE__URL",
+            "database.url is not configured; set it in config/{env}.yaml or NEBULA__DATABASE__URL",
         ));
     }
 

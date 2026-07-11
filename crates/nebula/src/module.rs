@@ -155,7 +155,7 @@ impl<'a> ModuleContext<'a> {
     pub fn require_db(&self) -> DatabaseConnection {
         self.database.clone().expect(
             "this module requires a database; configure database.url in \
-             nebula.{env}.toml or NEBULA__DATABASE__URL",
+             config/{env}.yaml or NEBULA__DATABASE__URL",
         )
     }
 
