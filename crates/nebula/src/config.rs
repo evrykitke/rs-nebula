@@ -76,6 +76,7 @@ pub struct Config {
     pub jobs: JobsConfig,
     pub events: EventsConfig,
     pub files: FilesConfig,
+    pub migrations: MigrationsConfig,
     pub currencies: Vec<CurrencyConfig>,
 }
 
@@ -94,7 +95,28 @@ impl Default for Config {
             jobs: JobsConfig::default(),
             events: EventsConfig::default(),
             files: FilesConfig::default(),
+            migrations: MigrationsConfig::default(),
             currencies: Vec::new(),
+        }
+    }
+}
+
+/// Module SQL migrations: modules ship pure `.sql` files under
+/// `{root}/<module>/`, applied on top of the framework's in-house SeaORM
+/// schema and tracked so each runs once per database. Framework
+/// ("system") migrations stay in code; business modules migrate here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MigrationsConfig {
+    /// Directory holding per-module migration folders, relative to the
+    /// working directory (or absolute).
+    pub root: String,
+}
+
+impl Default for MigrationsConfig {
+    fn default() -> Self {
+        Self {
+            root: "migrations".into(),
         }
     }
 }
@@ -415,6 +437,11 @@ impl Config {
         }
         if self.files.root.trim().is_empty() {
             return Err(ConfigError::Invalid("files.root must not be empty".into()));
+        }
+        if self.migrations.root.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "migrations.root must not be empty".into(),
+            ));
         }
         if self.events.distributed {
             if self.rabbitmq.url.is_empty() {

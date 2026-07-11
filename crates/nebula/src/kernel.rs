@@ -35,6 +35,39 @@ pub(crate) type MigrationRunner = Arc<
     dyn Fn(DatabaseConnection) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
 >;
 
+/// The full migration set applied to a database: the framework's in-house
+/// SeaORM schema first, then the application's registered SeaORM migrator
+/// (if any), then the module SQL migrations. The same set runs on the
+/// main database and on every tenant database, so a freshly provisioned
+/// or existing tenant lands on an identical schema.
+#[derive(Clone)]
+pub(crate) struct Migrations {
+    app: Option<MigrationRunner>,
+    sql: Arc<crate::sql_migrations::SqlMigrator>,
+}
+
+impl Migrations {
+    pub(crate) fn new(app: Option<MigrationRunner>, config: &crate::config::MigrationsConfig) -> Self {
+        Self {
+            app,
+            sql: Arc::new(crate::sql_migrations::SqlMigrator::from_config(config)),
+        }
+    }
+
+    /// Bring `db` fully up to date: framework, then application, then
+    /// module SQL migrations.
+    pub(crate) async fn apply(&self, db: &DatabaseConnection) -> Result<()> {
+        crate::migrations::Migrator::up(db, None)
+            .await
+            .map_err(Error::from)?;
+        if let Some(run) = &self.app {
+            run(db.clone()).await?;
+        }
+        self.sql.run(db).await?;
+        Ok(())
+    }
+}
+
 /// Composes and boots a Nebula application.
 pub struct Kernel {
     config: Config,
@@ -64,6 +97,8 @@ impl Kernel {
             Some(db)
         };
 
+        let migrations = Migrations::new(self.migrations.clone(), &self.config.migrations);
+
         let tenants = if self.config.multitenancy.enabled {
             let Some(db) = &database else {
                 return Err(Error::internal(
@@ -74,7 +109,7 @@ impl Kernel {
                 db.clone(),
                 self.config.database.clone(),
                 self.config.multitenancy.clone(),
-                self.migrations.clone(),
+                migrations.clone(),
             )))
         } else {
             None
@@ -82,26 +117,13 @@ impl Kernel {
 
         let auto_migrate = self.config.database.auto_migrate;
 
-        if let (Some(db), true) = (&database, auto_migrate) {
-            tracing::info!("applying framework migrations");
-            crate::migrations::Migrator::up(db, None).await?;
-        }
-
-        match (&self.migrations, &database, auto_migrate) {
-            (Some(run), Some(db), true) => {
-                tracing::info!("applying pending migrations");
-                run(db.clone()).await?;
+        match (&database, auto_migrate) {
+            (Some(db), true) => {
+                tracing::info!("applying migrations to the main database");
+                migrations.apply(db).await?;
             }
-            (Some(_), Some(_), false) => {
-                tracing::info!("auto_migrate is off; skipping registered migrations");
-            }
-            (Some(_), None, _) => {
-                tracing::warn!("migrations registered but no database configured");
-            }
-            (None, _, true) => {
-                tracing::warn!("auto_migrate is on but no migrations were registered");
-            }
-            (None, _, false) => {}
+            (Some(_), false) => tracing::info!("auto_migrate is off; skipping migrations"),
+            (None, _) => {}
         }
 
         if let (Some(manager), true) = (&tenants, auto_migrate) {
@@ -113,10 +135,7 @@ impl Kernel {
                 if tenant.is_active && has_own_db {
                     tracing::info!(tenant = %tenant.name, "applying migrations to tenant database");
                     let db = manager.connection_for(&tenant).await?;
-                    crate::migrations::Migrator::up(&db, None).await?;
-                    if let Some(run) = &self.migrations {
-                        run(db).await?;
-                    }
+                    migrations.apply(&db).await?;
                 }
             }
         }
@@ -200,7 +219,13 @@ impl Kernel {
         );
 
         let monitor = match &jobs {
-            Some(client) => Some(self.build_monitor(client, &database, &tenants, parts.workers)),
+            Some(client) => Some(self.build_monitor(
+                client,
+                &database,
+                &tenants,
+                &migrations,
+                parts.workers,
+            )),
             None => None,
         };
 
@@ -230,6 +255,7 @@ impl Kernel {
         jobs: &Jobs,
         database: &Option<DatabaseConnection>,
         tenants: &Option<Arc<TenantManager>>,
+        migrations: &Migrations,
         worker_regs: Vec<crate::module::WorkerRegistration>,
     ) -> Monitor {
         let mut monitor = Monitor::new();
@@ -237,7 +263,7 @@ impl Kernel {
         if let Some(manager) = tenants {
             let ctx = crate::jobs::MigrationContext {
                 tenants: manager.clone(),
-                app_migrations: self.migrations.clone(),
+                migrations: migrations.clone(),
             };
             monitor = monitor.register(
                 WorkerBuilder::new("nebula-tenant-migrations")

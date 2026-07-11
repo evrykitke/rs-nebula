@@ -14,11 +14,10 @@
 //! `POST /auth/tenant/migrate`, or for all tenants by the host.
 
 use crate::error::{Error, Result};
-use crate::kernel::MigrationRunner;
+use crate::kernel::Migrations;
 use crate::tenancy::TenantManager;
 use apalis::prelude::*;
 use apalis_redis::{ConnectionManager, RedisStorage};
-use sea_orm_migration::MigratorTrait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -82,7 +81,7 @@ pub struct MigrateTenants {
 #[derive(Clone)]
 pub(crate) struct MigrationContext {
     pub tenants: Arc<TenantManager>,
-    pub app_migrations: Option<MigrationRunner>,
+    pub migrations: Migrations,
 }
 
 pub(crate) async fn run_tenant_migrations(
@@ -102,12 +101,7 @@ pub(crate) async fn run_tenant_migrations(
         }
         tracing::info!(tenant = %tenant.name, "migration job: migrating tenant database");
         let db = ctx.tenants.connection_for(&tenant).await?;
-        crate::migrations::Migrator::up(&db, None)
-            .await
-            .map_err(Error::from)?;
-        if let Some(run) = &ctx.app_migrations {
-            run(db).await?;
-        }
+        ctx.migrations.apply(&db).await?;
     }
     Ok(())
 }

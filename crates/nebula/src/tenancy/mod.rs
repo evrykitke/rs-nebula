@@ -17,8 +17,7 @@ pub mod tenant;
 use crate::config::{DatabaseConfig, MultitenancyConfig};
 use crate::db;
 use crate::error::{Error, Result};
-use crate::kernel::MigrationRunner;
-use sea_orm_migration::MigratorTrait;
+use crate::kernel::Migrations;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
     Set,
@@ -73,10 +72,9 @@ pub struct TenantManager {
     main: DatabaseConnection,
     db_config: DatabaseConfig,
     config: MultitenancyConfig,
-    /// Application migrations, run alongside the framework's when a fresh
-    /// tenant database is provisioned. `None` when the app registered no
-    /// migrator.
-    app_migrations: Option<MigrationRunner>,
+    /// The full migration set (framework + application + module SQL), run
+    /// against a freshly provisioned tenant database.
+    migrations: Migrations,
     pools: RwLock<HashMap<Uuid, DatabaseConnection>>,
 }
 
@@ -85,13 +83,13 @@ impl TenantManager {
         main: DatabaseConnection,
         db_config: DatabaseConfig,
         config: MultitenancyConfig,
-        app_migrations: Option<MigrationRunner>,
+        migrations: Migrations,
     ) -> Self {
         Self {
             main,
             db_config,
             config,
-            app_migrations,
+            migrations,
             pools: RwLock::new(HashMap::new()),
         }
     }
@@ -259,21 +257,15 @@ impl TenantManager {
         }
     }
 
-    /// Bring a newly created database up to the current schema: framework
-    /// migrations first, then the application's if any were registered.
+    /// Bring a newly created database up to the current schema: the full
+    /// migration set (framework, application, then module SQL).
     async fn migrate_fresh(&self, url: &str) -> Result<()> {
         let db = db::connect(&DatabaseConfig {
             url: url.into(),
             ..self.db_config.clone()
         })
         .await?;
-        crate::migrations::Migrator::up(&db, None)
-            .await
-            .map_err(Error::from)?;
-        if let Some(run) = &self.app_migrations {
-            run(db).await?;
-        }
-        Ok(())
+        self.migrations.apply(&db).await
     }
 
     /// Best-effort drop used to compensate a failed provision — a failure
