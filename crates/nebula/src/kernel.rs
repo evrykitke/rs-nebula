@@ -74,6 +74,7 @@ impl Kernel {
                 db.clone(),
                 self.config.database.clone(),
                 self.config.multitenancy.clone(),
+                self.migrations.clone(),
             )))
         } else {
             None

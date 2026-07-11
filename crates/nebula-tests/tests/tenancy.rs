@@ -206,3 +206,128 @@ async fn multitenancy_end_to_end() {
     let (status, _) = get_json(&router, "/whoami", Some("acme")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+/// With `provision_databases` on, creating a tenant cuts and migrates a
+/// dedicated database named `{slug}-{key}` — no explicit connection
+/// string required — and the tenant then runs isolated on it.
+#[tokio::test]
+async fn provisions_a_database_per_tenant() {
+    let Ok(main_url) = std::env::var("NEBULA_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set NEBULA_TEST_DATABASE_URL to run database tests");
+        return;
+    };
+
+    // Run against a private directory database so this test never races
+    // the shared-table setup of the end-to-end test above (both run in
+    // the same binary, in parallel, over NEBULA_TEST_DATABASE_URL).
+    let admin = db::connect(&DatabaseConfig {
+        url: main_url.as_str().into(),
+        ..DatabaseConfig::default()
+    })
+    .await
+    .expect("must connect to main");
+
+    let main_db_name: String = {
+        let row = admin
+            .query_one(sea_orm::Statement::from_string(
+                admin.get_database_backend(),
+                "SELECT current_database() AS name",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get("", "name").unwrap()
+    };
+    let prov_main = format!("{main_db_name}_prov");
+    admin
+        .execute_unprepared(&format!("DROP DATABASE IF EXISTS {prov_main} WITH (FORCE)"))
+        .await
+        .ok();
+    admin
+        .execute_unprepared(&format!("CREATE DATABASE {prov_main}"))
+        .await
+        .expect("must create the directory database");
+    let prov_main_url = main_url.replace(&main_db_name, &prov_main);
+
+    let mut config = Config::default();
+    config.database = DatabaseConfig {
+        url: prov_main_url.as_str().into(),
+        auto_migrate: true,
+        ..DatabaseConfig::default()
+    };
+    config.multitenancy.enabled = true;
+    config.multitenancy.provision_databases = true;
+
+    let app = Kernel::builder()
+        .with_config(config)
+        .add_module(WhoAmI)
+        .build()
+        .expect("kernel must build")
+        .init()
+        .await
+        .expect("boot with provisioning must succeed");
+
+    let manager = app.tenants().expect("tenant manager must exist");
+    let tenant = manager
+        .create(NewTenant {
+            name: "provco".into(),
+            display_name: "Provisioned Co".into(),
+            connection_string: None,
+            default_currency: None,
+        })
+        .await
+        .expect("tenant must be provisioned");
+
+    // A dedicated database was cut and recorded — not the main one.
+    let conn = tenant
+        .connection_string
+        .clone()
+        .expect("a provisioned tenant carries its own connection string");
+    let db_name = conn.rsplit('/').next().unwrap().to_string();
+    assert!(
+        db_name.starts_with("provco-") && db_name.len() > "provco-".len(),
+        "database name {db_name:?} should be slug-keyed (provco-<key>)"
+    );
+    assert_ne!(db_name, main_db_name);
+
+    // The tenant resolves to and runs on its own database.
+    let router = app.router();
+    let (status, body) = get_json(&router, "/whoami", Some("provco")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tenant"], "provco");
+    assert_eq!(body["database"], db_name.as_str());
+
+    // The framework schema is present in the fresh database (a tenant
+    // user store is what the migrations exist to create).
+    let tenant_db = db::connect(&DatabaseConfig {
+        url: conn.as_str().into(),
+        ..DatabaseConfig::default()
+    })
+    .await
+    .expect("must connect to the provisioned database");
+    let has_users: bool = {
+        let row = tenant_db
+            .query_one(sea_orm::Statement::from_string(
+                tenant_db.get_database_backend(),
+                "SELECT to_regclass('public.users') IS NOT NULL AS present",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get("", "present").unwrap()
+    };
+    assert!(has_users, "the provisioned database must be migrated");
+
+    // Tidy up the databases this test cut: the provisioned tenant's and
+    // the private directory database.
+    drop(tenant_db);
+    drop(app);
+    admin
+        .execute_unprepared(&format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"))
+        .await
+        .ok();
+    admin
+        .execute_unprepared(&format!("DROP DATABASE IF EXISTS {prov_main} WITH (FORCE)"))
+        .await
+        .ok();
+}

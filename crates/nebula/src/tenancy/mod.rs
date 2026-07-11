@@ -17,7 +17,12 @@ pub mod tenant;
 use crate::config::{DatabaseConfig, MultitenancyConfig};
 use crate::db;
 use crate::error::{Error, Result};
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use crate::kernel::MigrationRunner;
+use sea_orm_migration::MigratorTrait;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    Set,
+};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -68,6 +73,10 @@ pub struct TenantManager {
     main: DatabaseConnection,
     db_config: DatabaseConfig,
     config: MultitenancyConfig,
+    /// Application migrations, run alongside the framework's when a fresh
+    /// tenant database is provisioned. `None` when the app registered no
+    /// migrator.
+    app_migrations: Option<MigrationRunner>,
     pools: RwLock<HashMap<Uuid, DatabaseConnection>>,
 }
 
@@ -76,11 +85,13 @@ impl TenantManager {
         main: DatabaseConnection,
         db_config: DatabaseConfig,
         config: MultitenancyConfig,
+        app_migrations: Option<MigrationRunner>,
     ) -> Self {
         Self {
             main,
             db_config,
             config,
+            app_migrations,
             pools: RwLock::new(HashMap::new()),
         }
     }
@@ -179,11 +190,28 @@ impl TenantManager {
                 new.name
             )));
         }
-        tenant::ActiveModel {
+
+        // Provision a dedicated database when configured, unless the
+        // caller already named one to use. The database is created and
+        // fully migrated before the tenant row exists, so a tenant is
+        // only ever recorded once its store is ready.
+        let mut provisioned = None;
+        let connection_string = match new.connection_string {
+            Some(url) => Some(url),
+            None if self.config.provision_databases => {
+                let db = self.provision_database(&new.name).await?;
+                let url = db.url.clone();
+                provisioned = Some(db);
+                Some(url)
+            }
+            None => None,
+        };
+
+        let inserted = tenant::ActiveModel {
             id: Set(Uuid::new_v4()),
             name: Set(new.name),
             display_name: Set(new.display_name),
-            connection_string: Set(new.connection_string),
+            connection_string: Set(connection_string),
             is_active: Set(true),
             require_two_factor: Set(false),
             default_currency: Set(new.default_currency),
@@ -192,7 +220,74 @@ impl TenantManager {
         }
         .insert(&self.main)
         .await
-        .map_err(Error::from)
+        .map_err(Error::from);
+
+        // If recording the tenant fails after we cut a database for it,
+        // drop the orphan rather than leave it stranded on the server.
+        if inserted.is_err()
+            && let Some(db) = provisioned
+        {
+            self.drop_database(&db.name).await;
+        }
+        inserted
+    }
+
+    /// Cut a fresh database for a tenant slug — `CREATE DATABASE`, then
+    /// run the framework and application migrations against it — and
+    /// return its name and connection string. On any failure after the
+    /// database exists it is dropped, so a half-built database never
+    /// lingers.
+    async fn provision_database(&self, slug: &str) -> Result<ProvisionedDatabase> {
+        let name = new_database_name(slug);
+        // Identifier is derived from a validated slug plus a random key,
+        // but quote it so a dash (or a future name shape) is always safe.
+        self.main
+            .execute_unprepared(&format!("CREATE DATABASE \"{name}\""))
+            .await
+            .map_err(|e| Error::internal(format!("failed to create database {name:?}: {e}")))?;
+
+        let url = tenant_database_url(self.db_config.url.expose(), &name)?;
+        match self.migrate_fresh(&url).await {
+            Ok(()) => {
+                tracing::info!(tenant = %slug, database = %name, "provisioned tenant database");
+                Ok(ProvisionedDatabase { name, url })
+            }
+            Err(e) => {
+                self.drop_database(&name).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Bring a newly created database up to the current schema: framework
+    /// migrations first, then the application's if any were registered.
+    async fn migrate_fresh(&self, url: &str) -> Result<()> {
+        let db = db::connect(&DatabaseConfig {
+            url: url.into(),
+            ..self.db_config.clone()
+        })
+        .await?;
+        crate::migrations::Migrator::up(&db, None)
+            .await
+            .map_err(Error::from)?;
+        if let Some(run) = &self.app_migrations {
+            run(db).await?;
+        }
+        Ok(())
+    }
+
+    /// Best-effort drop used to compensate a failed provision — a failure
+    /// here is logged, never surfaced, since it is already cleanup for an
+    /// earlier error. `FORCE` evicts the pool's lingering connections.
+    async fn drop_database(&self, name: &str) {
+        if let Err(e) = self
+            .main
+            .execute_unprepared(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+            .await
+        {
+            tracing::error!(database = %name, error = %e,
+                "failed to drop tenant database during compensation");
+        }
     }
 
     /// The connection to use for this tenant: its own pool (created
@@ -218,6 +313,62 @@ impl TenantManager {
         self.pools.write().await.insert(tenant.id, db.clone());
         Ok(db)
     }
+}
+
+/// A database cut for a tenant: its Postgres name and the connection
+/// string recorded on the tenant row.
+struct ProvisionedDatabase {
+    name: String,
+    url: String,
+}
+
+/// A tenant database name: the slug, a dash, and a short random key
+/// (`acme-5jy78k`) so re-using a slug can never clash and the name stays
+/// within Postgres's 63-byte identifier limit.
+fn new_database_name(slug: &str) -> String {
+    const KEY_LEN: usize = 6;
+    // Reserve room for the dash and key; the slug is ASCII (validated),
+    // so truncating on a byte boundary is safe.
+    const MAX_SLUG: usize = 63 - 1 - KEY_LEN;
+    let slug = if slug.len() > MAX_SLUG {
+        &slug[..MAX_SLUG]
+    } else {
+        slug
+    };
+    format!("{slug}-{}", random_key(KEY_LEN))
+}
+
+fn random_key(len: usize) -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    (0..len)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
+}
+
+/// Derive a tenant's connection string from the main database URL by
+/// swapping the database name, keeping the scheme, credentials, host and
+/// any query parameters. Postgres URLs carry the database as the single
+/// path segment: `scheme://authority/dbname[?query]`.
+fn tenant_database_url(base: &str, db_name: &str) -> Result<String> {
+    let authority_start = base
+        .find("://")
+        .map(|i| i + 3)
+        .ok_or_else(|| Error::internal("database.url has no scheme"))?;
+    let path_start = base[authority_start..]
+        .find('/')
+        .map(|i| authority_start + i)
+        .ok_or_else(|| Error::internal("database.url names no database to swap"))?;
+    let query_start = base[path_start..].find('?').map(|i| path_start + i);
+
+    let mut url = String::with_capacity(base.len() + db_name.len());
+    url.push_str(&base[..=path_start]); // scheme://authority/
+    url.push_str(db_name);
+    if let Some(q) = query_start {
+        url.push_str(&base[q..]);
+    }
+    Ok(url)
 }
 
 fn validate_name(name: &str) -> Result<()> {

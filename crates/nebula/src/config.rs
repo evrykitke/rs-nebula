@@ -284,6 +284,12 @@ pub struct MultitenancyConfig {
     pub enabled: bool,
     /// Request header that names the tenant.
     pub header: String,
+    /// Provision a dedicated database for each new tenant (named
+    /// `{slug}-{key}`) instead of sharing the main database. The
+    /// `database.url` role must be allowed to `CREATE DATABASE`. Off:
+    /// tenants share the main database unless created with an explicit
+    /// connection string.
+    pub provision_databases: bool,
 }
 
 impl Default for MultitenancyConfig {
@@ -291,6 +297,7 @@ impl Default for MultitenancyConfig {
         Self {
             enabled: false,
             header: "X-Tenant".into(),
+            provision_databases: false,
         }
     }
 }
