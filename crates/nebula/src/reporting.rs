@@ -747,6 +747,17 @@ pub struct RenderCx {
     pub tenant: Option<TenantRef>,
 }
 
+/// A report's public metadata for the viewer catalogue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportInfo {
+    pub name: String,
+    pub title: String,
+    pub outputs: Vec<ReportOutput>,
+    pub default_format: ReportFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_permission: Option<String>,
+}
+
 /// The reporting engine: a registry of report definitions plus the
 /// renderers, shared like the other primitives (cheap `Arc` clone).
 #[derive(Clone)]
@@ -812,6 +823,24 @@ impl Reporting {
     /// The permission a report requires to render, if declared.
     pub fn required_permission(&self, name: &str) -> Option<&'static str> {
         self.inner.reports.get(name).and_then(|def| def.permission())
+    }
+
+    /// The public catalogue of declared reports, sorted by name.
+    pub fn catalogue(&self) -> Vec<ReportInfo> {
+        let mut list: Vec<ReportInfo> = self
+            .inner
+            .reports
+            .values()
+            .map(|d| ReportInfo {
+                name: d.name().to_string(),
+                title: d.title().to_string(),
+                outputs: d.outputs().to_vec(),
+                default_format: d.default_format(),
+                requires_permission: d.permission().map(str::to_string),
+            })
+            .collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list
     }
 
     /// Resolve a report's datasources, build it, and render to bytes. The
@@ -914,8 +943,16 @@ struct RenderParams {
 /// - `GET /reports/{name}?format=modern&output=pdf` — render a report
 pub(crate) fn routes() -> Router {
     Router::new()
+        .route("/reports", get(list_reports))
         .route("/reports/settings", get(get_settings).put(put_settings))
         .route("/reports/{name}", get(render_report))
+}
+
+async fn list_reports(
+    Extension(reporting): Extension<Reporting>,
+    _authz: Authz,
+) -> Result<Json<Vec<ReportInfo>>> {
+    Ok(Json(reporting.catalogue()))
 }
 
 async fn get_settings(
@@ -1198,15 +1235,23 @@ mod typst_backend {
         format!("rgb(\"#{hex}\")")
     }
 
-    /// A Typst string value, escaped and rendered literally (no markup
-    /// interpretation) when inserted into content.
-    fn lit(text: &str) -> String {
-        let escaped = text
-            .replace('\\', "\\\\")
+    fn escape(text: &str) -> String {
+        text.replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('\r', "")
-            .replace('\n', "\\n");
-        format!("#\"{escaped}\"")
+            .replace('\n', "\\n")
+    }
+
+    /// A Typst string value for **markup** position (`#"..."`), rendered
+    /// literally with no markup interpretation.
+    fn lit(text: &str) -> String {
+        format!("#\"{}\"", escape(text))
+    }
+
+    /// A Typst string literal for **code** position (function arguments):
+    /// `"..."` with no leading `#`.
+    fn str_lit(text: &str) -> String {
+        format!("\"{}\"", escape(text))
     }
 
     fn align_word(a: Align) -> &'static str {
@@ -1271,7 +1316,7 @@ mod typst_backend {
         s.push_str("\n#v(0.6em)\n");
 
         for widget in &doc.report.widgets {
-            s.push_str(&widget_markup(widget, &t, assets));
+            s.push_str(&widget_markup(widget, &t, assets, true));
             s.push('\n');
         }
         s
@@ -1285,7 +1330,7 @@ mod typst_backend {
                 let name = format!("logo.{}", sanitize_ext(&logo.format));
                 assets.push((name.clone(), bytes));
                 left.push_str("#image(");
-                left.push_str(&lit(&name));
+                left.push_str(&str_lit(&name));
                 left.push_str(", height: 1.1cm)");
             }
         }
@@ -1347,16 +1392,26 @@ mod typst_backend {
     }
 
     /// Emit a list of widgets into one content string (for columns/groups).
-    fn children(widgets: &[Widget], t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+    fn children(
+        widgets: &[Widget],
+        t: &Theme,
+        assets: &mut Vec<(String, Vec<u8>)>,
+        full_width: bool,
+    ) -> String {
         let mut s = String::new();
         for w in widgets {
-            s.push_str(&widget_markup(w, t, assets));
+            s.push_str(&widget_markup(w, t, assets, full_width));
             s.push('\n');
         }
         s
     }
 
-    fn widget_markup(widget: &Widget, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+    fn widget_markup(
+        widget: &Widget,
+        t: &Theme,
+        assets: &mut Vec<(String, Vec<u8>)>,
+        full_width: bool,
+    ) -> String {
         match widget {
             Widget::Heading { level, text } => {
                 let size = match level {
@@ -1396,7 +1451,7 @@ mod typst_backend {
             Widget::KeyValues { title, items, columns } => {
                 let mut s = String::new();
                 if let Some(title) = title {
-                    s.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets));
+                    s.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets, full_width));
                     s.push('\n');
                 }
                 let cols = (*columns).max(1) as usize;
@@ -1458,8 +1513,8 @@ mod typst_backend {
                 s.push(')');
                 s
             }
-            Widget::Table(table) => table_markup(table, t),
-            Widget::Chart(chart) => chart_markup(chart, t),
+            Widget::Table(table) => table_markup(table, t, full_width),
+            Widget::Chart(chart) => chart_markup(chart, t, assets),
             Widget::Image(image) => {
                 if let Some(bytes) = base64_decode(&image.data_base64) {
                     let name = format!("asset-{}.{}", assets.len(), sanitize_ext(&image.format));
@@ -1467,7 +1522,7 @@ mod typst_backend {
                     let mut s = format!(
                         "#align({})[#image({}, width: 60%)",
                         align_word(image.align),
-                        lit(&name)
+                        str_lit(&name)
                     );
                     if let Some(cap) = &image.caption {
                         s.push_str(" \\ #text(size: ");
@@ -1574,18 +1629,19 @@ mod typst_backend {
                 s.push_str("), column-gutter: 14pt,\n");
                 for col in columns {
                     s.push('[');
-                    s.push_str(&children(col, t, assets));
+                    // Side-by-side content is not full width.
+                    s.push_str(&children(col, t, assets, false));
                     s.push_str("], ");
                 }
                 s.push(')');
                 s
             }
             Widget::Group(group) => {
-                let inner = children(&group.widgets, t, assets);
+                let inner = children(&group.widgets, t, assets, full_width);
                 let mut s = String::new();
                 let body = if let Some(title) = &group.title {
                     let mut b = String::new();
-                    b.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets));
+                    b.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets, full_width));
                     b.push('\n');
                     b.push_str(&inner);
                     b
@@ -1620,7 +1676,7 @@ mod typst_backend {
         }
     }
 
-    fn table_markup(table: &Table, t: &Theme) -> String {
+    fn table_markup(table: &Table, t: &Theme, full_width: bool) -> String {
         let mut s = String::new();
         if let Some(title) = &table.title {
             s.push_str("#text(size: ");
@@ -1630,7 +1686,20 @@ mod typst_backend {
             s.push_str("]\n#v(0.3em)\n");
         }
         s.push_str("#table(\n  columns: ");
-        s.push_str(&table.columns.len().to_string());
+        if full_width {
+            // Stretch to the full width: text (Start) columns absorb the
+            // slack as `1fr`; numeric/centered columns stay content-sized.
+            // If no column is Start-aligned, the first one stretches.
+            let any_start = table.columns.iter().any(|c| c.align == Align::Start);
+            s.push('(');
+            for (i, c) in table.columns.iter().enumerate() {
+                let flex = c.align == Align::Start || (!any_start && i == 0);
+                s.push_str(if flex { "1fr, " } else { "auto, " });
+            }
+            s.push(')');
+        } else {
+            s.push_str(&table.columns.len().to_string());
+        }
         s.push_str(",\n  align: (");
         for c in &table.columns {
             s.push_str(align_word(c.align));
@@ -1680,9 +1749,10 @@ mod typst_backend {
         s
     }
 
-    /// A native bar rendering of a chart's first series — a lightweight
-    /// stand-in until SVG chart rendering lands.
-    fn chart_markup(chart: &Chart, t: &Theme) -> String {
+    /// Render a chart to an SVG asset and embed it. The SVG is hand-built
+    /// (no chart dependency) and covers bars, grouped/stacked bars, lines,
+    /// areas, pies and donuts.
+    fn chart_markup(chart: &Chart, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let mut s = String::new();
         if let Some(title) = &chart.title {
             s.push_str("#text(size: ");
@@ -1691,49 +1761,254 @@ mod typst_backend {
             s.push_str(&lit(title));
             s.push_str("]\n#v(0.3em)\n");
         }
-        let series = chart.series.first();
-        let max = series
-            .map(|s| s.values.iter().cloned().fold(0.0_f64, f64::max))
-            .unwrap_or(0.0);
-        s.push_str("#grid(columns: (6em, 1fr, 4em), column-gutter: 8pt, row-gutter: 5pt,\n");
-        if let Some(series) = series {
-            for (i, value) in series.values.iter().enumerate() {
-                let label = chart.labels.get(i).cloned().unwrap_or_default();
-                let pct = if max > 0.0 {
-                    (value / max * 100.0).round() as i64
-                } else {
-                    0
-                };
-                s.push_str("[#text(size: ");
-                s.push_str(t.small);
-                s.push_str(")[");
-                s.push_str(&lit(&label));
-                s.push_str("]], [#box(width: ");
-                s.push_str(&pct.to_string());
-                s.push_str("%, height: 9pt, radius: 2pt, fill: ");
-                s.push_str(&color(t.accent));
-                s.push_str(")], [#align(right, text(size: ");
-                s.push_str(t.small);
-                s.push_str(")[");
-                s.push_str(&lit(&format_number(*value)));
-                s.push_str("])], ");
+        let svg = chart_svg(chart);
+        let name = format!("chart-{}.svg", assets.len());
+        assets.push((name.clone(), svg.into_bytes()));
+        s.push_str("#block(width: 100%)[#image(");
+        s.push_str(&str_lit(&name));
+        s.push_str(", width: 100%, fit: \"contain\")]");
+        s
+    }
+
+    const PALETTE: [&str; 8] = [
+        "2563eb", "16a34a", "f59e0b", "dc2626", "7c3aed", "0891b2", "db2777", "65a30d",
+    ];
+
+    fn svg_esc(text: &str) -> String {
+        text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    fn chart_svg(chart: &Chart) -> String {
+        match chart.kind {
+            ChartKind::Pie | ChartKind::Donut => {
+                pie_svg(chart, matches!(chart.kind, ChartKind::Donut))
+            }
+            ChartKind::Line | ChartKind::Area => {
+                line_svg(chart, matches!(chart.kind, ChartKind::Area))
+            }
+            ChartKind::Bar | ChartKind::StackedBar => {
+                bar_svg(chart, matches!(chart.kind, ChartKind::StackedBar))
             }
         }
-        s.push(')');
-        if chart.series.len() > 1 {
-            s.push_str("\n#text(size: ");
-            s.push_str(t.small);
-            s.push_str(", fill: ");
-            s.push_str(&color(t.muted));
-            s.push_str(")[");
-            s.push_str(&lit(&format!(
-                "Showing series \"{}\" of {}.",
-                chart.series[0].name,
-                chart.series.len()
-            )));
-            s.push(']');
+    }
+
+    const W: f64 = 720.0;
+    const H: f64 = 320.0;
+
+    fn svg_open() -> String {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {W} {H}\" font-family=\"sans-serif\">"
+        )
+    }
+
+    fn axis_bounds() -> (f64, f64, f64, f64) {
+        // left, top, plot width, plot height
+        let (left, top, right, bottom) = (52.0, 16.0, 16.0, 44.0);
+        (left, top, W - left - right, H - top - bottom)
+    }
+
+    fn text_svg(x: f64, y: f64, size: f64, anchor: &str, fill: &str, s: &str) -> String {
+        format!(
+            "<text x=\"{x:.1}\" y=\"{y:.1}\" font-size=\"{size}\" text-anchor=\"{anchor}\" fill=\"#{fill}\">{}</text>",
+            svg_esc(s)
+        )
+    }
+
+    fn bar_svg(chart: &Chart, stacked: bool) -> String {
+        let (left, top, pw, ph) = axis_bounds();
+        let baseline = top + ph;
+        let cats = chart.labels.len().max(
+            chart.series.iter().map(|s| s.values.len()).max().unwrap_or(0),
+        );
+        let nseries = chart.series.len().max(1);
+        let max = if stacked {
+            (0..cats)
+                .map(|c| chart.series.iter().map(|s| s.values.get(c).copied().unwrap_or(0.0)).sum::<f64>())
+                .fold(0.0_f64, f64::max)
+        } else {
+            chart.series.iter().flat_map(|s| s.values.iter().copied()).fold(0.0_f64, f64::max)
         }
-        s
+        .max(1.0);
+
+        let mut svg = svg_open();
+        // y axis line + baseline
+        svg.push_str(&format!(
+            "<line x1=\"{left:.1}\" y1=\"{top:.1}\" x2=\"{left:.1}\" y2=\"{baseline:.1}\" stroke=\"#d1d5db\"/>"
+        ));
+        svg.push_str(&format!(
+            "<line x1=\"{left:.1}\" y1=\"{baseline:.1}\" x2=\"{:.1}\" y2=\"{baseline:.1}\" stroke=\"#d1d5db\"/>",
+            left + pw
+        ));
+        svg.push_str(&text_svg(left - 6.0, top + 4.0, 11.0, "end", "6b7280", &format_number(max)));
+        svg.push_str(&text_svg(left - 6.0, baseline, 11.0, "end", "6b7280", "0"));
+
+        let group_w = pw / cats as f64;
+        for c in 0..cats {
+            let gx = left + c as f64 * group_w;
+            if stacked {
+                let mut acc = 0.0;
+                for (si, series) in chart.series.iter().enumerate() {
+                    let v = series.values.get(c).copied().unwrap_or(0.0);
+                    let h = v / max * ph;
+                    let y = baseline - acc - h;
+                    let bw = group_w * 0.6;
+                    let x = gx + group_w * 0.2;
+                    svg.push_str(&format!(
+                        "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{bw:.1}\" height=\"{h:.1}\" fill=\"#{}\"/>",
+                        PALETTE[si % PALETTE.len()]
+                    ));
+                    acc += h;
+                }
+            } else {
+                let slot = group_w * 0.7 / nseries as f64;
+                for (si, series) in chart.series.iter().enumerate() {
+                    let v = series.values.get(c).copied().unwrap_or(0.0);
+                    let h = v / max * ph;
+                    let x = gx + group_w * 0.15 + si as f64 * slot;
+                    let y = baseline - h;
+                    svg.push_str(&format!(
+                        "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{:.1}\" height=\"{h:.1}\" rx=\"2\" fill=\"#{}\"/>",
+                        slot * 0.85,
+                        PALETTE[si % PALETTE.len()]
+                    ));
+                }
+            }
+            if let Some(label) = chart.labels.get(c) {
+                svg.push_str(&text_svg(gx + group_w / 2.0, baseline + 16.0, 11.0, "middle", "374151", label));
+            }
+        }
+        svg.push_str(&legend(chart));
+        svg.push_str("</svg>");
+        svg
+    }
+
+    fn line_svg(chart: &Chart, area: bool) -> String {
+        let (left, top, pw, ph) = axis_bounds();
+        let baseline = top + ph;
+        let max = chart
+            .series
+            .iter()
+            .flat_map(|s| s.values.iter().copied())
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        let mut svg = svg_open();
+        svg.push_str(&format!(
+            "<line x1=\"{left:.1}\" y1=\"{top:.1}\" x2=\"{left:.1}\" y2=\"{baseline:.1}\" stroke=\"#d1d5db\"/>"
+        ));
+        svg.push_str(&format!(
+            "<line x1=\"{left:.1}\" y1=\"{baseline:.1}\" x2=\"{:.1}\" y2=\"{baseline:.1}\" stroke=\"#d1d5db\"/>",
+            left + pw
+        ));
+        svg.push_str(&text_svg(left - 6.0, top + 4.0, 11.0, "end", "6b7280", &format_number(max)));
+
+        for (si, series) in chart.series.iter().enumerate() {
+            let n = series.values.len().max(1);
+            let step = if n > 1 { pw / (n as f64 - 1.0) } else { pw };
+            let color = PALETTE[si % PALETTE.len()];
+            let pts: Vec<(f64, f64)> = series
+                .values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (left + i as f64 * step, baseline - v / max * ph))
+                .collect();
+            if area {
+                let mut d = format!("M {:.1} {:.1}", left, baseline);
+                for (x, y) in &pts {
+                    d.push_str(&format!(" L {x:.1} {y:.1}"));
+                }
+                d.push_str(&format!(" L {:.1} {:.1} Z", left + (n as f64 - 1.0) * step, baseline));
+                svg.push_str(&format!("<path d=\"{d}\" fill=\"#{color}\" fill-opacity=\"0.15\"/>"));
+            }
+            let poly: String = pts.iter().map(|(x, y)| format!("{x:.1},{y:.1} ")).collect();
+            svg.push_str(&format!(
+                "<polyline points=\"{poly}\" fill=\"none\" stroke=\"#{color}\" stroke-width=\"2\"/>"
+            ));
+            for (x, y) in &pts {
+                svg.push_str(&format!("<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"3\" fill=\"#{color}\"/>"));
+            }
+        }
+        for (i, label) in chart.labels.iter().enumerate() {
+            let n = chart.labels.len().max(1);
+            let step = if n > 1 { pw / (n as f64 - 1.0) } else { pw };
+            svg.push_str(&text_svg(left + i as f64 * step, baseline + 16.0, 11.0, "middle", "374151", label));
+        }
+        svg.push_str(&legend(chart));
+        svg.push_str("</svg>");
+        svg
+    }
+
+    fn pie_svg(chart: &Chart, donut: bool) -> String {
+        let values = chart.series.first().map(|s| s.values.clone()).unwrap_or_default();
+        let total: f64 = values.iter().sum();
+        let (cx, cy, r) = (170.0, H / 2.0, 120.0);
+        let mut svg = svg_open();
+        if total <= 0.0 {
+            svg.push_str(&text_svg(cx, cy, 12.0, "middle", "6b7280", "No data"));
+            svg.push_str("</svg>");
+            return svg;
+        }
+        let mut angle = -std::f64::consts::FRAC_PI_2;
+        for (i, v) in values.iter().enumerate() {
+            let sweep = v / total * std::f64::consts::TAU;
+            let a1 = angle + sweep;
+            let (x0, y0) = (cx + r * angle.cos(), cy + r * angle.sin());
+            let (x1, y1) = (cx + r * a1.cos(), cy + r * a1.sin());
+            let large = if sweep > std::f64::consts::PI { 1 } else { 0 };
+            svg.push_str(&format!(
+                "<path d=\"M {cx:.1} {cy:.1} L {x0:.1} {y0:.1} A {r:.1} {r:.1} 0 {large} 1 {x1:.1} {y1:.1} Z\" fill=\"#{}\"/>",
+                PALETTE[i % PALETTE.len()]
+            ));
+            angle = a1;
+        }
+        if donut {
+            svg.push_str(&format!(
+                "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{:.1}\" fill=\"#ffffff\"/>",
+                r * 0.55
+            ));
+        }
+        // Legend with labels + values to the right.
+        let lx = cx + r + 40.0;
+        let mut ly = cy - (values.len() as f64 * 22.0) / 2.0 + 8.0;
+        for (i, v) in values.iter().enumerate() {
+            let label = chart.labels.get(i).cloned().unwrap_or_default();
+            let pct = (v / total * 100.0).round() as i64;
+            svg.push_str(&format!(
+                "<rect x=\"{lx:.1}\" y=\"{:.1}\" width=\"12\" height=\"12\" rx=\"2\" fill=\"#{}\"/>",
+                ly - 10.0,
+                PALETTE[i % PALETTE.len()]
+            ));
+            svg.push_str(&text_svg(
+                lx + 18.0,
+                ly,
+                12.0,
+                "start",
+                "374151",
+                &format!("{label} — {} ({pct}%)", format_number(*v)),
+            ));
+            ly += 22.0;
+        }
+        svg.push_str("</svg>");
+        svg
+    }
+
+    /// A horizontal legend along the bottom for multi-series cartesian charts.
+    fn legend(chart: &Chart) -> String {
+        if chart.series.len() < 2 {
+            return String::new();
+        }
+        let mut x = 60.0;
+        let y = H - 6.0;
+        let mut svg = String::new();
+        for (i, series) in chart.series.iter().enumerate() {
+            svg.push_str(&format!(
+                "<rect x=\"{x:.1}\" y=\"{:.1}\" width=\"12\" height=\"12\" rx=\"2\" fill=\"#{}\"/>",
+                y - 10.0,
+                PALETTE[i % PALETTE.len()]
+            ));
+            svg.push_str(&text_svg(x + 16.0, y, 11.0, "start", "374151", &series.name));
+            x += 32.0 + series.name.len() as f64 * 6.5;
+        }
+        svg
     }
 
     fn placeholder_box(kind: &str, data: &str, caption: Option<&str>, t: &Theme) -> String {

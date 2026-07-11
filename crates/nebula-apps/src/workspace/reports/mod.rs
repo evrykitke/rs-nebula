@@ -58,19 +58,66 @@ impl ReportDefinition for WorkspaceOverview {
         .row(["Onboarding", "2", "8,500.00", "17,000.00"])
         .totals(["", "", "Total", "59,000.00"]);
 
+        let months = || {
+            vec![
+                "Mar".to_string(),
+                "Apr".to_string(),
+                "May".to_string(),
+                "Jun".to_string(),
+                "Jul".to_string(),
+            ]
+        };
+        // Single-series bar.
         let revenue = Chart {
             kind: ChartKind::Bar,
             title: Some("Monthly revenue (KES '000)".into()),
-            labels: vec![
-                "Mar".into(),
-                "Apr".into(),
-                "May".into(),
-                "Jun".into(),
-                "Jul".into(),
-            ],
+            labels: months(),
             series: vec![Series {
                 name: "2026".into(),
                 values: vec![320.0, 410.0, 380.0, 505.0, 590.0],
+            }],
+        };
+        // Grouped bar — two series.
+        let vs_target = Chart {
+            kind: ChartKind::Bar,
+            title: Some("Actual vs target".into()),
+            labels: months(),
+            series: vec![
+                Series { name: "Actual".into(), values: vec![320.0, 410.0, 380.0, 505.0, 590.0] },
+                Series { name: "Target".into(), values: vec![350.0, 400.0, 450.0, 480.0, 520.0] },
+            ],
+        };
+        // Pie.
+        let by_category = Chart {
+            kind: ChartKind::Pie,
+            title: Some("Revenue by category".into()),
+            labels: vec![
+                "Consulting".into(),
+                "Support".into(),
+                "Onboarding".into(),
+                "Other".into(),
+            ],
+            series: vec![Series {
+                name: "share".into(),
+                values: vec![48.0, 22.0, 18.0, 12.0],
+            }],
+        };
+        // Line.
+        let orders = Chart {
+            kind: ChartKind::Line,
+            title: Some("Daily orders — last 7 days".into()),
+            labels: vec![
+                "Mon".into(),
+                "Tue".into(),
+                "Wed".into(),
+                "Thu".into(),
+                "Fri".into(),
+                "Sat".into(),
+                "Sun".into(),
+            ],
+            series: vec![Series {
+                name: "orders".into(),
+                values: vec![42.0, 55.0, 48.0, 61.0, 73.0, 35.0, 28.0],
             }],
         };
 
@@ -93,7 +140,15 @@ impl ReportDefinition for WorkspaceOverview {
                     .caption("flat")
                     .trend(Trend::Flat),
             ]))
+            .with(Widget::heading(2, "Charts"))
             .with(Widget::Chart(revenue))
+            .with(Widget::spacer(SpaceSize::Small))
+            // Two charts laid side by side (not full width).
+            .with(Widget::columns(vec![
+                vec![Widget::Chart(vs_target)],
+                vec![Widget::Chart(by_category)],
+            ]))
+            .with(Widget::Chart(orders))
             .with(Widget::Divider)
             .with(Widget::heading(2, "Document blocks"))
             .with(Widget::columns(vec![vec![bill_to], vec![meta]]))
