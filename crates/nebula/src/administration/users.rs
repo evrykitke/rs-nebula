@@ -91,6 +91,14 @@ async fn create_user(
         .await?;
     let profile: Profile = user.into();
     audit.0.created("user", profile.id, &profile).await;
+    state
+        .events
+        .publish(crate::account::events::UserCreated {
+            tenant_id: authz.user.tenant_id,
+            user_id: profile.id,
+            email: profile.email.clone(),
+        })
+        .await;
     Ok(Json(profile))
 }
 

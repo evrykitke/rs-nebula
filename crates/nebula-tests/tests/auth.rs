@@ -8,7 +8,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use nebula::auth::{NewUser, UserManager, totp};
 use nebula::config::{Config, DatabaseConfig};
-use nebula::{AccountModule, Kernel, db};
+use nebula::{AdministrationModule, Kernel, db};
 use tower::ServiceExt;
 
 async fn post_json(
@@ -100,7 +100,7 @@ async fn authentication_end_to_end() {
 
     let app = Kernel::builder()
         .with_config(config)
-        .add_module(AccountModule)
+        .add_module(AdministrationModule)
         .build()
         .expect("kernel must build")
         .init()

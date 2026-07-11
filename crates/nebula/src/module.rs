@@ -10,6 +10,7 @@
 
 use crate::auth::permission::PermissionDef;
 use crate::config::Config;
+use crate::events::Events;
 use crate::jobs::Jobs;
 use crate::money::CurrencyRegistry;
 use crate::tenancy::TenantManager;
@@ -90,6 +91,7 @@ pub struct ModuleContext<'a> {
     currencies: Arc<CurrencyRegistry>,
     tenants: Option<Arc<TenantManager>>,
     jobs: Option<Jobs>,
+    events: Events,
     router: Router,
     permissions: Vec<PermissionDef>,
     workers: Vec<WorkerRegistration>,
@@ -103,6 +105,7 @@ impl<'a> ModuleContext<'a> {
         currencies: Arc<CurrencyRegistry>,
         tenants: Option<Arc<TenantManager>>,
         jobs: Option<Jobs>,
+        events: Events,
     ) -> Self {
         Self {
             config,
@@ -110,6 +113,7 @@ impl<'a> ModuleContext<'a> {
             currencies,
             tenants,
             jobs,
+            events,
             router: Router::new(),
             permissions: Vec::new(),
             workers: Vec::new(),
@@ -163,6 +167,12 @@ impl<'a> ModuleContext<'a> {
     /// for building worker backends via [`Jobs::storage`].
     pub fn jobs(&self) -> Option<Jobs> {
         self.jobs.clone()
+    }
+
+    /// The event bus: subscribe to other contexts' events here in
+    /// `configure`, keep the (cheap) clone for publishing at runtime.
+    pub fn events(&self) -> Events {
+        self.events.clone()
     }
 
     /// Contribute a background worker. The registration runs against the

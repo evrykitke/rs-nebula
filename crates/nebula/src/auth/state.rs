@@ -7,6 +7,7 @@ use super::authz::Authz;
 use super::manager::UserManager;
 use crate::config::{AuthConfig, FilesConfig};
 use crate::error::{Error, Result};
+use crate::events::Events;
 use crate::module::ModuleContext;
 use crate::tenancy::{TenantManager, TenantRef};
 use axum::Extension;
@@ -19,6 +20,7 @@ pub(crate) struct AuthState {
     pub(crate) files: FilesConfig,
     pub(crate) main_db: DatabaseConnection,
     pub(crate) tenants: Option<Arc<TenantManager>>,
+    pub(crate) events: Events,
 }
 
 impl AuthState {
@@ -28,6 +30,7 @@ impl AuthState {
             files: ctx.config().files.clone(),
             main_db: ctx.require_db(),
             tenants: ctx.tenants(),
+            events: ctx.events(),
         }
     }
 

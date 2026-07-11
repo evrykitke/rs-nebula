@@ -44,6 +44,7 @@ pub(crate) fn finalize(
     tenants: Option<std::sync::Arc<crate::tenancy::TenantManager>>,
     permissions: std::sync::Arc<crate::auth::permission::Registry>,
     jobs: Option<crate::jobs::Jobs>,
+    events: crate::events::Events,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 ) -> Router {
     let mut api = ApiDoc::openapi();
@@ -82,6 +83,7 @@ pub(crate) fn finalize(
     if let Some(jobs) = jobs {
         router = router.layer(axum::Extension(jobs));
     }
+    router = router.layer(axum::Extension(events));
 
     if let Some(cors) = cors_layer(config) {
         router = router.layer(cors);

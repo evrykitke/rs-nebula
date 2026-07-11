@@ -16,6 +16,11 @@ multitenancy:
 jobs:
   enabled: true
 
+# Integration events through RabbitMQ (docker compose up -d); the broker
+# URL with credentials lives in dev.local.yaml.
+events:
+  distributed: true
+
 logging:
   level: info
   format: pretty

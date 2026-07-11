@@ -37,3 +37,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 apalis = "0.7"
 apalis-redis = "0.7"
 apalis-cron = "0.7"
+lapin = "4"
+futures-lite = "2"

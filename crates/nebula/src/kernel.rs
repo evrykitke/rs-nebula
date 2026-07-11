@@ -159,18 +159,29 @@ impl Kernel {
             None
         };
 
+        let events = crate::events::Events::new();
+
         let mut ctx = ModuleContext::new(
             &self.config,
             database.clone(),
             currencies.clone(),
             tenants.clone(),
             jobs.clone(),
+            events.clone(),
         );
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
             module.configure(&mut ctx);
         }
         let parts = ctx.into_parts();
+
+        // Subscriptions are in place; attach the broker so queue
+        // bindings cover every subscribed event. The consumer itself
+        // starts with `serve` (or `start_events` in tests).
+        if self.config.events.distributed {
+            events.connect(&self.config.rabbitmq, &self.config.events).await?;
+        }
+
         let permissions = Arc::new(permission::Registry::build(parts.permissions)?);
         tracing::info!(count = permissions.len(), "permission registry built");
         let router = crate::web::finalize(
@@ -180,6 +191,7 @@ impl Kernel {
             tenants.clone(),
             permissions.clone(),
             jobs.clone(),
+            events.clone(),
             parts.api_docs,
         );
 
@@ -196,6 +208,7 @@ impl Kernel {
             tenants,
             permissions,
             jobs,
+            events,
             monitor,
         })
     }
@@ -264,6 +277,7 @@ pub struct App {
     tenants: Option<Arc<TenantManager>>,
     permissions: Arc<permission::Registry>,
     jobs: Option<Jobs>,
+    events: crate::events::Events,
     monitor: Option<Monitor>,
 }
 
@@ -299,6 +313,17 @@ impl App {
         self.jobs.clone()
     }
 
+    /// The event bus.
+    pub fn events(&self) -> crate::events::Events {
+        self.events.clone()
+    }
+
+    /// Start the integration-event consumer (idempotent; `serve` calls
+    /// this). A no-op unless `events.distributed` connected a broker.
+    pub fn start_events(&self) -> bool {
+        self.events.start_consumer()
+    }
+
     /// Start the job workers (idempotent; `serve` calls this). Answers
     /// whether a monitor was started — tests drive workers with this
     /// without binding a socket.
@@ -318,6 +343,7 @@ impl App {
     /// Serve until ctrl-c, then shut down gracefully so in-flight
     /// requests complete instead of being severed.
     pub async fn serve(mut self) -> Result<()> {
+        self.start_events();
         let jobs_started = self.start_jobs();
         // Without the job system the audit pruner falls back to a plain
         // in-process interval.

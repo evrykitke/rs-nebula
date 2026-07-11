@@ -30,6 +30,19 @@ pub struct TenantRef {
     pub name: String,
 }
 
+/// Published when a tenant is registered — the hook for provisioning
+/// reactions (workspace resources, welcome flows) in other contexts.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TenantCreated {
+    pub tenant_id: Uuid,
+    pub name: String,
+    pub display_name: String,
+}
+
+impl crate::events::Event for TenantCreated {
+    const NAME: &'static str = "tenancy.tenant_created";
+}
+
 pub struct NewTenant {
     pub name: String,
     pub display_name: String,

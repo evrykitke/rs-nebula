@@ -28,6 +28,11 @@
 //! Tenant context comes from the tenant resolution middleware: the same
 //! `X-Tenant` header used everywhere else selects whose user store a
 //! request talks to.
+//!
+//! Facts announced on the event bus: [`events::UserRegistered`] and,
+//! as an integration event, [`crate::tenancy::TenantCreated`].
+
+pub mod events;
 
 use crate::audit::Audit;
 use crate::auth::authz::Authz;
@@ -193,6 +198,27 @@ async fn register(
                 )
                 .await;
             recorder.created("user", profile.id, &profile).await;
+            // The registration itself succeeded; a lost announcement is
+            // the broker's problem to surface, not a reason to 500.
+            if let Err(e) = state
+                .events
+                .broadcast(crate::tenancy::TenantCreated {
+                    tenant_id: tenant.id,
+                    name: tenant.name.clone(),
+                    display_name: tenant.display_name.clone(),
+                })
+                .await
+            {
+                tracing::error!(tenant = %tenant.name, error = %e, "failed to broadcast tenant_created");
+            }
+            state
+                .events
+                .publish(events::UserRegistered {
+                    tenant_id: Some(tenant.id),
+                    user_id: profile.id,
+                    email: profile.email.clone(),
+                })
+                .await;
             Ok(Json(RegisterResponse {
                 tenant_id: Some(tenant.id),
                 user: profile,
@@ -203,6 +229,14 @@ async fn register(
             seed_admin(&state.main_db, &registry, None, user.id).await?;
             let profile: Profile = user.into();
             audit.0.created("user", profile.id, &profile).await;
+            state
+                .events
+                .publish(events::UserRegistered {
+                    tenant_id: None,
+                    user_id: profile.id,
+                    email: profile.email.clone(),
+                })
+                .await;
             Ok(Json(RegisterResponse {
                 tenant_id: None,
                 user: profile,

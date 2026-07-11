@@ -74,6 +74,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub audit: AuditConfig,
     pub jobs: JobsConfig,
+    pub events: EventsConfig,
     pub files: FilesConfig,
     pub currencies: Vec<CurrencyConfig>,
 }
@@ -91,6 +92,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             audit: AuditConfig::default(),
             jobs: JobsConfig::default(),
+            events: EventsConfig::default(),
             files: FilesConfig::default(),
             currencies: Vec::new(),
         }
@@ -131,6 +133,32 @@ impl Default for JobsConfig {
         Self {
             enabled: false,
             concurrency: 2,
+        }
+    }
+}
+
+/// Integration event settings. In-process domain events always work;
+/// this section controls the RabbitMQ leg (`Events::broadcast`), which
+/// connects through `rabbitmq.url`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventsConfig {
+    /// Route `broadcast` events through RabbitMQ. Off: broadcasts
+    /// degrade to in-process delivery (fine for a single node).
+    pub distributed: bool,
+    /// Topic exchange shared by every service of the deployment.
+    pub exchange: String,
+    /// This service's durable queue; instances share it, so each event
+    /// is processed once per service. Give each service its own name.
+    pub queue: String,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            distributed: false,
+            exchange: "nebula.events".into(),
+            queue: "nebula".into(),
         }
     }
 }
@@ -379,6 +407,18 @@ impl Config {
         }
         if self.files.root.trim().is_empty() {
             return Err(ConfigError::Invalid("files.root must not be empty".into()));
+        }
+        if self.events.distributed {
+            if self.rabbitmq.url.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "events.distributed requires rabbitmq.url".into(),
+                ));
+            }
+            if self.events.exchange.trim().is_empty() || self.events.queue.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "events.exchange and events.queue must not be empty".into(),
+                ));
+            }
         }
         crate::money::CurrencyRegistry::from_config(&self.currencies)
             .map_err(|e| ConfigError::Invalid(e.to_string()))?;
