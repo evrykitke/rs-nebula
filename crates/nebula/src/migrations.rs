@@ -22,6 +22,8 @@ impl MigratorTrait for Migrator {
             Box::new(CreateUserDirectory),
             Box::new(CreateCurrencies),
             Box::new(AddTenantCompanyProfile),
+            Box::new(CreateDocumentNumberCounters),
+            Box::new(CreateDocumentSeries),
         ]
     }
 
@@ -1000,6 +1002,138 @@ impl MigrationTrait for AddTenantCompanyProfile {
             )
             .await
     }
+}
+
+/// Per-database counters backing [`crate::numbering`]. One row per
+/// `(series, period)`; the numbering primitive increments it inside the
+/// caller's transaction so document sequences stay gap-free. Runs on the
+/// main database and every tenant database, like the rest of the schema.
+struct CreateDocumentNumberCounters;
+
+impl MigrationName for CreateDocumentNumberCounters {
+    fn name(&self) -> &str {
+        "m20260711_000011_create_document_number_counters"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateDocumentNumberCounters {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(DocumentNumberCounters::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(DocumentNumberCounters::SeriesKey)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DocumentNumberCounters::Period)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DocumentNumberCounters::CurrentValue)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(DocumentNumberCounters::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(DocumentNumberCounters::SeriesKey)
+                            .col(DocumentNumberCounters::Period),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(DocumentNumberCounters::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum DocumentNumberCounters {
+    Table,
+    SeriesKey,
+    Period,
+    CurrentValue,
+    UpdatedAt,
+}
+
+/// Per-database overrides for [`crate::numbering`] series. Empty by
+/// default: a series falls back to the format its module declared in
+/// code, so a tenant that never touches configuration still gets working
+/// numbers. A row here lets a tenant override the template and reset
+/// policy of one series. Runs on the main and every tenant database.
+struct CreateDocumentSeries;
+
+impl MigrationName for CreateDocumentSeries {
+    fn name(&self) -> &str {
+        "m20260711_000012_create_document_series"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateDocumentSeries {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(DocumentSeries::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(DocumentSeries::SeriesKey)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(DocumentSeries::Template)
+                            .string_len(128)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DocumentSeries::Reset)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DocumentSeries::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(DocumentSeries::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum DocumentSeries {
+    Table,
+    SeriesKey,
+    Template,
+    Reset,
+    UpdatedAt,
 }
 
 struct AddAuditLogMessage;

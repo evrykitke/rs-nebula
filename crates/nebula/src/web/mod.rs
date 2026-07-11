@@ -47,6 +47,7 @@ pub(crate) fn finalize(
     events: crate::events::Events,
     storage: crate::storage::Storage,
     cache: crate::cache::Cache,
+    numbering: crate::numbering::Numbering,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 ) -> Router {
     let mut api = ApiDoc::openapi();
@@ -88,6 +89,7 @@ pub(crate) fn finalize(
     router = router.layer(axum::Extension(events));
     router = router.layer(axum::Extension(storage));
     router = router.layer(axum::Extension(cache));
+    router = router.layer(axum::Extension(numbering));
 
     if let Some(cors) = cors_layer(config) {
         router = router.layer(cors);

@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::events::Events;
 use crate::jobs::Jobs;
 use crate::money::CurrencyRegistry;
+use crate::numbering::SeriesDef;
 use crate::storage::Storage;
 use crate::tenancy::TenantManager;
 use apalis::prelude::Monitor;
@@ -98,6 +99,7 @@ pub struct ModuleContext<'a> {
     cache: Cache,
     router: Router,
     permissions: Vec<PermissionDef>,
+    series: Vec<SeriesDef>,
     workers: Vec<WorkerRegistration>,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 }
@@ -124,6 +126,7 @@ impl<'a> ModuleContext<'a> {
             cache,
             router: Router::new(),
             permissions: Vec::new(),
+            series: Vec::new(),
             workers: Vec::new(),
             api_docs: Vec::new(),
         }
@@ -169,6 +172,18 @@ impl<'a> ModuleContext<'a> {
     /// names fail the boot.
     pub fn add_permissions(&mut self, tree: PermissionDef) {
         self.permissions.push(tree);
+    }
+
+    /// Declare a document number series (invoices, credit notes, orders…).
+    /// The template is validated when the [`SeriesDef`] is built; the
+    /// kernel then rejects duplicate keys after every module configures.
+    /// Allocate numbers at runtime through the [`Numbering`] request
+    /// extension, passing the document's own transaction so the sequence
+    /// stays gap-free.
+    ///
+    /// [`Numbering`]: crate::numbering::Numbering
+    pub fn declare_series(&mut self, series: SeriesDef) {
+        self.series.push(series);
     }
 
     /// The job client, when `jobs.enabled` is on — for enqueueing and
@@ -226,6 +241,7 @@ impl<'a> ModuleContext<'a> {
         ModuleParts {
             router: self.router,
             permissions: self.permissions,
+            series: self.series,
             workers: self.workers,
             api_docs: self.api_docs,
         }
@@ -252,6 +268,7 @@ where
 pub(crate) struct ModuleParts {
     pub router: Router,
     pub permissions: Vec<PermissionDef>,
+    pub series: Vec<SeriesDef>,
     pub workers: Vec<WorkerRegistration>,
     pub api_docs: Vec<utoipa::openapi::OpenApi>,
 }

@@ -218,6 +218,11 @@ impl Kernel {
 
         let permissions = Arc::new(permission::Registry::build(parts.permissions)?);
         tracing::info!(count = permissions.len(), "permission registry built");
+
+        let numbering =
+            crate::numbering::Numbering::build(parts.series, Arc::new(crate::time::SystemClock))?;
+        tracing::info!(count = numbering.len(), "document number series registered");
+
         let router = crate::web::finalize(
             parts.router,
             &self.config,
@@ -228,6 +233,7 @@ impl Kernel {
             events.clone(),
             storage.clone(),
             cache.clone(),
+            numbering.clone(),
             parts.api_docs,
         );
 
@@ -249,6 +255,7 @@ impl Kernel {
             currencies,
             tenants,
             permissions,
+            numbering,
             jobs,
             events,
             storage,
@@ -321,6 +328,7 @@ pub struct App {
     currencies: Arc<CurrencyRegistry>,
     tenants: Option<Arc<TenantManager>>,
     permissions: Arc<permission::Registry>,
+    numbering: crate::numbering::Numbering,
     jobs: Option<Jobs>,
     events: crate::events::Events,
     storage: crate::storage::Storage,
@@ -353,6 +361,11 @@ impl App {
 
     pub fn permissions(&self) -> Arc<permission::Registry> {
         self.permissions.clone()
+    }
+
+    /// The document-numbering registry.
+    pub fn numbering(&self) -> crate::numbering::Numbering {
+        self.numbering.clone()
     }
 
     /// The job client, when `jobs.enabled` is on.
