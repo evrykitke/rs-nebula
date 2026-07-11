@@ -19,6 +19,7 @@ pub mod migrations;
 pub mod module;
 pub mod money;
 pub mod numbering;
+pub mod reporting;
 pub mod repository;
 pub mod sql_migrations;
 pub mod storage;
@@ -50,6 +51,12 @@ pub use kernel::{App, Kernel};
 pub use module::{Module, ModuleContext};
 pub use money::{Currency, CurrencyRegistry, Money};
 pub use numbering::{Number, Numbering, Reset, SeriesDef};
+pub use reporting::{
+    Align, Callout, CalloutStyle, Chart, ChartKind, Column, CompanyInformation, DataCx, Group,
+    Image, KeyValue, Metric, Orientation, Progress, Report, ReportData, ReportDataSource,
+    ReportDefinition, ReportFormat, ReportOutput, Reporting, Series, Signature, SpaceSize,
+    Symbology, Table, TextStyle, Trend, Widget,
+};
 pub use repository::Repository;
 pub use sql_migrations::SqlMigrator;
 pub use storage::{Container, Storage, StoredFile};

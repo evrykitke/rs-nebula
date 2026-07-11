@@ -8,4 +8,5 @@ authors.workspace = true
 
 [dependencies]
 nebula.workspace = true
+nebula-apps.workspace = true
 tokio.workspace = true

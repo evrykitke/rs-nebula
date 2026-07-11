@@ -48,6 +48,7 @@ pub(crate) fn finalize(
     storage: crate::storage::Storage,
     cache: crate::cache::Cache,
     numbering: crate::numbering::Numbering,
+    reporting: crate::reporting::Reporting,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 ) -> Router {
     let mut api = ApiDoc::openapi();
@@ -57,6 +58,7 @@ pub(crate) fn finalize(
 
     let mut router = router
         .merge(health::routes(config, database.clone()))
+        .merge(crate::reporting::routes())
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
         // Public files: uploads under {root}/{tenant-slug}/{id}/{resource}.
         // Served with nosniff + a locked-down CSP so a stored file can
@@ -90,6 +92,7 @@ pub(crate) fn finalize(
     router = router.layer(axum::Extension(storage));
     router = router.layer(axum::Extension(cache));
     router = router.layer(axum::Extension(numbering));
+    router = router.layer(axum::Extension(reporting));
 
     if let Some(cors) = cors_layer(config) {
         router = router.layer(cors);

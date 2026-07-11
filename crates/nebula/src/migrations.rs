@@ -24,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddTenantCompanyProfile),
             Box::new(CreateDocumentNumberCounters),
             Box::new(CreateDocumentSeries),
+            Box::new(CreateReportSettings),
         ]
     }
 
@@ -1133,6 +1134,60 @@ enum DocumentSeries {
     SeriesKey,
     Template,
     Reset,
+    UpdatedAt,
+}
+
+struct CreateReportSettings;
+
+impl MigrationName for CreateReportSettings {
+    fn name(&self) -> &str {
+        "m20260712_000013_create_report_settings"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateReportSettings {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // A single-row table (id is always 1) holding the tenant's report
+        // preferences — house format and watermark. Per database, so each
+        // provisioned tenant keeps its own.
+        manager
+            .create_table(
+                Table::create()
+                    .table(ReportSettings::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ReportSettings::Id)
+                            .small_integer()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(ReportSettings::DefaultFormat).string_len(16).null())
+                    .col(ColumnDef::new(ReportSettings::Watermark).string_len(255).null())
+                    .col(
+                        ColumnDef::new(ReportSettings::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(ReportSettings::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum ReportSettings {
+    Table,
+    Id,
+    DefaultFormat,
+    Watermark,
     UpdatedAt,
 }
 

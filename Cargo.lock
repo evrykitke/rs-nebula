@@ -2320,6 +2320,7 @@ dependencies = [
  "apalis-cron",
  "apalis-redis",
  "argon2",
+ "async-trait",
  "axum",
  "chrono",
  "chrono-tz",
@@ -2349,10 +2350,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula-apps"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nebula",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nebula-server"
 version = "0.1.0"
 dependencies = [
  "nebula",
+ "nebula-apps",
  "tokio",
 ]
 
@@ -2364,6 +2376,7 @@ dependencies = [
  "chrono",
  "figment",
  "nebula",
+ "nebula-apps",
  "rust_decimal",
  "sea-orm",
  "sea-orm-migration",

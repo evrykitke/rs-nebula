@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nebula", "crates/nebula-server", "crates/nebula-tests"]
+members = ["crates/nebula", "crates/nebula-apps", "crates/nebula-server", "crates/nebula-tests"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,9 +10,11 @@ authors = ["evrykitke <evrykitke@gmail.com>"]
 
 [workspace.dependencies]
 nebula = { path = "crates/nebula" }
+nebula-apps = { path = "crates/nebula-apps" }
 serde = { version = "1", features = ["derive"] }
 figment = { version = "0.10", features = ["yaml", "env"] }
 thiserror = "2"
+async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }

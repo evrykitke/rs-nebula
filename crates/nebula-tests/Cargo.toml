@@ -11,6 +11,7 @@ publish = false
 nebula.workspace = true
 
 [dev-dependencies]
+nebula-apps.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tower.workspace = true

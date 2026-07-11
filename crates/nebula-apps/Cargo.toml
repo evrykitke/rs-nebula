@@ -1,0 +1,13 @@
+[package]
+name = "nebula-apps"
+description = "Business apps built on the Nebula framework (workspace, …)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nebula.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true

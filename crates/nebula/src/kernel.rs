@@ -263,6 +263,10 @@ impl Kernel {
             crate::numbering::Numbering::build(parts.series, Arc::new(crate::time::SystemClock))?;
         tracing::info!(count = numbering.len(), "document number series registered");
 
+        let reporting =
+            crate::reporting::Reporting::build(parts.reports, tenants.clone(), storage.clone())?;
+        tracing::info!(count = reporting.len(), "reports registered");
+
         let router = crate::web::finalize(
             parts.router,
             &self.config,
@@ -274,6 +278,7 @@ impl Kernel {
             storage.clone(),
             cache.clone(),
             numbering.clone(),
+            reporting.clone(),
             parts.api_docs,
         );
 
@@ -296,6 +301,7 @@ impl Kernel {
             tenants,
             permissions,
             numbering,
+            reporting,
             jobs,
             events,
             storage,
@@ -369,6 +375,7 @@ pub struct App {
     tenants: Option<Arc<TenantManager>>,
     permissions: Arc<permission::Registry>,
     numbering: crate::numbering::Numbering,
+    reporting: crate::reporting::Reporting,
     jobs: Option<Jobs>,
     events: crate::events::Events,
     storage: crate::storage::Storage,
@@ -406,6 +413,11 @@ impl App {
     /// The document-numbering registry.
     pub fn numbering(&self) -> crate::numbering::Numbering {
         self.numbering.clone()
+    }
+
+    /// The reporting engine.
+    pub fn reporting(&self) -> crate::reporting::Reporting {
+        self.reporting.clone()
     }
 
     /// The job client, when `jobs.enabled` is on.

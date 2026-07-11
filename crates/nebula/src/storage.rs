@@ -96,6 +96,17 @@ impl Storage {
             ))),
         }
     }
+
+    /// Read a stored file's bytes by its root-relative path — for embedding
+    /// stored assets (e.g. a tenant logo) into generated documents. The
+    /// same traversal guard as [`Storage::remove`] applies.
+    pub(crate) async fn read(&self, path: &str) -> Result<Vec<u8>> {
+        validate_relative(path)?;
+        let target = self.root.join(path);
+        tokio::fs::read(&target)
+            .await
+            .map_err(|e| Error::internal(format!("could not read the stored file {path:?}: {e}")))
+    }
 }
 
 /// A namespaced slice of the store; hand one to whatever writes files.

@@ -15,6 +15,7 @@ use crate::events::Events;
 use crate::jobs::Jobs;
 use crate::money::CurrencyRegistry;
 use crate::numbering::SeriesDef;
+use crate::reporting::ReportDefinition;
 use crate::storage::Storage;
 use crate::tenancy::TenantManager;
 use apalis::prelude::Monitor;
@@ -100,6 +101,7 @@ pub struct ModuleContext<'a> {
     router: Router,
     permissions: Vec<PermissionDef>,
     series: Vec<SeriesDef>,
+    reports: Vec<Arc<dyn ReportDefinition>>,
     workers: Vec<WorkerRegistration>,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 }
@@ -127,6 +129,7 @@ impl<'a> ModuleContext<'a> {
             router: Router::new(),
             permissions: Vec::new(),
             series: Vec::new(),
+            reports: Vec::new(),
             workers: Vec::new(),
             api_docs: Vec::new(),
         }
@@ -186,6 +189,16 @@ impl<'a> ModuleContext<'a> {
         self.series.push(series);
     }
 
+    /// Declare a report the app can render. The kernel builds one registry
+    /// after every module configures (rejecting duplicate names) and serves
+    /// each report from `/reports/{name}`. Reach the engine at runtime
+    /// through the [`Reporting`] request extension.
+    ///
+    /// [`Reporting`]: crate::reporting::Reporting
+    pub fn declare_report(&mut self, report: Arc<dyn ReportDefinition>) {
+        self.reports.push(report);
+    }
+
     /// The job client, when `jobs.enabled` is on — for enqueueing and
     /// for building worker backends via [`Jobs::storage`].
     pub fn jobs(&self) -> Option<Jobs> {
@@ -242,6 +255,7 @@ impl<'a> ModuleContext<'a> {
             router: self.router,
             permissions: self.permissions,
             series: self.series,
+            reports: self.reports,
             workers: self.workers,
             api_docs: self.api_docs,
         }
@@ -269,6 +283,7 @@ pub(crate) struct ModuleParts {
     pub router: Router,
     pub permissions: Vec<PermissionDef>,
     pub series: Vec<SeriesDef>,
+    pub reports: Vec<Arc<dyn ReportDefinition>>,
     pub workers: Vec<WorkerRegistration>,
     pub api_docs: Vec<utoipa::openapi::OpenApi>,
 }
