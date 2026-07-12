@@ -26,6 +26,14 @@ pub struct Model {
     /// Storage path of the uploaded company logo, relative to the
     /// public file root (`{tenant-id}/logo.png`).
     pub logo_path: Option<String>,
+    /// Postal/street address, shown on report chrome and the profile.
+    pub address: Option<String>,
+    /// Contact email, shown on report chrome and the profile.
+    pub email: Option<String>,
+    /// Company website, shown on report chrome and the profile.
+    pub website: Option<String>,
+    /// Contact phone number, shown on report chrome and the profile.
+    pub phone: Option<String>,
     pub created_at: DateTimeUtc,
 }
 

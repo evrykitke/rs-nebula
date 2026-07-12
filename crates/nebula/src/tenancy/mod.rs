@@ -63,6 +63,10 @@ pub struct CompanyProfile {
     pub default_currency: Option<String>,
     pub tax_pin: Option<String>,
     pub vat_number: Option<String>,
+    pub address: Option<String>,
+    pub email: Option<String>,
+    pub website: Option<String>,
+    pub phone: Option<String>,
 }
 
 /// Directory lookups and per-tenant connection pooling. One instance is
@@ -158,6 +162,10 @@ impl TenantManager {
         active.default_currency = Set(profile.default_currency);
         active.tax_pin = Set(profile.tax_pin);
         active.vat_number = Set(profile.vat_number);
+        active.address = Set(profile.address);
+        active.email = Set(profile.email);
+        active.website = Set(profile.website);
+        active.phone = Set(profile.phone);
         active.update(&self.main).await.map_err(Error::from)
     }
 

@@ -5,10 +5,11 @@
 //! never touches dev data. Skips when NEBULA_TEST_DATABASE_URL is unset.
 
 use nebula::config::{Config, DatabaseConfig};
-use nebula::reporting::{RenderCx, ReportFormat, ReportOutput, ReportSettings};
+use nebula::reporting::{RenderCx, ReportFormat, ReportJobStatus, ReportOutput, ReportSettings};
 use nebula::{App, Kernel, db};
 use nebula_apps::WorkspaceApp;
 use sea_orm::ConnectionTrait;
+use std::time::Duration;
 
 async fn boot(url: &str) -> App {
     let mut config = Config::default();
@@ -62,6 +63,201 @@ async fn renders_reports_and_applies_tenant_settings() {
         .await;
 
     outcome.expect("reporting flow must pass");
+}
+
+/// Data-heavy reports can be queued: a worker renders off-request, stores
+/// the artifact and settles the job row. Needs Postgres and Redis.
+#[tokio::test]
+async fn queues_and_renders_reports_in_background() {
+    let Ok(main_url) = std::env::var("NEBULA_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set NEBULA_TEST_DATABASE_URL to run database tests");
+        return;
+    };
+    let redis_url =
+        std::env::var("NEBULA_TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    if !redis_reachable(&redis_url) {
+        eprintln!("SKIPPED: Redis not reachable at {redis_url} (is docker compose up?)");
+        return;
+    }
+
+    let admin = db::connect(&DatabaseConfig {
+        url: main_url.as_str().into(),
+        ..DatabaseConfig::default()
+    })
+    .await
+    .expect("must connect to create the test database");
+
+    let fresh = format!("nebula_report_jobs_{}", uuid::Uuid::new_v4().simple());
+    admin
+        .execute_unprepared(&format!("CREATE DATABASE {fresh}"))
+        .await
+        .expect("must create the fresh database");
+
+    let outcome = run_jobs(&swap_database(&main_url, &fresh), &redis_url).await;
+
+    let _ = admin
+        .execute_unprepared(&format!("DROP DATABASE IF EXISTS {fresh} WITH (FORCE)"))
+        .await;
+
+    outcome.expect("background report flow must pass");
+}
+
+async fn run_jobs(url: &str, redis_url: &str) -> Result<(), String> {
+    let files_root = std::env::temp_dir().join(format!(
+        "nebula-report-artifacts-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let mut config = Config::default();
+    config.auth.jwt_secret = "reporting-jobs-test-secret".into();
+    config.database = DatabaseConfig {
+        url: url.into(),
+        auto_migrate: true,
+        ..DatabaseConfig::default()
+    };
+    config.jobs.enabled = true;
+    config.redis.url = redis_url.into();
+    config.files.root = files_root.to_string_lossy().into_owned();
+
+    let mut app = Kernel::builder()
+        .with_config(config)
+        .add_module(WorkspaceApp)
+        .build()
+        .map_err(|e| format!("kernel build failed: {e}"))?
+        .init()
+        .await
+        .map_err(|e| format!("boot failed: {e}"))?;
+
+    let reporting = app.reporting();
+    let db = app.database().cloned();
+    let cx = RenderCx { db: db.clone(), tenant: None };
+    let jobs = app.jobs().ok_or("jobs client must exist")?;
+
+    // An unsupported output is rejected synchronously, before anything queues.
+    if reporting
+        .enqueue_job(&cx, &jobs, "workspace-overview", None, ReportOutput::Excel, None)
+        .await
+        .is_ok()
+    {
+        return Err("overview should reject an Excel job".into());
+    }
+
+    // Queue a real render; it starts life queued.
+    let job = reporting
+        .enqueue_job(
+            &cx,
+            &jobs,
+            "sample-register",
+            None,
+            ReportOutput::Pdf,
+            Some((uuid::Uuid::new_v4(), "tester".into())),
+        )
+        .await
+        .map_err(|e| format!("enqueue failed: {e}"))?;
+    if job.status != ReportJobStatus::Queued {
+        return Err(format!("a new job should be queued, was {:?}", job.status));
+    }
+
+    // Run the workers and wait for this job to settle.
+    if !app.start_jobs() {
+        return Err("job monitor must start".into());
+    }
+    let mut waited = Duration::ZERO;
+    let finished = loop {
+        let current = reporting
+            .job(db.as_ref(), job.id)
+            .await
+            .map_err(|e| format!("job poll failed: {e}"))?;
+        if matches!(
+            current.status,
+            ReportJobStatus::Completed | ReportJobStatus::Failed
+        ) {
+            break current;
+        }
+        if waited >= Duration::from_secs(30) {
+            return Err(format!("job did not finish in time (last: {:?})", current.status));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        waited += Duration::from_millis(250);
+    };
+
+    if finished.status != ReportJobStatus::Completed {
+        return Err(format!("job failed: {:?}", finished.error));
+    }
+    if finished.content_type.as_deref() != Some("application/pdf") {
+        return Err(format!("unexpected content type: {:?}", finished.content_type));
+    }
+    if finished.byte_size.unwrap_or(0) < 800 {
+        return Err(format!("artifact too small: {:?}", finished.byte_size));
+    }
+    if !finished.file_name.as_deref().unwrap_or("").ends_with(".pdf") {
+        return Err(format!("unexpected file name: {:?}", finished.file_name));
+    }
+
+    // The artifact really landed on disk and is a PDF of the recorded size.
+    let stored = find_artifact(&files_root, ".pdf").ok_or("no stored artifact on disk")?;
+    let bytes = std::fs::read(&stored).map_err(|e| format!("read artifact: {e}"))?;
+    if !bytes.starts_with(b"%PDF-") {
+        return Err("stored artifact is not a PDF".into());
+    }
+    if bytes.len() as i64 != finished.byte_size.unwrap_or(-1) {
+        return Err("stored size disagrees with the recorded byte_size".into());
+    }
+
+    // It shows up in the job history.
+    let history = reporting
+        .jobs(db.as_ref(), 10)
+        .await
+        .map_err(|e| format!("history failed: {e}"))?;
+    if !history.iter().any(|j| j.id == job.id) {
+        return Err("completed job missing from history".into());
+    }
+
+    let _ = std::fs::remove_dir_all(&files_root);
+    Ok(())
+}
+
+/// A quick TCP probe so the test skips (rather than fails) when Redis is
+/// not running locally.
+fn redis_reachable(url: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let hostport = url
+        .trim_start_matches("redis://")
+        .trim_start_matches("rediss://");
+    let hostport = hostport.split('/').next().unwrap_or(hostport);
+    let hostport = hostport.rsplit('@').next().unwrap_or(hostport);
+    let addr = if hostport.contains(':') {
+        hostport.to_string()
+    } else {
+        format!("{hostport}:6379")
+    };
+    match addr.to_socket_addrs() {
+        Ok(mut addrs) => addrs.next().is_some_and(|a| {
+            std::net::TcpStream::connect_timeout(&a, Duration::from_millis(500)).is_ok()
+        }),
+        Err(_) => false,
+    }
+}
+
+/// Find the first file ending with `ext` under the `{root}/{ns}/{id}/`
+/// storage layout.
+fn find_artifact(root: &std::path::Path, ext: &str) -> Option<std::path::PathBuf> {
+    for ns in std::fs::read_dir(root).ok()?.flatten() {
+        if !ns.path().is_dir() {
+            continue;
+        }
+        for id in std::fs::read_dir(ns.path()).ok()?.flatten() {
+            if !id.path().is_dir() {
+                continue;
+            }
+            for file in std::fs::read_dir(id.path()).ok()?.flatten() {
+                if file.path().to_string_lossy().ends_with(ext) {
+                    return Some(file.path());
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn run(url: &str) -> Result<(), String> {

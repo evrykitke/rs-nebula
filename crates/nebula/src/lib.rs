@@ -54,9 +54,9 @@ pub use numbering::{Number, Numbering, Reset, SeriesDef};
 pub use reporting::{
     Align, Callout, CalloutStyle, Chart, ChartKind, Column, CompanyInformation, DataColumn, DataCx,
     DataTable, Group, Image, KeyValue, Metric, Orientation, Progress, Report, ReportData,
-    ReportDataSource, ReportDefinition, ReportFormat, ReportInfo, ReportOutput, ReportSettings,
-    ReportTables, Reporting, Series, Signature, SpaceSize, Symbology, Table, TextStyle, Trend,
-    Widget,
+    ReportDataSource, ReportDefinition, ReportFormat, ReportInfo, ReportJob, ReportJobStatus,
+    ReportOutput, ReportSettings, ReportTables, Reporting, Series, Signature, SpaceSize, Symbology,
+    Table, TextStyle, Trend, Widget,
 };
 pub use repository::Repository;
 pub use sql_migrations::SqlMigrator;

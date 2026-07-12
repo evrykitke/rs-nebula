@@ -25,6 +25,8 @@ impl MigratorTrait for Migrator {
             Box::new(CreateDocumentNumberCounters),
             Box::new(CreateDocumentSeries),
             Box::new(CreateReportSettings),
+            Box::new(CreateReportJobs),
+            Box::new(AddTenantCompanyContact),
         ]
     }
 
@@ -102,6 +104,10 @@ enum Tenants {
     TaxPin,
     VatNumber,
     LogoPath,
+    Address,
+    Email,
+    Website,
+    Phone,
     CreatedAt,
 }
 
@@ -1189,6 +1195,140 @@ enum ReportSettings {
     DefaultFormat,
     Watermark,
     UpdatedAt,
+}
+
+/// Async report generation: one row per queued render. Data-heavy reports
+/// are enqueued instead of rendered on the request thread; a worker builds
+/// the document, stores the artifact, and updates this row. Per database,
+/// like the rest of the reporting schema, so each tenant keeps its own job
+/// history and artifacts.
+struct CreateReportJobs;
+
+impl MigrationName for CreateReportJobs {
+    fn name(&self) -> &str {
+        "m20260712_000014_create_report_jobs"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateReportJobs {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(ReportJobs::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(ReportJobs::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(ReportJobs::Report).string_len(64).not_null())
+                    .col(ColumnDef::new(ReportJobs::Format).string_len(16).null())
+                    .col(ColumnDef::new(ReportJobs::Output).string_len(16).not_null())
+                    .col(ColumnDef::new(ReportJobs::Status).string_len(16).not_null())
+                    .col(ColumnDef::new(ReportJobs::FilePath).string_len(512).null())
+                    .col(ColumnDef::new(ReportJobs::ContentType).string_len(128).null())
+                    .col(ColumnDef::new(ReportJobs::Extension).string_len(16).null())
+                    .col(ColumnDef::new(ReportJobs::FileName).string_len(255).null())
+                    .col(ColumnDef::new(ReportJobs::ByteSize).big_integer().null())
+                    .col(ColumnDef::new(ReportJobs::Error).text().null())
+                    .col(ColumnDef::new(ReportJobs::RequestedBy).string_len(255).null())
+                    .col(ColumnDef::new(ReportJobs::RequestedById).uuid().null())
+                    .col(
+                        ColumnDef::new(ReportJobs::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        ColumnDef::new(ReportJobs::StartedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(ReportJobs::CompletedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_report_jobs_created")
+                    .if_not_exists()
+                    .table(ReportJobs::Table)
+                    .col(ReportJobs::CreatedAt)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(ReportJobs::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum ReportJobs {
+    Table,
+    Id,
+    Report,
+    Format,
+    Output,
+    Status,
+    FilePath,
+    ContentType,
+    Extension,
+    FileName,
+    ByteSize,
+    Error,
+    RequestedBy,
+    RequestedById,
+    CreatedAt,
+    StartedAt,
+    CompletedAt,
+}
+
+/// Company contact details shown on report chrome (running header/footer)
+/// and the company profile: postal address, email, website and phone.
+struct AddTenantCompanyContact;
+
+impl MigrationName for AddTenantCompanyContact {
+    fn name(&self) -> &str {
+        "m20260712_000015_add_tenant_company_contact"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddTenantCompanyContact {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .add_column_if_not_exists(ColumnDef::new(Tenants::Address).string_len(512).null())
+                    .add_column_if_not_exists(ColumnDef::new(Tenants::Email).string_len(255).null())
+                    .add_column_if_not_exists(ColumnDef::new(Tenants::Website).string_len(255).null())
+                    .add_column_if_not_exists(ColumnDef::new(Tenants::Phone).string_len(64).null())
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .drop_column(Tenants::Address)
+                    .drop_column(Tenants::Email)
+                    .drop_column(Tenants::Website)
+                    .drop_column(Tenants::Phone)
+                    .to_owned(),
+            )
+            .await
+    }
 }
 
 struct AddAuditLogMessage;

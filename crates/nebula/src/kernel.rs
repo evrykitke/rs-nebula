@@ -288,6 +288,7 @@ impl Kernel {
                 &database,
                 &tenants,
                 &migrations,
+                &reporting,
                 parts.workers,
             )),
             None => None,
@@ -323,9 +324,27 @@ impl Kernel {
         database: &Option<DatabaseConnection>,
         tenants: &Option<Arc<TenantManager>>,
         migrations: &Migrations,
+        reporting: &crate::reporting::Reporting,
         worker_regs: Vec<crate::module::WorkerRegistration>,
     ) -> Monitor {
         let mut monitor = Monitor::new();
+
+        // Background report generation: data-heavy renders enqueued from the
+        // reporting endpoints run here, off the request thread.
+        {
+            let ctx = crate::reporting::ReportJobContext {
+                reporting: reporting.clone(),
+                database: database.clone(),
+            };
+            monitor = monitor.register(
+                WorkerBuilder::new("nebula-report-render")
+                    .data(ctx)
+                    .backend(jobs.storage::<crate::reporting::RenderReportJob>(
+                        crate::reporting::REPORT_QUEUE,
+                    ))
+                    .build_fn(crate::reporting::run_report_job),
+            );
+        }
 
         if let Some(manager) = tenants {
             let ctx = crate::jobs::MigrationContext {

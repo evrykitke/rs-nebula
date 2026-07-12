@@ -129,6 +129,11 @@ pub struct CompanyProfileResponse {
     /// Tax registration PIN (e.g. a KRA PIN).
     pub tax_pin: Option<String>,
     pub vat_number: Option<String>,
+    /// Postal/street address (may be multi-line).
+    pub address: Option<String>,
+    pub email: Option<String>,
+    pub website: Option<String>,
+    pub phone: Option<String>,
     /// Where the uploaded company logo is served from, when one exists.
     pub logo_url: Option<String>,
 }
@@ -140,6 +145,10 @@ fn company_profile(t: &crate::tenancy::tenant::Model) -> CompanyProfileResponse 
         default_currency: t.default_currency.clone(),
         tax_pin: t.tax_pin.clone(),
         vat_number: t.vat_number.clone(),
+        address: t.address.clone(),
+        email: t.email.clone(),
+        website: t.website.clone(),
+        phone: t.phone.clone(),
         logo_url: t.logo_path.as_ref().map(|p| format!("/public/{p}")),
     }
 }
@@ -168,6 +177,11 @@ pub struct UpdateCompanyProfileRequest {
     pub default_currency: Option<String>,
     pub tax_pin: Option<String>,
     pub vat_number: Option<String>,
+    /// Postal/street address (may be multi-line); blank clears it.
+    pub address: Option<String>,
+    pub email: Option<String>,
+    pub website: Option<String>,
+    pub phone: Option<String>,
 }
 
 #[utoipa::path(put, path = "/auth/tenant/profile", tag = "auth",
@@ -203,6 +217,10 @@ async fn tenant_profile_update(
                 default_currency: req.default_currency,
                 tax_pin: none_if_blank(req.tax_pin),
                 vat_number: none_if_blank(req.vat_number),
+                address: none_if_blank(req.address),
+                email: none_if_blank(req.email),
+                website: none_if_blank(req.website),
+                phone: none_if_blank(req.phone),
             },
         )
         .await?;

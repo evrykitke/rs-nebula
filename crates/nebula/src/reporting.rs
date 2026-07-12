@@ -25,16 +25,12 @@
 //!    (`ctx.declare_report(...)`) exactly like numbering series; the kernel
 //!    builds one registry and serves every report from `/reports/{name}`.
 
-use crate::auth::authz::Authz;
-use crate::auth::permission;
 use crate::error::{Error, Result};
+use crate::jobs::Jobs;
 use crate::storage::Storage;
 use crate::tenancy::{TenantManager, TenantRef};
 use async_trait::async_trait;
-use axum::extract::{Path, Query};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{Extension, Json, Router};
+use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -543,6 +539,13 @@ pub enum ReportOutput {
 }
 
 impl ReportOutput {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportOutput::Pdf => "pdf",
+            ReportOutput::Excel => "excel",
+            ReportOutput::Table => "table",
+        }
+    }
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "pdf" => Some(ReportOutput::Pdf),
@@ -617,6 +620,14 @@ impl ReportData {
 pub struct CompanyInformation {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tax_pin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vat_number: Option<String>,
@@ -651,6 +662,10 @@ impl ReportDataSource for CompanyInformationDataSource {
         if let (Some(tenants), Some(tenant)) = (cx.tenants, cx.tenant) {
             if let Some(row) = tenants.find_by_id(tenant.id).await? {
                 info.name = row.display_name.clone();
+                info.address = row.address.clone();
+                info.email = row.email.clone();
+                info.website = row.website.clone();
+                info.phone = row.phone.clone();
                 info.tax_pin = row.tax_pin.clone();
                 info.vat_number = row.vat_number.clone();
                 info.currency = row.default_currency.clone();
@@ -818,6 +833,109 @@ impl From<&Table> for DataTable {
             totals: table.totals.clone(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Background report generation
+// ---------------------------------------------------------------------------
+
+/// Redis queue that carries [`RenderReportJob`]s to the render worker.
+pub(crate) const REPORT_QUEUE: &str = "report-render";
+
+/// Lifecycle of a queued report render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportJobStatus {
+    /// Accepted and waiting for a worker.
+    Queued,
+    /// A worker is building the document.
+    Running,
+    /// Rendered and the artifact is stored, ready to download.
+    Completed,
+    /// The build or render failed; see [`ReportJob::error`].
+    Failed,
+}
+
+impl ReportJobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportJobStatus::Queued => "queued",
+            ReportJobStatus::Running => "running",
+            ReportJobStatus::Completed => "completed",
+            ReportJobStatus::Failed => "failed",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        match s {
+            "running" => ReportJobStatus::Running,
+            "completed" => ReportJobStatus::Completed,
+            "failed" => ReportJobStatus::Failed,
+            _ => ReportJobStatus::Queued,
+        }
+    }
+}
+
+/// A queued (or finished) background report render, as reported to the
+/// viewer. Data-heavy reports are enqueued instead of rendered on the
+/// request thread; the client polls [`ReportJob`] until it is `completed`,
+/// then downloads the stored artifact. The artifact's storage path is not
+/// exposed here — downloads go through an authenticated endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportJob {
+    pub id: uuid::Uuid,
+    /// The report's name (registry key).
+    pub report: String,
+    /// The report's display title, resolved from the registry.
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ReportFormat>,
+    pub output: ReportOutput,
+    pub status: ReportJobStatus,
+    /// Suggested download file name once completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_size: Option<i64>,
+    /// The failure message when `status` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Who queued it (user name), for the job history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// The apalis job payload: everything the worker needs to render off the
+/// request thread. The tenant is carried by id so the worker re-resolves
+/// its own connection (the request's connection does not outlive it).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RenderReportJob {
+    pub job_id: uuid::Uuid,
+    pub tenant_id: Option<uuid::Uuid>,
+    pub report: String,
+    pub format: Option<ReportFormat>,
+    pub output: ReportOutput,
+}
+
+/// Worker state for [`run_report_job`]: the engine (which carries the
+/// renderers, storage and tenant manager) plus the main database, used
+/// when a job is not tenant-scoped (single-tenant deployments).
+#[derive(Clone)]
+pub(crate) struct ReportJobContext {
+    pub reporting: Reporting,
+    pub database: Option<DatabaseConnection>,
+}
+
+/// The apalis worker function registered by the kernel for [`REPORT_QUEUE`].
+pub(crate) async fn run_report_job(
+    job: RenderReportJob,
+    ctx: apalis::prelude::Data<ReportJobContext>,
+) -> Result<()> {
+    ctx.reporting.run_job(ctx.database.as_ref(), job).await
 }
 
 /// Flatten a built document's tables into the interactive datatable payload.
@@ -1090,166 +1208,191 @@ impl Reporting {
     ) -> Result<()> {
         settings_store::save(db, settings).await
     }
+
+    /// A report's display title from the registry, falling back to its name
+    /// (a job may outlive a report being un-declared).
+    fn title_of(&self, name: &str) -> String {
+        self.inner
+            .reports
+            .get(name)
+            .map(|d| d.title().to_string())
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Queue a report to be rendered in the background: record a `queued`
+    /// row and push the job. The caller polls [`job`](Self::job) until it is
+    /// `completed`, then downloads the artifact. Validates the report and
+    /// output up front, so a bad request fails synchronously rather than in
+    /// the worker.
+    pub async fn enqueue_job(
+        &self,
+        cx: &RenderCx,
+        jobs: &Jobs,
+        name: &str,
+        format: Option<ReportFormat>,
+        output: ReportOutput,
+        requested_by: Option<(uuid::Uuid, String)>,
+    ) -> Result<ReportJob> {
+        let def = self
+            .inner
+            .reports
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("report {name:?}")))?
+            .clone();
+        if !def.outputs().contains(&output) {
+            return Err(Error::Validation(format!(
+                "report {name:?} does not support the requested output"
+            )));
+        }
+        let db = cx.db.as_ref().ok_or_else(|| {
+            Error::internal("queueing a report requires a database connection")
+        })?;
+
+        let id = uuid::Uuid::new_v4();
+        let (by_id, by_name) = match requested_by {
+            Some((id, name)) => (Some(id), Some(name)),
+            None => (None, None),
+        };
+        job_store::insert(db, id, name, format, output, by_name.as_deref(), by_id).await?;
+
+        jobs.enqueue(
+            REPORT_QUEUE,
+            RenderReportJob {
+                job_id: id,
+                tenant_id: cx.tenant.as_ref().map(|t| t.id),
+                report: name.to_string(),
+                format,
+                output,
+            },
+        )
+        .await?;
+
+        self.job(Some(db), id).await
+    }
+
+    /// One background job's current state.
+    pub async fn job(&self, db: Option<&DatabaseConnection>, id: uuid::Uuid) -> Result<ReportJob> {
+        let db = db.ok_or_else(|| Error::internal("report jobs require a database connection"))?;
+        let mut job = job_store::load(db, id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("report job {id}")))?;
+        job.title = self.title_of(&job.report);
+        Ok(job)
+    }
+
+    /// The most recent background jobs (newest first), for the job history.
+    pub async fn jobs(&self, db: Option<&DatabaseConnection>, limit: u64) -> Result<Vec<ReportJob>> {
+        let db = db.ok_or_else(|| Error::internal("report jobs require a database connection"))?;
+        let mut jobs = job_store::list(db, limit).await?;
+        for job in &mut jobs {
+            job.title = self.title_of(&job.report);
+        }
+        Ok(jobs)
+    }
+
+    /// A completed job's stored artifact: the job (for its content type and
+    /// file name) plus the bytes, read back from storage. Errors if the job
+    /// is not yet completed.
+    pub(crate) async fn artifact(
+        &self,
+        db: Option<&DatabaseConnection>,
+        id: uuid::Uuid,
+    ) -> Result<(ReportJob, Vec<u8>)> {
+        let conn = db.ok_or_else(|| Error::internal("report jobs require a database connection"))?;
+        let job = self.job(Some(conn), id).await?;
+        if job.status != ReportJobStatus::Completed {
+            return Err(Error::Validation(format!(
+                "report job {id} is {}",
+                job.status.as_str()
+            )));
+        }
+        let path = job_store::file_path(conn, id)
+            .await?
+            .ok_or_else(|| Error::internal("a completed report job has no stored artifact"))?;
+        let bytes = self.inner.storage.read(&path).await?;
+        Ok((job, bytes))
+    }
+
+    /// Execute a queued render off the request thread (the worker body):
+    /// resolve the target database and tenant, build and render the report,
+    /// store the artifact, and settle the job row. A build/render failure is
+    /// recorded as `failed` and swallowed (it will not succeed on retry, so
+    /// the queue should not loop on it); only an unresolvable target bubbles
+    /// up for apalis to retry.
+    pub(crate) async fn run_job(
+        &self,
+        main_db: Option<&DatabaseConnection>,
+        job: RenderReportJob,
+    ) -> Result<()> {
+        let (db, tenant) = match job.tenant_id {
+            Some(tid) => {
+                let tenants = self.inner.tenants.as_ref().ok_or_else(|| {
+                    Error::internal("report job targets a tenant but multitenancy is disabled")
+                })?;
+                let model = tenants
+                    .find_by_id(tid)
+                    .await?
+                    .ok_or_else(|| Error::NotFound(format!("tenant {tid}")))?;
+                let db = tenants.connection_for(&model).await?;
+                let tref = TenantRef { id: model.id, name: model.name.clone() };
+                (db, Some(tref))
+            }
+            None => {
+                let db = main_db
+                    .cloned()
+                    .ok_or_else(|| Error::internal("report job has no database to run against"))?;
+                (db, None)
+            }
+        };
+
+        if let Err(e) = job_store::mark_running(&db, job.job_id).await {
+            tracing::warn!(error = %e, job = %job.job_id, "could not mark report job running");
+        }
+
+        let cx = RenderCx { db: Some(db.clone()), tenant: tenant.clone() };
+        match self.render(&cx, &job.report, job.format, job.output).await {
+            Ok(rendered) => {
+                let resource = format!("{}.{}", job.report, rendered.extension);
+                let container = match &tenant {
+                    Some(t) => self.inner.storage.tenant(t),
+                    None => self.inner.storage.container("reports")?,
+                };
+                let stored = container.store(&resource, &rendered.bytes).await?;
+                job_store::mark_completed(
+                    &db,
+                    job.job_id,
+                    &stored.path,
+                    rendered.content_type,
+                    rendered.extension,
+                    &resource,
+                    rendered.bytes.len() as i64,
+                )
+                .await?;
+                tracing::info!(job = %job.job_id, report = %job.report, "report job completed");
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::error!(job = %job.job_id, report = %job.report, error = %msg,
+                    "report job failed");
+                if let Err(e2) = job_store::mark_failed(&db, job.job_id, &msg).await {
+                    tracing::warn!(error = %e2, job = %job.job_id,
+                        "could not record report job failure");
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // HTTP surface
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct RenderParams {
-    format: Option<String>,
-    output: Option<String>,
-}
-
-/// The reporting routes, merged into the app by the kernel:
-/// - `GET /reports/settings` — the tenant's report preferences
-/// - `PUT /reports/settings` — set them (admin only)
-/// - `GET /reports/{name}?format=modern&output=pdf` — render a report
-pub(crate) fn routes() -> Router {
-    Router::new()
-        .route("/reports", get(list_reports))
-        .route("/reports/settings", get(get_settings).put(put_settings))
-        .route("/reports/{name}", get(render_report))
-        .route("/reports/{name}/preview", get(preview_report))
-        .route("/reports/{name}/table", get(table_report))
-}
-
-/// The themed in-app preview: the report's pages as SVG, for the viewer to
-/// render inside the app's own chrome (instead of the browser's native PDF
-/// viewer). One string per page.
-#[derive(Debug, Serialize)]
-struct ReportPreview {
-    pages: Vec<String>,
-}
-
-async fn list_reports(
-    Extension(reporting): Extension<Reporting>,
-    _authz: Authz,
-) -> Result<Json<Vec<ReportInfo>>> {
-    Ok(Json(reporting.catalogue()))
-}
-
-async fn get_settings(
-    Extension(reporting): Extension<Reporting>,
-    _authz: Authz,
-    db: Option<Extension<DatabaseConnection>>,
-) -> Result<Json<ReportSettings>> {
-    Ok(Json(reporting.settings(db.as_ref().map(|e| &e.0)).await))
-}
-
-async fn put_settings(
-    Extension(reporting): Extension<Reporting>,
-    authz: Authz,
-    db: Option<Extension<DatabaseConnection>>,
-    Json(settings): Json<ReportSettings>,
-) -> Result<Json<ReportSettings>> {
-    authz.require(permission::names::TENANT_SETTINGS).await?;
-    let db = db
-        .map(|e| e.0)
-        .ok_or_else(|| Error::internal("report settings require a database connection"))?;
-    reporting.save_settings(&db, &settings).await?;
-    Ok(Json(reporting.settings(Some(&db)).await))
-}
-
-async fn render_report(
-    Extension(reporting): Extension<Reporting>,
-    authz: Authz,
-    db: Option<Extension<DatabaseConnection>>,
-    tenant: Option<Extension<TenantRef>>,
-    Path(name): Path<String>,
-    Query(params): Query<RenderParams>,
-) -> Result<Response> {
-    // Rendering requires an authenticated tenant user; reports that declare
-    // a permission require that too.
-    if let Some(required) = reporting.required_permission(&name) {
-        authz.require(required).await?;
-    }
-
-    let format = match params.format.as_deref() {
-        Some(s) => Some(
-            ReportFormat::parse(s)
-                .ok_or_else(|| Error::Validation(format!("unknown report format {s:?}")))?,
-        ),
-        None => None,
-    };
-    let output = match params.output.as_deref() {
-        Some(s) => ReportOutput::parse(s)
-            .ok_or_else(|| Error::Validation(format!("unknown report output {s:?}")))?,
-        None => ReportOutput::default(),
-    };
-
-    let cx = RenderCx {
-        db: db.map(|e| e.0),
-        tenant: tenant.map(|e| e.0),
-    };
-    let rendered = reporting.render(&cx, &name, format, output).await?;
-
-    let disposition = format!("inline; filename=\"{name}.{}\"", rendered.extension);
-    Ok((
-        [
-            (axum::http::header::CONTENT_TYPE, rendered.content_type.to_string()),
-            (axum::http::header::CONTENT_DISPOSITION, disposition),
-        ],
-        rendered.bytes,
-    )
-        .into_response())
-}
-
-async fn preview_report(
-    Extension(reporting): Extension<Reporting>,
-    authz: Authz,
-    db: Option<Extension<DatabaseConnection>>,
-    tenant: Option<Extension<TenantRef>>,
-    Path(name): Path<String>,
-    Query(params): Query<RenderParams>,
-) -> Result<Json<ReportPreview>> {
-    if let Some(required) = reporting.required_permission(&name) {
-        authz.require(required).await?;
-    }
-
-    let format = match params.format.as_deref() {
-        Some(s) => Some(
-            ReportFormat::parse(s)
-                .ok_or_else(|| Error::Validation(format!("unknown report format {s:?}")))?,
-        ),
-        None => None,
-    };
-
-    let cx = RenderCx {
-        db: db.map(|e| e.0),
-        tenant: tenant.map(|e| e.0),
-    };
-    let pages = reporting.preview(&cx, &name, format).await?;
-    Ok(Json(ReportPreview { pages }))
-}
-
-async fn table_report(
-    Extension(reporting): Extension<Reporting>,
-    authz: Authz,
-    db: Option<Extension<DatabaseConnection>>,
-    tenant: Option<Extension<TenantRef>>,
-    Path(name): Path<String>,
-    Query(params): Query<RenderParams>,
-) -> Result<Json<ReportTables>> {
-    if let Some(required) = reporting.required_permission(&name) {
-        authz.require(required).await?;
-    }
-
-    let format = match params.format.as_deref() {
-        Some(s) => Some(
-            ReportFormat::parse(s)
-                .ok_or_else(|| Error::Validation(format!("unknown report format {s:?}")))?,
-        ),
-        None => None,
-    };
-
-    let cx = RenderCx {
-        db: db.map(|e| e.0),
-        tenant: tenant.map(|e| e.0),
-    };
-    Ok(Json(reporting.datatables(&cx, &name, format).await?))
-}
+// The axum routes and handlers live in their own submodule, kept apart from
+// the engine and document model above.
+mod web;
+pub(crate) use web::routes;
 
 // ---------------------------------------------------------------------------
 // Renderers
@@ -1351,6 +1494,164 @@ mod settings_store {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
+    }
+}
+
+/// Persistence for background [`ReportJob`]s — the `report_jobs` table, one
+/// row per queued render, per database (like [`settings_store`]).
+mod job_store {
+    use super::*;
+    use sea_orm::{ConnectionTrait, QueryResult, Statement};
+
+    const COLUMNS: &str = "id, report, format, output, status, file_name, content_type, \
+                           byte_size, error, requested_by, created_at, completed_at";
+
+    pub(super) async fn insert(
+        db: &DatabaseConnection,
+        id: uuid::Uuid,
+        report: &str,
+        format: Option<ReportFormat>,
+        output: ReportOutput,
+        requested_by: Option<&str>,
+        requested_by_id: Option<uuid::Uuid>,
+    ) -> Result<()> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "INSERT INTO report_jobs \
+             (id, report, format, output, status, requested_by, requested_by_id, created_at) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, now())",
+            [
+                id.into(),
+                report.into(),
+                format.map(|f| f.as_str().to_owned()).into(),
+                output.as_str().to_owned().into(),
+                requested_by.map(str::to_owned).into(),
+                requested_by_id.into(),
+            ],
+        );
+        db.execute(stmt).await?;
+        Ok(())
+    }
+
+    pub(super) async fn mark_running(db: &DatabaseConnection, id: uuid::Uuid) -> Result<()> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "UPDATE report_jobs SET status = 'running', started_at = now() WHERE id = $1",
+            [id.into()],
+        );
+        db.execute(stmt).await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn mark_completed(
+        db: &DatabaseConnection,
+        id: uuid::Uuid,
+        file_path: &str,
+        content_type: &str,
+        extension: &str,
+        file_name: &str,
+        byte_size: i64,
+    ) -> Result<()> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "UPDATE report_jobs SET status = 'completed', file_path = $2, content_type = $3, \
+             extension = $4, file_name = $5, byte_size = $6, error = NULL, completed_at = now() \
+             WHERE id = $1",
+            [
+                id.into(),
+                file_path.into(),
+                content_type.into(),
+                extension.into(),
+                file_name.into(),
+                byte_size.into(),
+            ],
+        );
+        db.execute(stmt).await?;
+        Ok(())
+    }
+
+    pub(super) async fn mark_failed(
+        db: &DatabaseConnection,
+        id: uuid::Uuid,
+        error: &str,
+    ) -> Result<()> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "UPDATE report_jobs SET status = 'failed', error = $2, completed_at = now() \
+             WHERE id = $1",
+            [id.into(), error.into()],
+        );
+        db.execute(stmt).await?;
+        Ok(())
+    }
+
+    pub(super) async fn load(
+        db: &DatabaseConnection,
+        id: uuid::Uuid,
+    ) -> Result<Option<ReportJob>> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            &format!("SELECT {COLUMNS} FROM report_jobs WHERE id = $1"),
+            [id.into()],
+        );
+        match db.query_one(stmt).await? {
+            Some(row) => Ok(Some(row_to_job(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(super) async fn list(db: &DatabaseConnection, limit: u64) -> Result<Vec<ReportJob>> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            &format!("SELECT {COLUMNS} FROM report_jobs ORDER BY created_at DESC LIMIT $1"),
+            [(limit as i64).into()],
+        );
+        db.query_all(stmt)
+            .await?
+            .iter()
+            .map(row_to_job)
+            .collect()
+    }
+
+    /// The stored artifact path for a job, if it has one.
+    pub(super) async fn file_path(
+        db: &DatabaseConnection,
+        id: uuid::Uuid,
+    ) -> Result<Option<String>> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT file_path FROM report_jobs WHERE id = $1",
+            [id.into()],
+        );
+        match db.query_one(stmt).await? {
+            Some(row) => Ok(row.try_get::<Option<String>>("", "file_path")?),
+            None => Ok(None),
+        }
+    }
+
+    /// Map a selected row to a [`ReportJob`]; `title` is filled by the engine
+    /// from the registry.
+    fn row_to_job(row: &QueryResult) -> Result<ReportJob> {
+        let output = ReportOutput::parse(&row.try_get::<String>("", "output")?)
+            .unwrap_or_default();
+        Ok(ReportJob {
+            id: row.try_get("", "id")?,
+            report: row.try_get("", "report")?,
+            title: String::new(),
+            format: row
+                .try_get::<Option<String>>("", "format")?
+                .and_then(|s| ReportFormat::parse(&s)),
+            output,
+            status: ReportJobStatus::parse(&row.try_get::<String>("", "status")?),
+            file_name: row.try_get("", "file_name")?,
+            content_type: row.try_get("", "content_type")?,
+            byte_size: row.try_get("", "byte_size")?,
+            error: row.try_get("", "error")?,
+            requested_by: row.try_get("", "requested_by")?,
+            created_at: row.try_get("", "created_at")?,
+            completed_at: row.try_get("", "completed_at")?,
+        })
     }
 }
 
@@ -1468,7 +1769,7 @@ mod typst_backend {
                 muted: "6b7280",
                 rule: "e5e7eb",
                 header_fill: "f8fafc",
-                top_margin: "3.2cm",
+                top_margin: "3.8cm",
                 leading: "0.75em",
                 zebra: true,
             },
@@ -1483,7 +1784,7 @@ mod typst_backend {
                 muted: "6b7280",
                 rule: "d1d5db",
                 header_fill: "ffffff",
-                top_margin: "2.4cm",
+                top_margin: "2.8cm",
                 leading: "0.55em",
                 zebra: false,
             },
@@ -1498,7 +1799,7 @@ mod typst_backend {
                 muted: "4b5563",
                 rule: "9ca3af",
                 header_fill: "f3f4f6",
-                top_margin: "3.4cm",
+                top_margin: "4.4cm",
                 leading: "0.7em",
                 zebra: false,
             },
@@ -1596,73 +1897,207 @@ mod typst_backend {
         s
     }
 
-    fn header(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
-        let company = &doc.company;
-        let mut left = String::new();
-        if let Some(logo) = &company.logo {
-            if let Some(bytes) = base64_decode(&logo.data_base64) {
-                let name = format!("logo.{}", sanitize_ext(&logo.format));
-                assets.push((name.clone(), bytes));
-                left.push_str("#image(");
-                left.push_str(&str_lit(&name));
-                left.push_str(", height: 1.1cm)");
-            }
-        }
-        if left.is_empty() && !company.name.is_empty() {
-            left.push_str("#text(size: ");
-            left.push_str(t.h3);
-            left.push_str(", weight: \"bold\")[");
-            left.push_str(&lit(&company.name));
-            left.push_str("]");
-        }
-
-        let mut right = String::new();
-        right.push_str("#align(right, text(size: ");
-        right.push_str(t.small);
-        right.push_str(", fill: ");
-        right.push_str(&color(t.muted));
-        right.push_str(")[");
-        if company.logo.is_some() && !company.name.is_empty() {
-            right.push_str("#strong[");
-            right.push_str(&lit(&company.name));
-            right.push_str("] \\ ");
-        }
-        if let Some(pin) = &company.tax_pin {
-            right.push_str(&lit(&format!("PIN: {pin}")));
-            right.push_str(" \\ ");
-        }
-        if let Some(vat) = &company.vat_number {
-            right.push_str(&lit(&format!("VAT: {vat}")));
-        }
-        right.push_str("])");
-
-        let mut h = String::new();
-        h.push_str("#block(width: 100%, inset: 8pt, fill: ");
-        h.push_str(&color(t.header_fill));
-        h.push_str(", stroke: (bottom: 0.6pt + ");
-        h.push_str(&color(t.rule));
-        h.push_str("))[#grid(columns: (1fr, 1fr), align: (left + horizon, right + horizon), [");
-        h.push_str(&left);
-        h.push_str("], [");
-        h.push_str(&right);
-        h.push_str("])]");
-        h
+    /// The company logo as a Typst `#image(...)` at the given height, if a
+    /// logo is set; registers the image bytes as a virtual asset.
+    fn logo_markup(
+        company: &CompanyInformation,
+        assets: &mut Vec<(String, Vec<u8>)>,
+        height: &str,
+    ) -> Option<String> {
+        let logo = company.logo.as_ref()?;
+        let bytes = base64_decode(&logo.data_base64)?;
+        let name = format!("logo.{}", sanitize_ext(&logo.format));
+        assets.push((name.clone(), bytes));
+        Some(format!("#image({}, height: {height})", str_lit(&name)))
     }
 
-    fn footer(doc: &Document, t: &Theme) -> String {
-        let mut f = String::new();
-        f.push_str("#block(width: 100%, inset: (top: 6pt), stroke: (top: 0.6pt + ");
-        f.push_str(&color(t.rule));
-        f.push_str("))[#text(size: ");
-        f.push_str(t.small);
-        f.push_str(", fill: ");
-        f.push_str(&color(t.muted));
-        f.push_str(")[#grid(columns: (1fr, 1fr), [");
-        if !doc.company.name.is_empty() {
-            f.push_str(&lit(&doc.company.name));
+    /// The company's contact lines for the header — address (one entry per
+    /// line), phone, email, website — each escaped for markup.
+    fn contact_bits(c: &CompanyInformation) -> Vec<String> {
+        let mut bits = Vec::new();
+        if let Some(addr) = c.address.as_deref().filter(|s| !s.trim().is_empty()) {
+            for line in addr.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                bits.push(lit(line));
+            }
         }
-        f.push_str("], align(right)[#context [Page #counter(page).display() of #counter(page).final().first()]])]]");
-        f
+        if let Some(p) = c.phone.as_deref().filter(|s| !s.trim().is_empty()) {
+            bits.push(lit(&format!("Tel: {}", p.trim())));
+        }
+        if let Some(e) = c.email.as_deref().filter(|s| !s.trim().is_empty()) {
+            bits.push(lit(e.trim()));
+        }
+        if let Some(w) = c.website.as_deref().filter(|s| !s.trim().is_empty()) {
+            bits.push(lit(w.trim()));
+        }
+        bits
+    }
+
+    /// The tax-registration lines (PIN, VAT), each escaped for markup.
+    fn tax_bits(c: &CompanyInformation) -> Vec<String> {
+        let mut bits = Vec::new();
+        if let Some(pin) = c.tax_pin.as_deref().filter(|s| !s.trim().is_empty()) {
+            bits.push(lit(&format!("PIN: {}", pin.trim())));
+        }
+        if let Some(vat) = c.vat_number.as_deref().filter(|s| !s.trim().is_empty()) {
+            bits.push(lit(&format!("VAT: {}", vat.trim())));
+        }
+        bits
+    }
+
+    /// The running header — a per-theme letterhead, so the three formats
+    /// read as distinct stationery rather than the same block recoloured.
+    fn header(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        match doc.format {
+            ReportFormat::Modern => header_modern(doc, t, assets),
+            ReportFormat::Compact => header_compact(doc, t, assets),
+            ReportFormat::Corporate => header_corporate(doc, t, assets),
+        }
+    }
+
+    /// Modern: a soft-filled band, brand (logo over name in the accent
+    /// colour) on the left, a right-aligned contact stack, a bold accent
+    /// underline.
+    fn header_modern(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        let c = &doc.company;
+        let mut left = String::new();
+        if let Some(logo) = logo_markup(c, assets, "1.3cm") {
+            left.push_str(&logo);
+            if !c.name.is_empty() {
+                left.push_str("\n#v(5pt)\n");
+            }
+        }
+        if !c.name.is_empty() {
+            left.push_str(&format!(
+                "#text(size: {}, weight: \"bold\", fill: {})[{}]",
+                t.h2,
+                color(t.accent),
+                lit(&c.name)
+            ));
+        }
+
+        let mut bits = contact_bits(c);
+        bits.extend(tax_bits(c));
+        let right = if bits.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "#align(right + horizon, text(size: {}, fill: {})[{}])",
+                t.small,
+                color(t.muted),
+                bits.join(" \\ ")
+            )
+        };
+
+        format!(
+            "#block(width: 100%, inset: 10pt, radius: 3pt, fill: {}, stroke: (bottom: 1.6pt + {}))\
+             [#grid(columns: (1fr, auto), align: (left + horizon, right + horizon), gutter: 16pt, \
+             [{}], [{}])]",
+            color(t.header_fill),
+            color(t.accent),
+            left,
+            right
+        )
+    }
+
+    /// Compact: a tight single band — small inline logo and name on the
+    /// left, contacts condensed to one middot-separated line on the right,
+    /// a hairline rule. No fill.
+    fn header_compact(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        let c = &doc.company;
+        let mut left = String::new();
+        if let Some(logo) = logo_markup(c, assets, "0.75cm") {
+            left.push_str(&format!("#box(baseline: 30%, {logo}) "));
+        }
+        if !c.name.is_empty() {
+            left.push_str(&format!(
+                "#text(size: {}, weight: \"bold\")[{}]",
+                t.h3,
+                lit(&c.name)
+            ));
+        }
+
+        let mut bits = contact_bits(c);
+        bits.extend(tax_bits(c));
+        let right = if bits.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "#align(right + horizon, text(size: {}, fill: {})[{}])",
+                t.small,
+                color(t.muted),
+                bits.join(" · ")
+            )
+        };
+
+        format!(
+            "#block(width: 100%, inset: (bottom: 4pt), stroke: (bottom: 0.5pt + {}))\
+             [#grid(columns: (1fr, 1fr), align: (left + horizon, right + horizon), [{}], [{}])]",
+            color(t.rule),
+            left,
+            right
+        )
+    }
+
+    /// Corporate: a centred letterhead — logo, name in tracked caps, a
+    /// centred contact line, closed by a double rule. Formal stationery.
+    fn header_corporate(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+        let c = &doc.company;
+        let mut inner = String::new();
+        if let Some(logo) = logo_markup(c, assets, "1.4cm") {
+            inner.push_str(&format!("#align(center)[{logo}]\n#v(5pt)\n"));
+        }
+        if !c.name.is_empty() {
+            inner.push_str(&format!(
+                "#align(center, text(size: {}, weight: \"bold\", tracking: 0.08em, fill: {})[{}])\n",
+                t.h2,
+                color(t.accent),
+                lit(&c.name.to_uppercase())
+            ));
+        }
+        let mut bits = contact_bits(c);
+        bits.extend(tax_bits(c));
+        if !bits.is_empty() {
+            inner.push_str(&format!(
+                "#v(3pt)\n#align(center, text(size: {}, fill: {})[{}])\n",
+                t.small,
+                color(t.muted),
+                bits.join("  ·  ")
+            ));
+        }
+
+        format!(
+            "#block(width: 100%, inset: (bottom: 6pt))[{inner}#v(5pt)\
+             #line(length: 100%, stroke: 1pt + {rule})#v(1.6pt)\
+             #line(length: 100%, stroke: 0.4pt + {rule})]",
+            rule = color(t.rule)
+        )
+    }
+
+    /// The running footer — company name, optional website, and page X of Y.
+    fn footer(doc: &Document, t: &Theme) -> String {
+        let c = &doc.company;
+        let left = if c.name.is_empty() {
+            String::new()
+        } else {
+            lit(&c.name)
+        };
+        let center = c
+            .website
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|w| lit(w.trim()))
+            .unwrap_or_default();
+        format!(
+            "#block(width: 100%, inset: (top: 6pt), stroke: (top: 0.6pt + {rule}))\
+             [#text(size: {small}, fill: {muted})[#grid(columns: (1fr, 1fr, 1fr), \
+             align: (left + horizon, center + horizon, right + horizon), [{left}], [{center}], \
+             [#context [Page #counter(page).display() of #counter(page).final().first()]])]]",
+            rule = color(t.rule),
+            small = t.small,
+            muted = color(t.muted),
+            left = left,
+            center = center
+        )
     }
 
     /// Emit a list of widgets into one content string (for columns/groups).
@@ -2500,6 +2935,48 @@ mod tests {
         assert_eq!(ReportFormat::parse("Compact"), Some(ReportFormat::Compact));
         assert_eq!(ReportFormat::parse("nope"), None);
         assert_eq!(ReportOutput::parse("xlsx"), Some(ReportOutput::Excel));
+    }
+
+    /// The per-theme letterhead must typeset (and export SVG) for every
+    /// format with a fully populated company profile — the new contact
+    /// fields and the distinct header layouts all produce valid Typst.
+    #[cfg(feature = "reporting")]
+    #[test]
+    fn letterhead_renders_for_every_format() {
+        let company = CompanyInformation {
+            name: "Acme Manufacturing Ltd".into(),
+            address: Some("12 Industrial Way\nNairobi 00100\nKenya".into()),
+            email: Some("hello@acme.example".into()),
+            website: Some("www.acme.example".into()),
+            phone: Some("+254 700 000 000".into()),
+            tax_pin: Some("P051234567X".into()),
+            vat_number: Some("0192837465".into()),
+            currency: Some("KES".into()),
+            logo: None,
+        };
+        for format in [
+            ReportFormat::Modern,
+            ReportFormat::Compact,
+            ReportFormat::Corporate,
+        ] {
+            let doc = Document {
+                company: company.clone(),
+                report: Report::new("Quarterly Summary").subtitle("Q2 2026"),
+                title: "Quarterly Summary".into(),
+                format,
+                watermark: Some("DRAFT".into()),
+            };
+            let pdf = typst_backend::TypstRenderer::new()
+                .render(&doc)
+                .unwrap_or_else(|e| panic!("{format:?} header PDF failed: {e}"));
+            assert!(pdf.bytes.starts_with(b"%PDF"), "{format:?} is not a PDF");
+            let pages = typst_backend::render_svg(&doc)
+                .unwrap_or_else(|e| panic!("{format:?} header SVG failed: {e}"));
+            assert!(
+                pages.first().is_some_and(|p| p.trim_start().starts_with("<svg")),
+                "{format:?} preview is not SVG"
+            );
+        }
     }
 
     #[test]
