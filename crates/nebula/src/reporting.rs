@@ -1752,6 +1752,9 @@ mod typst_backend {
         rule: &'static str,
         header_fill: &'static str,
         top_margin: &'static str,
+        /// Gap between the letterhead and the body; a smaller value floats the
+        /// header down from the paper's top edge, giving it breathing room.
+        header_ascent: &'static str,
         leading: &'static str,
         zebra: bool,
     }
@@ -1769,7 +1772,8 @@ mod typst_backend {
                 muted: "6b7280",
                 rule: "e5e7eb",
                 header_fill: "f8fafc",
-                top_margin: "3.8cm",
+                top_margin: "4.2cm",
+                header_ascent: "0.5cm",
                 leading: "0.75em",
                 zebra: true,
             },
@@ -1785,6 +1789,7 @@ mod typst_backend {
                 rule: "d1d5db",
                 header_fill: "ffffff",
                 top_margin: "2.8cm",
+                header_ascent: "0.7cm",
                 leading: "0.55em",
                 zebra: false,
             },
@@ -1799,7 +1804,8 @@ mod typst_backend {
                 muted: "4b5563",
                 rule: "9ca3af",
                 header_fill: "f3f4f6",
-                top_margin: "4.4cm",
+                top_margin: "6.0cm",
+                header_ascent: "0.5cm",
                 leading: "0.7em",
                 zebra: false,
             },
@@ -1849,6 +1855,8 @@ mod typst_backend {
         s.push_str(", margin: (top: ");
         s.push_str(t.top_margin);
         s.push_str(", bottom: 2.4cm, left: 1.8cm, right: 1.8cm)");
+        s.push_str(", header-ascent: ");
+        s.push_str(t.header_ascent);
         s.push_str(", header: [");
         s.push_str(&header(doc, &t, assets));
         s.push_str("]");
@@ -1911,6 +1919,43 @@ mod typst_backend {
         Some(format!("#image({}, height: {height})", str_lit(&name)))
     }
 
+    /// Up to two uppercase initials from the company name, for the monogram
+    /// fallback (e.g. "Acme Manufacturing Ltd" → "AM").
+    fn monogram(name: &str) -> String {
+        name.split_whitespace()
+            .filter_map(|w| w.chars().next())
+            .filter(|c| c.is_alphanumeric())
+            .take(2)
+            .collect::<String>()
+            .to_uppercase()
+    }
+
+    /// The brand mark for the letterhead: the uploaded logo when present,
+    /// otherwise a square accent tile with the company's initials — so every
+    /// report carries a logo. `dim` is the square size, `font` the initials
+    /// size. Empty only when there is no logo *and* no name.
+    fn brand_mark(
+        company: &CompanyInformation,
+        assets: &mut Vec<(String, Vec<u8>)>,
+        dim: &str,
+        font: &str,
+        accent: &str,
+    ) -> String {
+        if let Some(logo) = logo_markup(company, assets, dim) {
+            return logo;
+        }
+        let initials = monogram(&company.name);
+        if initials.is_empty() {
+            return String::new();
+        }
+        format!(
+            "#box(width: {dim}, height: {dim}, radius: 4pt, fill: {fill})\
+             [#align(center + horizon)[#text(fill: white, weight: \"bold\", size: {font})[{init}]]]",
+            fill = color(accent),
+            init = lit(&initials)
+        )
+    }
+
     /// The company's contact lines for the header — address (one entry per
     /// line), phone, email, website — each escaped for markup.
     fn contact_bits(c: &CompanyInformation) -> Vec<String> {
@@ -1960,8 +2005,9 @@ mod typst_backend {
     fn header_modern(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut left = String::new();
-        if let Some(logo) = logo_markup(c, assets, "1.3cm") {
-            left.push_str(&logo);
+        let mark = brand_mark(c, assets, "1.3cm", "15pt", t.accent);
+        if !mark.is_empty() {
+            left.push_str(&mark);
             if !c.name.is_empty() {
                 left.push_str("\n#v(5pt)\n");
             }
@@ -2005,8 +2051,9 @@ mod typst_backend {
     fn header_compact(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut left = String::new();
-        if let Some(logo) = logo_markup(c, assets, "0.75cm") {
-            left.push_str(&format!("#box(baseline: 30%, {logo}) "));
+        let mark = brand_mark(c, assets, "0.75cm", "8pt", t.accent);
+        if !mark.is_empty() {
+            left.push_str(&format!("#box(baseline: 30%)[{mark}] "));
         }
         if !c.name.is_empty() {
             left.push_str(&format!(
@@ -2043,8 +2090,9 @@ mod typst_backend {
     fn header_corporate(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut inner = String::new();
-        if let Some(logo) = logo_markup(c, assets, "1.4cm") {
-            inner.push_str(&format!("#align(center)[{logo}]\n#v(5pt)\n"));
+        let mark = brand_mark(c, assets, "1.1cm", "14pt", t.accent);
+        if !mark.is_empty() {
+            inner.push_str(&format!("#align(center)[{mark}]\n#v(4pt)\n"));
         }
         if !c.name.is_empty() {
             inner.push_str(&format!(
@@ -2054,15 +2102,37 @@ mod typst_backend {
                 lit(&c.name.to_uppercase())
             ));
         }
-        let mut bits = contact_bits(c);
-        bits.extend(tax_bits(c));
-        if !bits.is_empty() {
-            inner.push_str(&format!(
-                "#v(3pt)\n#align(center, text(size: {}, fill: {})[{}])\n",
-                t.small,
-                color(t.muted),
-                bits.join("  ·  ")
-            ));
+        // Two tidy centred lines rather than one long wrapping blob: the
+        // address on one, the remaining contacts + tax ids on the next.
+        let address_line: Vec<String> = c
+            .address
+            .as_deref()
+            .unwrap_or("")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(lit)
+            .collect();
+        let mut detail_line = Vec::new();
+        if let Some(p) = c.phone.as_deref().filter(|s| !s.trim().is_empty()) {
+            detail_line.push(lit(&format!("Tel: {}", p.trim())));
+        }
+        if let Some(e) = c.email.as_deref().filter(|s| !s.trim().is_empty()) {
+            detail_line.push(lit(e.trim()));
+        }
+        if let Some(w) = c.website.as_deref().filter(|s| !s.trim().is_empty()) {
+            detail_line.push(lit(w.trim()));
+        }
+        detail_line.extend(tax_bits(c));
+        for line in [address_line, detail_line] {
+            if !line.is_empty() {
+                inner.push_str(&format!(
+                    "#v(2.5pt)\n#align(center, text(size: {}, fill: {})[{}])\n",
+                    t.small,
+                    color(t.muted),
+                    line.join("  ·  ")
+                ));
+            }
         }
 
         format!(
@@ -2976,6 +3046,17 @@ mod tests {
                 pages.first().is_some_and(|p| p.trim_start().starts_with("<svg")),
                 "{format:?} preview is not SVG"
             );
+            if let Ok(dir) = std::env::var("REPORT_OUT_DIR") {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    format!("{dir}/letterhead-{}.svg", format.as_str()),
+                    pages[0].as_bytes(),
+                );
+                let _ = std::fs::write(
+                    format!("{dir}/letterhead-{}.pdf", format.as_str()),
+                    &pdf.bytes,
+                );
+            }
         }
     }
 
