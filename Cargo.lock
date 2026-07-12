@@ -3208,9 +3208,17 @@ name = "nebula-apps"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "chrono",
  "nebula",
+ "rust_decimal",
+ "sea-orm",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]

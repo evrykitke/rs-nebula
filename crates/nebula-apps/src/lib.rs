@@ -11,6 +11,8 @@
 //! hard rule of no cross-app imports; an app graduates to its own crate
 //! when that boundary needs to be compiler-enforced.
 
+pub mod accounting;
 pub mod workspace;
 
+pub use accounting::AccountingApp;
 pub use workspace::WorkspaceApp;

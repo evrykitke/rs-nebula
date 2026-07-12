@@ -24,7 +24,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-rust_decimal", "with-uuid"] }
 sea-orm-migration = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 chrono-tz = "0.10"
-rust_decimal = { version = "1", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 argon2 = "0.5"
 jsonwebtoken = "9"
 totp-rs = { version = "5", features = ["otpauth"] }
