@@ -167,6 +167,10 @@ async fn register(
             if let Some(code) = &req.currency {
                 state.known_currency(code).await?;
             }
+            // A bad admin account (short password, invalid email) must
+            // fail here, before a tenant — and possibly a whole database
+            // — is provisioned for it.
+            crate::auth::manager::validate_new_user(&admin(None), &state.config)?;
             let tenant = manager
                 .create(NewTenant {
                     display_name: req
@@ -179,11 +183,29 @@ async fn register(
                 })
                 .await?;
             let db = manager.connection_for(&tenant).await?;
-            let user = state
-                .users(Some(db.clone()))
-                .create(admin(Some(tenant.id)))
-                .await?;
-            seed_admin(&db, &registry, Some(tenant.id), user.id).await?;
+            let seeded = async {
+                let user = state
+                    .users(Some(db.clone()))
+                    .create(admin(Some(tenant.id)))
+                    .await?;
+                seed_admin(&db, &registry, Some(tenant.id), user.id).await?;
+                Ok::<_, Error>(user)
+            }
+            .await;
+            let user = match seeded {
+                Ok(user) => user,
+                Err(e) => {
+                    // The tenant exists but its admin never did: remove
+                    // it — and the database cut for it (registration
+                    // never passes a connection string, so one on the row
+                    // is ours) — rather than strand a workspace no one
+                    // can sign into and burn its name.
+                    manager
+                        .remove(&tenant, tenant.connection_string.is_some())
+                        .await;
+                    return Err(e);
+                }
+            };
             let profile: Profile = user.into();
             let recorder = audit.0.with_tenant(Some(tenant.id));
             recorder
@@ -598,18 +620,20 @@ pub struct RefreshRequest {
     responses((status = 200, body = LoginResponse)))]
 async fn refresh(
     State(state): State<AuthState>,
-    tenant: Option<Extension<TenantRef>>,
     db: Option<Extension<DatabaseConnection>>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<LoginResponse>> {
     let users = state.users(db.map(|Extension(d)| d));
     let (user, refresh_token) = users.rotate_refresh_token(&req.refresh_token).await?;
     let access_token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
+    // Named from the user's own row, not the request header — a header
+    // naming the wrong tenant must not mislabel the session it refreshed.
+    let tenant = state.tenant_name_of(user.tenant_id).await?;
     Ok(Json(LoginResponse::Success {
         access_token,
         refresh_token,
         user: user.into(),
-        tenant: tenant.map(|Extension(t)| t.name),
+        tenant,
     }))
 }
 

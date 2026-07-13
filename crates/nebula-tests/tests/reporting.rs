@@ -220,6 +220,16 @@ async fn run_jobs(url: &str, redis_url: &str) -> Result<(), String> {
         }
     }
 
+    // It shows up in the job history (checked before the retention sweep
+    // below deletes it).
+    let history = reporting
+        .jobs(db.as_ref(), 10)
+        .await
+        .map_err(|e| format!("history failed: {e}"))?;
+    if !history.iter().any(|j| j.id == job.id) {
+        return Err("completed job missing from history".into());
+    }
+
     // The retention sweep removes expired jobs and their files: with a
     // cutoff in the future everything just stored is "old".
     let pruned = reporting
@@ -247,15 +257,6 @@ async fn run_jobs(url: &str, redis_url: &str) -> Result<(), String> {
     }
     if reporting.job(db.as_ref(), job.id).await.is_ok() {
         return Err("the pruned job row should be gone".into());
-    }
-
-    // It shows up in the job history.
-    let history = reporting
-        .jobs(db.as_ref(), 10)
-        .await
-        .map_err(|e| format!("history failed: {e}"))?;
-    if !history.iter().any(|j| j.id == job.id) {
-        return Err("completed job missing from history".into());
     }
 
     let _ = std::fs::remove_dir_all(&files_root);

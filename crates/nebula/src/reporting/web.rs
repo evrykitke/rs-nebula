@@ -218,23 +218,38 @@ async fn enqueue_report_job(
     Ok(Json(job))
 }
 
-/// The recent background job history for the tenant.
+/// The recent background job history for the tenant. Jobs for reports
+/// the caller may not view are filtered out — the history must not show
+/// more than `download` would serve (who ran what, failure details).
 async fn list_report_jobs(
     Extension(reporting): Extension<Reporting>,
-    _authz: Authz,
+    authz: Authz,
     db: Option<Extension<DatabaseConnection>>,
 ) -> Result<Json<Vec<ReportJob>>> {
-    Ok(Json(reporting.jobs(db.as_ref().map(|e| &e.0), 50).await?))
+    let jobs = reporting.jobs(db.as_ref().map(|e| &e.0), 50).await?;
+    let mut visible = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        match reporting.required_permission(&job.report) {
+            Some(required) if !authz.is_granted(required).await? => {}
+            _ => visible.push(job),
+        }
+    }
+    Ok(Json(visible))
 }
 
 /// One background job's status — polled by the viewer until `completed`.
+/// Guarded by the report's permission, like `download`.
 async fn get_report_job(
     Extension(reporting): Extension<Reporting>,
-    _authz: Authz,
+    authz: Authz,
     db: Option<Extension<DatabaseConnection>>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<ReportJob>> {
-    Ok(Json(reporting.job(db.as_ref().map(|e| &e.0), id).await?))
+    let job = reporting.job(db.as_ref().map(|e| &e.0), id).await?;
+    if let Some(required) = reporting.required_permission(&job.report) {
+        authz.require(required).await?;
+    }
+    Ok(Json(job))
 }
 
 /// Download a completed job's stored artifact. Served through the app (with

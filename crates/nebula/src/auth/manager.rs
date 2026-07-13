@@ -68,21 +68,7 @@ impl UserManager {
     }
 
     pub async fn create(&self, new: NewUser) -> Result<user::Model> {
-        validate_user_name(&new.user_name)?;
-        validate_email(&new.email)?;
-        if new.password.chars().count() < self.config.password_min_length {
-            return Err(Error::Validation(format!(
-                "password must be at least {} characters",
-                self.config.password_min_length
-            )));
-        }
-        if !new.first_name.trim().is_empty() && new.first_name.len() > 64
-            || !new.last_name.trim().is_empty() && new.last_name.len() > 64
-        {
-            return Err(Error::Validation(
-                "names are limited to 64 characters".into(),
-            ));
-        }
+        validate_new_user(&new, &self.config)?;
 
         let normalized_user_name = normalize(&new.user_name);
         let normalized_email = normalize(&new.email);
@@ -472,6 +458,28 @@ impl UserManager {
             .map(|_| ())
             .map_err(Error::from)
     }
+}
+
+/// The pure field checks of [`UserManager::create`], usable before any
+/// row exists. Registration runs this ahead of provisioning a tenant, so
+/// a bad email or short password fails before a database is cut for it.
+pub(crate) fn validate_new_user(new: &NewUser, config: &AuthConfig) -> Result<()> {
+    validate_user_name(&new.user_name)?;
+    validate_email(&new.email)?;
+    if new.password.chars().count() < config.password_min_length {
+        return Err(Error::Validation(format!(
+            "password must be at least {} characters",
+            config.password_min_length
+        )));
+    }
+    if !new.first_name.trim().is_empty() && new.first_name.len() > 64
+        || !new.last_name.trim().is_empty() && new.last_name.len() > 64
+    {
+        return Err(Error::Validation(
+            "names are limited to 64 characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn hash_token(raw: &str) -> String {

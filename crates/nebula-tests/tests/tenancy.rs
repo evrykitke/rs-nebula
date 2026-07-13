@@ -129,9 +129,6 @@ async fn multitenancy_end_to_end() {
     config.multitenancy.allow_shared_database = true;
     // Room for acme + globex, then the cap trips.
     config.multitenancy.max_tenants = 2;
-    // This test flips is_active with raw SQL, which bypasses the manager's
-    // cache invalidation — resolve fresh every time.
-    config.multitenancy.directory_cache_secs = 0;
 
     let app = Kernel::builder()
         .with_config(config)
@@ -143,7 +140,7 @@ async fn multitenancy_end_to_end() {
         .expect("boot with multitenancy must succeed");
 
     let manager = app.tenants().expect("tenant manager must exist");
-    manager
+    let acme = manager
         .create(NewTenant {
             name: "acme".into(),
             display_name: "Acme Ltd".into(),
@@ -152,7 +149,7 @@ async fn multitenancy_end_to_end() {
         })
         .await
         .expect("shared tenant must be created");
-    manager
+    let globex = manager
         .create(NewTenant {
             name: "globex".into(),
             display_name: "Globex Corp".into(),
@@ -235,13 +232,27 @@ async fn multitenancy_end_to_end() {
     assert_eq!(body["status"], 404);
 
     // Inactive tenant -> 404, indistinguishable from an unknown one so the
-    // header is not an existence oracle.
-    admin
-        .execute_unprepared("UPDATE tenants SET is_active = FALSE WHERE name = 'acme'")
-        .await
-        .unwrap();
+    // header is not an existence oracle. Deactivation goes through the
+    // manager with the directory cache at its default TTL: the previous
+    // requests populated the cache, so this also proves write-through
+    // invalidation — the flip must be visible immediately.
+    manager.set_active(acme.id, false).await.unwrap();
     let (status, _) = get_json(&router, "/whoami", Some("acme")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Reactivation is equally immediate, and for an own-database tenant
+    // deactivation also evicts the pool — resolution afterwards rebuilds
+    // it and lands on the right database.
+    manager.set_active(acme.id, true).await.unwrap();
+    let (status, _) = get_json(&router, "/whoami", Some("acme")).await;
+    assert_eq!(status, StatusCode::OK);
+    manager.set_active(globex.id, false).await.unwrap();
+    let (status, _) = get_json(&router, "/whoami", Some("globex")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    manager.set_active(globex.id, true).await.unwrap();
+    let (status, body) = get_json(&router, "/whoami", Some("globex")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["database"], t2_db_name.as_str());
 }
 
 /// Without `allow_shared_database`, a tenant that would land on the main

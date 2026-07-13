@@ -149,6 +149,34 @@ async fn authentication_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
+    // A bad admin account (short password) fails validation BEFORE the
+    // tenant is created — the name is not burned, so a corrected retry
+    // succeeds. Without the pre-check this stranded an admin-less tenant.
+    let bad_then_good = |password: &str| {
+        serde_json::json!({
+            "tenant_name": "initech",
+            "email": "boss@initech.test",
+            "password": password,
+            "first_name": "I",
+            "last_name": "Nitech",
+        })
+    };
+    let (status, _) = post_json(&router, "/auth/register", None, None, bad_then_good("x")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = post_json(
+        &router,
+        "/auth/register",
+        None,
+        None,
+        bad_then_good("hunter2hunter2"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a failed registration must not burn the tenant name: {body}"
+    );
+
     // -- No tenant header needed: sign-in resolves the tenant from the
     // credentials via the login directory.
     let (status, body) = post_json(

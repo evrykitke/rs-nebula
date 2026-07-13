@@ -183,6 +183,47 @@ impl TenantManager {
             .map_err(Error::from)
     }
 
+    /// Activate or deactivate a tenant. A deactivated tenant resolves
+    /// like an unknown one (404) and its cached connection pool is
+    /// evicted, so its database is released; the directory row and data
+    /// stay put for reactivation.
+    pub async fn set_active(&self, id: Uuid, active: bool) -> Result<tenant::Model> {
+        let tenant = self
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
+        let mut model: tenant::ActiveModel = tenant.into();
+        model.is_active = Set(active);
+        let updated = self.saved(model.update(&self.main).await?).await?;
+        if !active {
+            self.evict_pool(id).await;
+        }
+        Ok(updated)
+    }
+
+    /// Compensation for a registration that failed after the tenant was
+    /// created: delete the directory row (and its cache entries), and —
+    /// when the caller knows the database was provisioned by us, not
+    /// brought by the tenant — drop that database too. Best-effort by
+    /// design: it already runs on an error path.
+    pub async fn remove(&self, tenant: &tenant::Model, drop_provisioned_database: bool) {
+        self.invalidate(&tenant.name).await;
+        self.evict_pool(tenant.id).await;
+        if let Err(e) = tenant::Entity::delete_by_id(tenant.id).exec(&self.main).await {
+            tracing::error!(tenant = %tenant.name, error = %e,
+                "failed to delete a stranded tenant row during compensation");
+            return;
+        }
+        if drop_provisioned_database
+            && let Some(name) = tenant
+                .connection_string
+                .as_deref()
+                .and_then(database_name_of)
+        {
+            self.drop_database(name).await;
+        }
+    }
+
     /// Company-wide two-factor policy: when on, every user of the tenant
     /// must set up an authenticator app before they can sign in.
     pub async fn set_require_two_factor(&self, id: Uuid, required: bool) -> Result<tenant::Model> {
@@ -477,6 +518,19 @@ fn tenant_database_url(base: &str, db_name: &str) -> Result<String> {
         url.push_str(&base[q..]);
     }
     Ok(url)
+}
+
+/// The database a connection string points at — the inverse of
+/// [`tenant_database_url`], for dropping a provisioned database during
+/// compensation. `scheme://authority/dbname[?query]`.
+fn database_name_of(url: &str) -> Option<&str> {
+    let authority_start = url.find("://")? + 3;
+    let path_start = url[authority_start..].find('/')? + authority_start + 1;
+    let name = match url[path_start..].find('?') {
+        Some(q) => &url[path_start..path_start + q],
+        None => &url[path_start..],
+    };
+    (!name.is_empty()).then_some(name)
 }
 
 /// Slugs a tenant may not claim. The slug doubles as a public URL path

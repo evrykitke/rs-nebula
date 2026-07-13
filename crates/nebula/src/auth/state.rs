@@ -79,6 +79,19 @@ impl AuthState {
         Ok((manager, tenant))
     }
 
+    /// The directory name of a user's tenant — for responses that name
+    /// the tenant a session belongs to. Answers from the user's own row,
+    /// never the request header, so it cannot mislabel the session.
+    pub(crate) async fn tenant_name_of(
+        &self,
+        tenant_id: Option<uuid::Uuid>,
+    ) -> Result<Option<String>> {
+        let (Some(manager), Some(id)) = (&self.tenants, tenant_id) else {
+            return Ok(None);
+        };
+        Ok(manager.find_by_id(id).await?.map(|t| t.name))
+    }
+
     /// Validate a currency code against the currency table.
     pub(crate) async fn known_currency(&self, code: &str) -> Result<()> {
         crate::money::currency::Store::new(self.main_db.clone())

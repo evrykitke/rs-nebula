@@ -145,6 +145,18 @@ impl Kernel {
                     "multitenancy is enabled but no database is configured",
                 ));
             };
+            // Registration is unauthenticated and each tenant provisions
+            // a whole database — an uncapped deployment is an open
+            // resource faucet.
+            if self.config.multitenancy.max_tenants == 0
+                && self.config.multitenancy.provision_databases
+            {
+                tracing::warn!(
+                    "multitenancy.max_tenants is 0 (unlimited): anyone who can reach \
+                     /auth/register can provision databases; set a ceiling and \
+                     rate-limit registration in production"
+                );
+            }
             Some(Arc::new(TenantManager::new(
                 db.clone(),
                 self.config.database.clone(),
