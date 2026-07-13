@@ -126,6 +126,12 @@ async fn multitenancy_end_to_end() {
     // database and one given a connection string. Provisioning gets its own
     // test below.
     config.multitenancy.provision_databases = false;
+    config.multitenancy.allow_shared_database = true;
+    // Room for acme + globex, then the cap trips.
+    config.multitenancy.max_tenants = 2;
+    // This test flips is_active with raw SQL, which bypasses the manager's
+    // cache invalidation — resolve fresh every time.
+    config.multitenancy.directory_cache_secs = 0;
 
     let app = Kernel::builder()
         .with_config(config)
@@ -177,6 +183,32 @@ async fn multitenancy_end_to_end() {
             .is_err()
     );
 
+    // Reserved slugs (framework namespaces: /public containers, cache
+    // scopes) cannot be claimed.
+    let reserved = manager
+        .create(NewTenant {
+            name: "reports".into(),
+            display_name: "Sneaky".into(),
+            connection_string: None,
+            default_currency: None,
+        })
+        .await;
+    assert!(matches!(reserved, Err(nebula::Error::Validation(_))));
+
+    // The deployment cap (max_tenants = 2) refuses a third tenant.
+    let capped = manager
+        .create(NewTenant {
+            name: "initech".into(),
+            display_name: "Initech".into(),
+            connection_string: None,
+            default_currency: None,
+        })
+        .await;
+    assert!(
+        matches!(capped, Err(nebula::Error::Validation(_))),
+        "the tenant cap must refuse a third tenant"
+    );
+
     let router = app.router();
 
     // Host context: no tenant, main database.
@@ -202,13 +234,94 @@ async fn multitenancy_end_to_end() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["status"], 404);
 
-    // Inactive tenant -> 403.
+    // Inactive tenant -> 404, indistinguishable from an unknown one so the
+    // header is not an existence oracle.
     admin
         .execute_unprepared("UPDATE tenants SET is_active = FALSE WHERE name = 'acme'")
         .await
         .unwrap();
     let (status, _) = get_json(&router, "/whoami", Some("acme")).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Without `allow_shared_database`, a tenant that would land on the main
+/// database (provisioning off, no explicit connection string) is refused:
+/// business tables have no per-row tenant isolation there, so sharing must
+/// be a deliberate opt-in, never a config accident.
+#[tokio::test]
+async fn refuses_shared_database_tenants_without_opt_in() {
+    let Ok(main_url) = std::env::var("NEBULA_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set NEBULA_TEST_DATABASE_URL to run database tests");
+        return;
+    };
+
+    let admin = db::connect(&DatabaseConfig {
+        url: main_url.as_str().into(),
+        ..DatabaseConfig::default()
+    })
+    .await
+    .expect("must connect to main");
+    let main_db_name: String = {
+        let row = admin
+            .query_one(sea_orm::Statement::from_string(
+                admin.get_database_backend(),
+                "SELECT current_database() AS name",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get("", "name").unwrap()
+    };
+    // A private directory database so this test never races the others.
+    let guard_main = format!("{main_db_name}_guard");
+    admin
+        .execute_unprepared(&format!("DROP DATABASE IF EXISTS {guard_main} WITH (FORCE)"))
+        .await
+        .ok();
+    admin
+        .execute_unprepared(&format!("CREATE DATABASE {guard_main}"))
+        .await
+        .expect("must create the directory database");
+
+    let mut config = Config::default();
+    config.database = DatabaseConfig {
+        url: main_url.replace(&main_db_name, &guard_main).as_str().into(),
+        auto_migrate: true,
+        ..DatabaseConfig::default()
+    };
+    config.multitenancy.enabled = true;
+    config.multitenancy.provision_databases = false;
+    // allow_shared_database stays at its default: false.
+
+    let app = Kernel::builder()
+        .with_config(config)
+        .add_module(WhoAmI)
+        .build()
+        .expect("kernel must build")
+        .init()
+        .await
+        .expect("boot must succeed");
+
+    let refused = app
+        .tenants()
+        .expect("tenant manager must exist")
+        .create(NewTenant {
+            name: "freeloader".into(),
+            display_name: "Freeloader Inc".into(),
+            connection_string: None,
+            default_currency: None,
+        })
+        .await;
+    assert!(
+        matches!(refused, Err(nebula::Error::Validation(_))),
+        "a shared-database tenant must be refused without the opt-in, got {refused:?}"
+    );
+
+    drop(app);
+    admin
+        .execute_unprepared(&format!("DROP DATABASE IF EXISTS {guard_main} WITH (FORCE)"))
+        .await
+        .ok();
 }
 
 /// With `provision_databases` on, creating a tenant cuts and migrates a

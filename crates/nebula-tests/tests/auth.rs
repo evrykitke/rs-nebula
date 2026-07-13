@@ -96,6 +96,7 @@ async fn authentication_end_to_end() {
     config.multitenancy.enabled = true;
     // This test asserts against the main database; no per-tenant database.
     config.multitenancy.provision_databases = false;
+    config.multitenancy.allow_shared_database = true;
     config.auth.jwt_secret = "test-secret-not-for-production".into();
     config.auth.lockout_max_failed = 3;
     let auth_config = config.auth.clone();

@@ -2,9 +2,11 @@
 //!
 //! Reads the tenant header (`multitenancy.header`, default `X-Tenant`).
 //! No header means host context: no tenant, main database. A named
-//! tenant is looked up in the directory — unknown is a 404, inactive a
-//! 403 — and its connection replaces the main one in request extensions,
-//! where [`TenantDb`] and [`CurrentTenant`] pick them up.
+//! tenant is looked up in the directory (through the manager's short-TTL
+//! cache) — unknown and inactive both answer 404, deliberately
+//! indistinguishable so an unauthenticated prober cannot enumerate which
+//! tenants exist — and its connection replaces the main one in request
+//! extensions, where [`TenantDb`] and [`CurrentTenant`] pick them up.
 
 use super::{TenantManager, TenantRef};
 use crate::error::{Error, ProblemDetails};
@@ -29,14 +31,13 @@ pub async fn resolve_tenant(
         return Error::Validation("tenant header is not valid UTF-8".into()).into_response();
     };
 
-    let tenant = match manager.find_by_name(name).await {
-        Ok(Some(tenant)) => tenant,
-        Ok(None) => return Error::NotFound(format!("tenant {name:?}")).into_response(),
+    let tenant = match manager.resolve(name).await {
+        // An inactive tenant answers exactly like an unknown one, so the
+        // unauthenticated header is not an existence oracle.
+        Ok(Some(tenant)) if tenant.is_active => tenant,
+        Ok(_) => return Error::NotFound(format!("tenant {name:?}")).into_response(),
         Err(e) => return e.into_response(),
     };
-    if !tenant.is_active {
-        return Error::Forbidden.into_response();
-    }
 
     let db = match manager.connection_for(&tenant).await {
         Ok(db) => db,

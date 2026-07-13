@@ -78,6 +78,7 @@ pub struct Config {
     pub events: EventsConfig,
     pub files: FilesConfig,
     pub migrations: MigrationsConfig,
+    pub reporting: ReportingConfig,
     pub currencies: Vec<CurrencyConfig>,
 }
 
@@ -98,7 +99,30 @@ impl Default for Config {
             events: EventsConfig::default(),
             files: FilesConfig::default(),
             migrations: MigrationsConfig::default(),
+            reporting: ReportingConfig::default(),
             currencies: Vec::new(),
+        }
+    }
+}
+
+/// Reporting engine settings. Background renders store their artifact on
+/// disk (under `files.private_root`); the retention sweep keeps that
+/// from piling up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReportingConfig {
+    /// Days a background report artifact (and its job row) is kept before
+    /// the pruner deletes it. `0` disables pruning.
+    pub artifact_retention_days: u32,
+    /// How often the artifact pruning sweep runs.
+    pub prune_interval_secs: u64,
+}
+
+impl Default for ReportingConfig {
+    fn default() -> Self {
+        Self {
+            artifact_retention_days: 7,
+            prune_interval_secs: 3600,
         }
     }
 }
@@ -123,21 +147,28 @@ impl Default for MigrationsConfig {
     }
 }
 
-/// Public file storage: uploads land under
+/// File storage. Public uploads land under
 /// `{root}/{tenant-slug}/{id}/{resource}` and the whole root is served
-/// at `/public`.
+/// at `/public`. Private files (report artifacts, anything that must
+/// only leave through a permission-checked handler) live under
+/// `private_root`, which is **never** served directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FilesConfig {
     /// Directory for publicly served files, relative to the working
     /// directory (or absolute).
     pub root: String,
+    /// Directory for private files, relative to the working directory
+    /// (or absolute). Must differ from `root` — anything under `root`
+    /// is reachable without authentication.
+    pub private_root: String,
 }
 
 impl Default for FilesConfig {
     fn default() -> Self {
         Self {
             root: "public".into(),
+            private_root: "private".into(),
         }
     }
 }
@@ -320,6 +351,28 @@ pub struct MultitenancyConfig {
     /// single-tenant deployment, or when every tenant is created with an
     /// explicit `connection_string`.
     pub provision_databases: bool,
+    /// Permit creating tenants that share the main database (no
+    /// provisioned database, no explicit `connection_string`). Off by
+    /// default because shared tenants transparently see each other's
+    /// business data — module tables carry no tenant column. Creating a
+    /// shared tenant without this explicit opt-in is refused.
+    pub allow_shared_database: bool,
+    /// Cap on the number of tenants this deployment will register; `0`
+    /// means unlimited. Registration is an unauthenticated endpoint that
+    /// provisions a whole database, so production deployments should set
+    /// a ceiling (and rate-limit `/auth/register` at the proxy).
+    pub max_tenants: u32,
+    /// Pool size for each tenant's own database connection pool. Kept
+    /// deliberately smaller than `database.max_connections`: with N
+    /// tenants the server may hold up to `N × tenant_max_connections`
+    /// connections.
+    pub tenant_max_connections: u32,
+    /// How long (seconds) a resolved tenant row may be served from the
+    /// in-process directory cache before the main database is asked
+    /// again; `0` disables caching. Writes through the tenant manager
+    /// invalidate immediately; on other instances staleness is bounded
+    /// by this TTL (deactivating a tenant takes effect within it).
+    pub directory_cache_secs: u64,
 }
 
 impl Default for MultitenancyConfig {
@@ -328,6 +381,10 @@ impl Default for MultitenancyConfig {
             enabled: false,
             header: "X-Tenant".into(),
             provision_databases: true,
+            allow_shared_database: false,
+            max_tenants: 0,
+            tenant_max_connections: 5,
+            directory_cache_secs: 15,
         }
     }
 }
@@ -482,6 +539,23 @@ impl Config {
         }
         if self.files.root.trim().is_empty() {
             return Err(ConfigError::Invalid("files.root must not be empty".into()));
+        }
+        if self.files.private_root.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "files.private_root must not be empty".into(),
+            ));
+        }
+        if self.files.private_root.trim() == self.files.root.trim() {
+            return Err(ConfigError::Invalid(
+                "files.private_root must differ from files.root — everything under \
+                 files.root is served without authentication at /public"
+                    .into(),
+            ));
+        }
+        if self.multitenancy.enabled && self.multitenancy.tenant_max_connections == 0 {
+            return Err(ConfigError::Invalid(
+                "multitenancy.tenant_max_connections must be at least 1".into(),
+            ));
         }
         if self.migrations.root.trim().is_empty() {
             return Err(ConfigError::Invalid(

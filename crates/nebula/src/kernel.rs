@@ -377,6 +377,25 @@ impl Kernel {
             );
         }
 
+        // Stored report artifacts expire: sweep old job rows and their
+        // files so the private store never piles up.
+        if self.config.reporting.artifact_retention_days > 0 {
+            let ctx = crate::reporting::PruneJobsContext {
+                reporting: reporting.clone(),
+                database: database.clone(),
+                retention_days: self.config.reporting.artifact_retention_days,
+            };
+            let schedule = crate::audit::pruner::interval_schedule(
+                self.config.reporting.prune_interval_secs,
+            );
+            monitor = monitor.register(
+                WorkerBuilder::new("nebula-report-pruner")
+                    .data(ctx)
+                    .backend(apalis_cron::CronStream::new(schedule))
+                    .build_fn(crate::reporting::prune_jobs_tick),
+            );
+        }
+
         for register in worker_regs {
             monitor = register(monitor);
         }
@@ -486,13 +505,21 @@ impl App {
     pub async fn serve(mut self) -> Result<()> {
         self.start_events();
         let jobs_started = self.start_jobs();
-        // Without the job system the audit pruner falls back to a plain
-        // in-process interval.
-        if !jobs_started && let (Some(db), true) = (&self.database, self.config.audit.enabled) {
-            crate::audit::pruner::spawn(
-                db.clone(),
-                self.tenants.clone(),
-                self.config.audit.clone(),
+        // Without the job system the pruners fall back to plain
+        // in-process intervals.
+        if !jobs_started {
+            if let (Some(db), true) = (&self.database, self.config.audit.enabled) {
+                crate::audit::pruner::spawn(
+                    db.clone(),
+                    self.tenants.clone(),
+                    self.config.audit.clone(),
+                );
+            }
+            crate::reporting::spawn_job_pruner(
+                self.reporting.clone(),
+                self.database.clone(),
+                self.config.reporting.artifact_retention_days,
+                self.config.reporting.prune_interval_secs,
             );
         }
 

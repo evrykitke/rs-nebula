@@ -13,6 +13,7 @@ fn temp_storage() -> (Storage, PathBuf) {
     ));
     let storage = Storage::new(&FilesConfig {
         root: root.to_string_lossy().to_string(),
+        private_root: root.join("_private").to_string_lossy().to_string(),
     });
     (storage, root)
 }
@@ -31,7 +32,7 @@ async fn stores_under_namespace_id_resource() {
     assert_eq!(segments[0], "acme");
     assert_eq!(segments[1].len(), 10, "a 10-character upload id");
     assert_eq!(segments[2], "Quarterly-Report-final.PDF", "sanitized, meaning kept");
-    assert_eq!(first.url, format!("/public/{}", first.path));
+    assert_eq!(first.url.as_deref(), Some(format!("/public/{}", first.path).as_str()));
     assert_eq!(std::fs::read(root.join(&first.path)).unwrap(), b"pdf bytes");
 
     // Same resource again: a fresh id, never an overwrite.
@@ -43,6 +44,23 @@ async fn stores_under_namespace_id_resource() {
     assert!(!root.join(&first.path).exists());
     assert!(!root.join(segments[0]).join(segments[1]).exists(), "empty id dir is cleaned up");
     assert!(!container.remove(&first.path).await.unwrap(), "second removal finds nothing");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn private_files_live_outside_the_public_root() {
+    let (storage, root) = temp_storage();
+
+    let container = storage.private_container("acme").unwrap();
+    let stored = container.store("trial-balance.pdf", b"%PDF-secret").await.unwrap();
+
+    // No URL: a private file is not addressable, it leaves only through a
+    // permission-checked handler.
+    assert_eq!(stored.url, None);
+    // On disk under the private root, absent from the served public tree.
+    assert!(root.join("_private").join(&stored.path).exists());
+    assert!(!root.join(&stored.path).exists());
 
     let _ = std::fs::remove_dir_all(&root);
 }

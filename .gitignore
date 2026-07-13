@@ -7,8 +7,9 @@
 # Machine-local cargo config (e.g. a custom build.target-dir)
 .cargo/
 
-# Runtime file storage (tenant uploads) — data, not source
+# Runtime file storage (tenant uploads, private report artifacts) — data, not source
 /public/
+/private/
 
 # Runtime server logs (logging.file, e.g. var/dev.log)
 /var/

@@ -19,10 +19,11 @@ use crate::db;
 use crate::error::{Error, Result};
 use crate::kernel::Migrations;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, Set,
 };
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -96,6 +97,11 @@ pub struct TenantManager {
     /// against a freshly provisioned tenant database.
     migrations: Migrations,
     pools: RwLock<HashMap<Uuid, DatabaseConnection>>,
+    /// Short-TTL cache of `name → row` for request resolution, so the
+    /// per-request directory lookup does not hit the main database every
+    /// time. Writes through this manager invalidate immediately; other
+    /// instances converge within `multitenancy.directory_cache_secs`.
+    directory: RwLock<HashMap<String, (tenant::Model, Instant)>>,
 }
 
 impl TenantManager {
@@ -111,6 +117,7 @@ impl TenantManager {
             config,
             migrations,
             pools: RwLock::new(HashMap::new()),
+            directory: RwLock::new(HashMap::new()),
         }
     }
 
@@ -130,6 +137,45 @@ impl TenantManager {
             .map_err(Error::from)
     }
 
+    /// [`find_by_name`] through the short-TTL directory cache — the
+    /// per-request resolution path. Only positive hits are cached (an
+    /// unknown name stays a directory query, so a freshly created tenant
+    /// is visible immediately).
+    ///
+    /// [`find_by_name`]: TenantManager::find_by_name
+    pub async fn resolve(&self, name: &str) -> Result<Option<tenant::Model>> {
+        let ttl = Duration::from_secs(self.config.directory_cache_secs);
+        if !ttl.is_zero()
+            && let Some((tenant, at)) = self.directory.read().await.get(name)
+            && at.elapsed() < ttl
+        {
+            return Ok(Some(tenant.clone()));
+        }
+        let found = self.find_by_name(name).await?;
+        if !ttl.is_zero()
+            && let Some(tenant) = &found
+        {
+            self.directory
+                .write()
+                .await
+                .insert(name.to_string(), (tenant.clone(), Instant::now()));
+        }
+        Ok(found)
+    }
+
+    /// Drop a tenant's cached directory entry — called after every write
+    /// through this manager so this instance never serves a stale row.
+    async fn invalidate(&self, name: &str) {
+        self.directory.write().await.remove(name);
+    }
+
+    /// Drop a tenant's cached connection pool. Call after changing where
+    /// a tenant's data lives (its `connection_string`) or deactivating
+    /// it; the next request builds a fresh pool from the directory row.
+    pub async fn evict_pool(&self, tenant_id: Uuid) {
+        self.pools.write().await.remove(&tenant_id);
+    }
+
     pub async fn find_by_id(&self, id: Uuid) -> Result<Option<tenant::Model>> {
         tenant::Entity::find_by_id(id)
             .one(&self.main)
@@ -146,7 +192,14 @@ impl TenantManager {
             .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
         let mut active: tenant::ActiveModel = tenant.into();
         active.require_two_factor = Set(required);
-        active.update(&self.main).await.map_err(Error::from)
+        self.saved(active.update(&self.main).await?).await
+    }
+
+    /// Post-write bookkeeping shared by every tenant mutation: drop the
+    /// stale directory-cache entry, then hand the row back.
+    async fn saved(&self, updated: tenant::Model) -> Result<tenant::Model> {
+        self.invalidate(&updated.name).await;
+        Ok(updated)
     }
 
     /// Tenant override of the audit retention window; `None` reverts to
@@ -159,7 +212,7 @@ impl TenantManager {
             .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
         let mut active: tenant::ActiveModel = tenant.into();
         active.audit_retention_days = Set(days);
-        active.update(&self.main).await.map_err(Error::from)
+        self.saved(active.update(&self.main).await?).await
     }
 
     /// Replace the editable company-profile fields. Currency validity is
@@ -182,7 +235,7 @@ impl TenantManager {
         active.email = Set(profile.email);
         active.website = Set(profile.website);
         active.phone = Set(profile.phone);
-        active.update(&self.main).await.map_err(Error::from)
+        self.saved(active.update(&self.main).await?).await
     }
 
     /// Record where the uploaded company logo lives, relative to the
@@ -194,7 +247,7 @@ impl TenantManager {
             .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
         let mut active: tenant::ActiveModel = tenant.into();
         active.logo_path = Set(path);
-        active.update(&self.main).await.map_err(Error::from)
+        self.saved(active.update(&self.main).await?).await
     }
 
     pub async fn find_all(&self) -> Result<Vec<tenant::Model>> {
@@ -211,6 +264,33 @@ impl TenantManager {
                 "tenant {:?} already exists",
                 new.name
             )));
+        }
+        // Registration is unauthenticated and a tenant is expensive (a
+        // whole database), so deployments can cap how many exist.
+        if self.config.max_tenants > 0 {
+            let count = tenant::Entity::find().count(&self.main).await?;
+            if count >= self.config.max_tenants as u64 {
+                return Err(Error::Validation(format!(
+                    "this deployment is limited to {} tenants (multitenancy.max_tenants)",
+                    self.config.max_tenants
+                )));
+            }
+        }
+        // A tenant without its own database transparently shares every
+        // business table with the other shared tenants — module rows
+        // carry no tenant column. That must be a deliberate deployment
+        // decision, never a config accident.
+        if new.connection_string.is_none()
+            && !self.config.provision_databases
+            && !self.config.allow_shared_database
+        {
+            return Err(Error::Validation(
+                "refusing to create a tenant on the shared main database: business \
+                 modules have no per-row tenant isolation there. Enable \
+                 multitenancy.provision_databases (recommended), pass an explicit \
+                 connection_string, or opt in with multitenancy.allow_shared_database"
+                    .into(),
+            ));
         }
 
         // Provision a dedicated database when configured, unless the
@@ -307,7 +387,10 @@ impl TenantManager {
     }
 
     /// The connection to use for this tenant: its own pool (created
-    /// lazily, cached by tenant id) or the shared main database.
+    /// lazily, cached by tenant id) or the shared main database. Tenant
+    /// pools are sized by `multitenancy.tenant_max_connections`, not the
+    /// main pool's `database.max_connections` — with many tenants the
+    /// totals multiply.
     pub async fn connection_for(&self, tenant: &tenant::Model) -> Result<DatabaseConnection> {
         let Some(url) = tenant
             .connection_string
@@ -323,11 +406,20 @@ impl TenantManager {
 
         let db = db::connect(&DatabaseConfig {
             url: url.into(),
+            max_connections: self.config.tenant_max_connections.max(1),
+            min_connections: 0,
             ..self.db_config.clone()
         })
         .await?;
-        self.pools.write().await.insert(tenant.id, db.clone());
-        Ok(db)
+        // Two first requests may race here; the loser's fresh pool is
+        // dropped (closing it) and everyone converges on one.
+        Ok(self
+            .pools
+            .write()
+            .await
+            .entry(tenant.id)
+            .or_insert(db)
+            .clone())
     }
 }
 
@@ -387,6 +479,16 @@ fn tenant_database_url(base: &str, db_name: &str) -> Result<String> {
     Ok(url)
 }
 
+/// Slugs a tenant may not claim. The slug doubles as a public URL path
+/// (`/public/{slug}/…`), a cache namespace and a database-name prefix,
+/// so names the framework (or a web deployment) uses for itself would
+/// collide — `reports` is the host's own artifact container, `global`
+/// the host cache scope.
+const RESERVED_NAMES: &[&str] = &[
+    "admin", "api", "app", "auth", "global", "health", "host", "nebula", "public", "report",
+    "reports", "swagger-ui", "system", "tenant", "tenants", "www",
+];
+
 fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
@@ -396,6 +498,11 @@ fn validate_name(name: &str) -> Result<()> {
     if !ok {
         return Err(Error::Validation(format!(
             "tenant name must be 1-64 lowercase letters, digits or dashes, got {name:?}"
+        )));
+    }
+    if RESERVED_NAMES.contains(&name) {
+        return Err(Error::Validation(format!(
+            "tenant name {name:?} is reserved"
         )));
     }
     Ok(())

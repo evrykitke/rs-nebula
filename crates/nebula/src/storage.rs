@@ -1,8 +1,13 @@
-//! Public file storage — where uploads live and how they are addressed.
+//! File storage — where uploads live and how they are addressed.
 //!
-//! Files sit on the local filesystem under `files.root` and are served
-//! read-only at `/public`. Every upload follows one convention:
-//! `{files.root}/{namespace}/{id}/{resource}` — for tenant files the
+//! Two roots, one layout. **Public** files sit under `files.root` and are
+//! served read-only at `/public` — anything stored there is reachable
+//! without authentication, so it is only for genuinely public assets
+//! (a company logo). **Private** files sit under `files.private_root`,
+//! which is never mounted: they leave the server only through a handler
+//! that has checked authentication and permissions (report artifacts).
+//! Both follow one convention:
+//! `{root}/{namespace}/{id}/{resource}` — for tenant files the
 //! namespace is the tenant's slug, the id is a fresh random key per
 //! upload (no collisions, and a new URL on every re-upload so cached
 //! copies never go stale), and the resource keeps its sanitized
@@ -29,18 +34,20 @@ use crate::tenancy::TenantRef;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// The application's public file store, created by the kernel from
-/// `files.root` and shared with every module (and, as a request
+/// The application's file store, created by the kernel from `files.root`
+/// / `files.private_root` and shared with every module (and, as a request
 /// extension, with application handlers).
 #[derive(Clone, Debug)]
 pub struct Storage {
-    root: Arc<PathBuf>,
+    public_root: Arc<PathBuf>,
+    private_root: Arc<PathBuf>,
 }
 
 impl Storage {
     pub fn new(config: &FilesConfig) -> Self {
         Self {
-            root: Arc::new(PathBuf::from(&config.root)),
+            public_root: Arc::new(PathBuf::from(&config.root)),
+            private_root: Arc::new(PathBuf::from(&config.private_root)),
         }
     }
 
@@ -49,8 +56,20 @@ impl Storage {
     /// registration, so this cannot fail.
     pub fn tenant(&self, tenant: &TenantRef) -> Container {
         Container {
-            root: self.root.clone(),
+            root: self.public_root.clone(),
             namespace: tenant.name.clone(),
+            public: true,
+        }
+    }
+
+    /// The container for a tenant's **private** files — never served at
+    /// `/public`; the bytes leave only through a permission-checked
+    /// handler (report artifacts and the like).
+    pub fn private_tenant(&self, tenant: &TenantRef) -> Container {
+        Container {
+            root: self.private_root.clone(),
+            namespace: tenant.name.clone(),
+            public: false,
         }
     }
 
@@ -58,55 +77,106 @@ impl Storage {
     /// single-tenant deployments). Namespaces follow the tenant-name
     /// shape: 1-64 lowercase letters, digits or dashes.
     pub fn container(&self, namespace: &str) -> Result<Container> {
-        let ok = !namespace.is_empty()
-            && namespace.len() <= 64
-            && namespace
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-        if !ok {
-            return Err(Error::Validation(format!(
-                "a storage namespace must be 1-64 lowercase letters, digits or dashes, got {namespace:?}"
-            )));
-        }
+        validate_namespace(namespace)?;
         Ok(Container {
-            root: self.root.clone(),
+            root: self.public_root.clone(),
             namespace: namespace.to_string(),
+            public: true,
         })
     }
 
-    /// Delete a stored file by the root-relative path a previous store
-    /// answered (also accepts paths from before the `{slug}/{id}/…`
-    /// convention). Answers whether a file was actually removed; the
-    /// upload's id directory is cleaned up when it ends up empty.
-    pub(crate) async fn remove(&self, path: &str) -> Result<bool> {
-        validate_relative(path)?;
-        let target = self.root.join(path);
-        match tokio::fs::remove_file(&target).await {
-            Ok(()) => {
-                if let Some(dir) = target.parent()
-                    && dir != self.root.as_path()
-                {
-                    let _ = tokio::fs::remove_dir(dir).await;
-                }
-                Ok(true)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(Error::internal(format!(
-                "could not remove the stored file {path:?}: {e}"
-            ))),
-        }
+    /// Like [`Storage::container`], but under the private root.
+    pub fn private_container(&self, namespace: &str) -> Result<Container> {
+        validate_namespace(namespace)?;
+        Ok(Container {
+            root: self.private_root.clone(),
+            namespace: namespace.to_string(),
+            public: false,
+        })
     }
 
-    /// Read a stored file's bytes by its root-relative path — for embedding
-    /// stored assets (e.g. a tenant logo) into generated documents. The
-    /// same traversal guard as [`Storage::remove`] applies.
+    /// Delete a stored **public** file by the root-relative path a
+    /// previous store answered (also accepts paths from before the
+    /// `{slug}/{id}/…` convention). Answers whether a file was actually
+    /// removed; the upload's id directory is cleaned up when it ends up
+    /// empty.
+    pub(crate) async fn remove(&self, path: &str) -> Result<bool> {
+        validate_relative(path)?;
+        remove_under(&self.public_root, path).await
+    }
+
+    /// Delete a stored **private** file. Falls back to the public root
+    /// for artifacts stored before the private root existed.
+    pub(crate) async fn remove_private(&self, path: &str) -> Result<bool> {
+        validate_relative(path)?;
+        if remove_under(&self.private_root, path).await? {
+            return Ok(true);
+        }
+        remove_under(&self.public_root, path).await
+    }
+
+    /// Read a stored **public** file's bytes by its root-relative path —
+    /// for embedding stored assets (e.g. a tenant logo) into generated
+    /// documents. The same traversal guard as [`Storage::remove`] applies.
     pub(crate) async fn read(&self, path: &str) -> Result<Vec<u8>> {
         validate_relative(path)?;
-        let target = self.root.join(path);
+        let target = self.public_root.join(path);
         tokio::fs::read(&target)
             .await
             .map_err(|e| Error::internal(format!("could not read the stored file {path:?}: {e}")))
     }
+
+    /// Read a stored **private** file's bytes. Falls back to the public
+    /// root so artifacts stored before the private root existed still
+    /// download.
+    pub(crate) async fn read_private(&self, path: &str) -> Result<Vec<u8>> {
+        validate_relative(path)?;
+        match tokio::fs::read(self.private_root.join(path)).await {
+            Ok(bytes) => Ok(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::read(self.public_root.join(path)).await.map_err(|e| {
+                    Error::internal(format!("could not read the stored file {path:?}: {e}"))
+                })
+            }
+            Err(e) => Err(Error::internal(format!(
+                "could not read the stored file {path:?}: {e}"
+            ))),
+        }
+    }
+}
+
+/// Delete `{root}/{path}` and, when it ends up empty, the upload's id
+/// directory. Answers whether a file was actually removed.
+async fn remove_under(root: &std::path::Path, path: &str) -> Result<bool> {
+    let target = root.join(path);
+    match tokio::fs::remove_file(&target).await {
+        Ok(()) => {
+            if let Some(dir) = target.parent()
+                && dir != root
+            {
+                let _ = tokio::fs::remove_dir(dir).await;
+            }
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Error::internal(format!(
+            "could not remove the stored file {path:?}: {e}"
+        ))),
+    }
+}
+
+fn validate_namespace(namespace: &str) -> Result<()> {
+    let ok = !namespace.is_empty()
+        && namespace.len() <= 64
+        && namespace
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !ok {
+        return Err(Error::Validation(format!(
+            "a storage namespace must be 1-64 lowercase letters, digits or dashes, got {namespace:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// A namespaced slice of the store; hand one to whatever writes files.
@@ -114,6 +184,7 @@ impl Storage {
 pub struct Container {
     root: Arc<PathBuf>,
     namespace: String,
+    public: bool,
 }
 
 impl Container {
@@ -132,7 +203,7 @@ impl Container {
             .map_err(|e| Error::internal(format!("could not store {resource:?}: {e}")))?;
         let path = format!("{}/{id}/{resource}", self.namespace);
         Ok(StoredFile {
-            url: format!("/public/{path}"),
+            url: self.public.then(|| format!("/public/{path}")),
             path,
         })
     }
@@ -152,11 +223,8 @@ impl Container {
                 self.namespace
             )));
         }
-        Storage {
-            root: self.root.clone(),
-        }
-        .remove(path)
-        .await
+        validate_relative(path)?;
+        remove_under(&self.root, path).await
     }
 }
 
@@ -165,8 +233,9 @@ impl Container {
 pub struct StoredFile {
     /// Root-relative: `{namespace}/{id}/{resource}` — what to persist.
     pub path: String,
-    /// Where it is served: `/public/{path}`.
-    pub url: String,
+    /// Where it is served, for public files: `/public/{path}`. `None`
+    /// for private files, which have no direct URL.
+    pub url: Option<String>,
 }
 
 /// Random 10-character lowercase key — the per-upload directory.

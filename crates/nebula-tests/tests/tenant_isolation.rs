@@ -78,6 +78,7 @@ async fn a_token_cannot_be_spent_in_another_tenant() {
     // The hostile case: both tenants share the main database, so the token
     // check is the *only* thing keeping them apart.
     config.multitenancy.provision_databases = false;
+    config.multitenancy.allow_shared_database = true;
     config.auth.jwt_secret = "test-secret-not-for-production".into();
 
     let app = Kernel::builder()

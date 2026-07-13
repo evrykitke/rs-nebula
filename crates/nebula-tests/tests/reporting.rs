@@ -118,6 +118,8 @@ async fn run_jobs(url: &str, redis_url: &str) -> Result<(), String> {
     config.jobs.enabled = true;
     config.redis.url = redis_url.into();
     config.files.root = files_root.to_string_lossy().into_owned();
+    let private_root = files_root.join("_private");
+    config.files.private_root = private_root.to_string_lossy().into_owned();
 
     let mut app = Kernel::builder()
         .with_config(config)
@@ -194,14 +196,57 @@ async fn run_jobs(url: &str, redis_url: &str) -> Result<(), String> {
         return Err(format!("unexpected file name: {:?}", finished.file_name));
     }
 
-    // The artifact really landed on disk and is a PDF of the recorded size.
-    let stored = find_artifact(&files_root, ".pdf").ok_or("no stored artifact on disk")?;
+    // The artifact landed in the PRIVATE store (financial data must never
+    // sit under the unauthenticated /public root) and is a PDF of the
+    // recorded size.
+    let stored =
+        find_artifact(&private_root, ".pdf").ok_or("no stored artifact in the private root")?;
     let bytes = std::fs::read(&stored).map_err(|e| format!("read artifact: {e}"))?;
     if !bytes.starts_with(b"%PDF-") {
         return Err("stored artifact is not a PDF".into());
     }
     if bytes.len() as i64 != finished.byte_size.unwrap_or(-1) {
         return Err("stored size disagrees with the recorded byte_size".into());
+    }
+    // ...and the served /public tree holds no copy of it. (The private root
+    // nests under files_root here purely for test cleanup; in a deployment
+    // they are siblings. Skip the nested private dir when sweeping.)
+    for ns in std::fs::read_dir(&files_root).map_err(|e| e.to_string())?.flatten() {
+        if ns.path() == private_root {
+            continue;
+        }
+        if find_artifact(&ns.path(), ".pdf").is_some() || ns.path().to_string_lossy().ends_with(".pdf") {
+            return Err("a report artifact leaked into the public files root".into());
+        }
+    }
+
+    // The retention sweep removes expired jobs and their files: with a
+    // cutoff in the future everything just stored is "old".
+    let pruned = reporting
+        .prune_jobs(db.as_ref(), 1)
+        .await
+        .map_err(|e| format!("prune failed: {e}"))?;
+    if pruned != 0 {
+        return Err("nothing should be pruned inside the retention window".into());
+    }
+    sea_orm::ConnectionTrait::execute_unprepared(
+        db.as_ref().ok_or("db must exist")?,
+        "UPDATE report_jobs SET created_at = created_at - INTERVAL '10 days'",
+    )
+    .await
+    .map_err(|e| format!("backdating jobs failed: {e}"))?;
+    let pruned = reporting
+        .prune_jobs(db.as_ref(), 7)
+        .await
+        .map_err(|e| format!("prune failed: {e}"))?;
+    if pruned == 0 {
+        return Err("backdated jobs should have been pruned".into());
+    }
+    if find_artifact(&private_root, ".pdf").is_some() {
+        return Err("the pruned artifact should be gone from disk".into());
+    }
+    if reporting.job(db.as_ref(), job.id).await.is_ok() {
+        return Err("the pruned job row should be gone".into());
     }
 
     // It shows up in the job history.

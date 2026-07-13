@@ -938,6 +938,60 @@ pub(crate) async fn run_report_job(
     ctx.reporting.run_job(ctx.database.as_ref(), job).await
 }
 
+/// The cron tick when the artifact pruner runs as an apalis worker.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PruneJobsTick;
+
+/// Worker state for [`prune_jobs_tick`].
+#[derive(Clone)]
+pub(crate) struct PruneJobsContext {
+    pub reporting: Reporting,
+    pub database: Option<DatabaseConnection>,
+    pub retention_days: u32,
+}
+
+pub(crate) async fn prune_jobs_tick(
+    _tick: PruneJobsTick,
+    ctx: apalis::prelude::Data<PruneJobsContext>,
+) -> Result<()> {
+    let deleted = ctx
+        .reporting
+        .prune_jobs(ctx.database.as_ref(), ctx.retention_days)
+        .await?;
+    if deleted > 0 {
+        tracing::info!(deleted, "pruned expired report jobs and artifacts");
+    }
+    Ok(())
+}
+
+/// The plain-interval fallback when the job system is off: same sweep,
+/// spawned by `App::serve` alongside the audit pruner. Failures are
+/// logged and the loop keeps going.
+pub(crate) fn spawn_job_pruner(
+    reporting: Reporting,
+    database: Option<DatabaseConnection>,
+    retention_days: u32,
+    interval_secs: u64,
+) {
+    if retention_days == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(60)));
+        loop {
+            interval.tick().await;
+            match reporting.prune_jobs(database.as_ref(), retention_days).await {
+                Ok(0) => {}
+                Ok(deleted) => {
+                    tracing::info!(deleted, "pruned expired report jobs and artifacts")
+                }
+                Err(e) => tracing::error!(error = %e, "report artifact pruning pass failed"),
+            }
+        }
+    });
+}
+
 /// Flatten a built document's tables into the interactive datatable payload.
 fn tables_of(doc: &Document) -> ReportTables {
     let mut tables = Vec::new();
@@ -1309,8 +1363,68 @@ impl Reporting {
         let path = job_store::file_path(conn, id)
             .await?
             .ok_or_else(|| Error::internal("a completed report job has no stored artifact"))?;
-        let bytes = self.inner.storage.read(&path).await?;
+        let bytes = self.inner.storage.read_private(&path).await?;
         Ok((job, bytes))
+    }
+
+    /// One pruning pass over one database: delete report jobs created
+    /// before `cutoff`, removing each stored artifact first. Old rows
+    /// with no artifact (failed, or never completed) are dropped too.
+    /// Answers the number of jobs deleted.
+    async fn prune_jobs_on(
+        &self,
+        db: &DatabaseConnection,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64> {
+        let mut deleted = 0;
+        for (id, path) in job_store::expired(db, cutoff).await? {
+            if let Some(path) = path.as_deref().filter(|p| !p.is_empty())
+                && let Err(e) = self.inner.storage.remove_private(path).await
+            {
+                // Leave the row so the artifact is retried next pass
+                // rather than orphaned on disk.
+                tracing::warn!(job = %id, path = %path, error = %e,
+                    "could not remove an expired report artifact; keeping the job row");
+                continue;
+            }
+            job_store::delete(db, id).await?;
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
+
+    /// Prune expired background report jobs and their stored artifacts
+    /// everywhere: the main database plus every active tenant's own
+    /// database (tenants sharing the main database ride on the main
+    /// pass). Called on an interval by the kernel; `retention_days == 0`
+    /// disables pruning. Answers the number of jobs deleted.
+    pub async fn prune_jobs(
+        &self,
+        main_db: Option<&DatabaseConnection>,
+        retention_days: u32,
+    ) -> Result<u64> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+        let mut deleted = 0;
+        if let Some(db) = main_db {
+            deleted += self.prune_jobs_on(db, cutoff).await?;
+        }
+        if let Some(manager) = &self.inner.tenants {
+            for tenant in manager.find_all().await? {
+                let has_own_db = tenant
+                    .connection_string
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty());
+                if !tenant.is_active || !has_own_db {
+                    continue;
+                }
+                let db = manager.connection_for(&tenant).await?;
+                deleted += self.prune_jobs_on(&db, cutoff).await?;
+            }
+        }
+        Ok(deleted)
     }
 
     /// Execute a queued render off the request thread (the worker body):
@@ -1353,9 +1467,12 @@ impl Reporting {
         match self.render(&cx, &job.report, job.format, job.output).await {
             Ok(rendered) => {
                 let resource = format!("{}.{}", job.report, rendered.extension);
+                // Private storage: an artifact may hold financial data, so
+                // it must only leave through the permission-checked
+                // download endpoint — never the unauthenticated `/public`.
                 let container = match &tenant {
-                    Some(t) => self.inner.storage.tenant(t),
-                    None => self.inner.storage.container("reports")?,
+                    Some(t) => self.inner.storage.private_tenant(t),
+                    None => self.inner.storage.private_container("reports")?,
                 };
                 let stored = container.store(&resource, &rendered.bytes).await?;
                 job_store::mark_completed(
@@ -1612,6 +1729,39 @@ mod job_store {
             .iter()
             .map(row_to_job)
             .collect()
+    }
+
+    /// Jobs created before `cutoff` — id and stored artifact path — for
+    /// the retention pruner.
+    pub(super) async fn expired(
+        db: &DatabaseConnection,
+        cutoff: DateTime<Utc>,
+    ) -> Result<Vec<(uuid::Uuid, Option<String>)>> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT id, file_path FROM report_jobs WHERE created_at < $1",
+            [cutoff.into()],
+        );
+        db.query_all(stmt)
+            .await?
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<uuid::Uuid>("", "id")?,
+                    row.try_get::<Option<String>>("", "file_path")?,
+                ))
+            })
+            .collect()
+    }
+
+    pub(super) async fn delete(db: &DatabaseConnection, id: uuid::Uuid) -> Result<()> {
+        let stmt = Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "DELETE FROM report_jobs WHERE id = $1",
+            [id.into()],
+        );
+        db.execute(stmt).await?;
+        Ok(())
     }
 
     /// The stored artifact path for a job, if it has one.
