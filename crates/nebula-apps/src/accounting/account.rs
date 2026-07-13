@@ -196,6 +196,23 @@ impl Store {
                     "a sub-account must share its parent's currency".into(),
                 ));
             }
+            if parent.account_type != new.account_type.as_str() {
+                return Err(Error::Validation(
+                    "a sub-account must share its parent's account type".into(),
+                ));
+            }
+            // A parent with children is a header, and headers never carry
+            // postings — refuse to graft children under a posted account.
+            let parent_postings = super::journal::posting::Entity::find()
+                .filter(super::journal::posting::Column::AccountId.eq(parent_id))
+                .count(&self.db)
+                .await?;
+            if parent_postings > 0 {
+                return Err(Error::Validation(format!(
+                    "account {} already has postings and cannot become a header account",
+                    parent.code
+                )));
+            }
         }
         let now = chrono::Utc::now();
         ActiveModel {
@@ -282,6 +299,16 @@ impl Store {
         if children > 0 {
             return Err(Error::Validation(
                 "account has sub-accounts and cannot be deleted".into(),
+            ));
+        }
+        let tax_codes = super::tax::Entity::find()
+            .filter(super::tax::Column::AccountId.eq(id))
+            .count(&self.db)
+            .await?;
+        if tax_codes > 0 {
+            return Err(Error::Validation(
+                "account is linked to a tax code and cannot be deleted; unlink the tax code first"
+                    .into(),
             ));
         }
         Entity::delete_by_id(id).exec(&self.db).await?;

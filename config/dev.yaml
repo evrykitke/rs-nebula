@@ -11,6 +11,10 @@ server:
 
 multitenancy:
   enabled: true
+  # Each tenant gets its own database ({slug}-{key}). This is the default;
+  # it is spelled out here because a module's rows carry no tenant column —
+  # a tenant's isolation is the database it is handed.
+  provision_databases: true
 
 # Workers connect through redis.url (docker compose up -d).
 jobs:

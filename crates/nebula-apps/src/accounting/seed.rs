@@ -6,9 +6,10 @@
 //! so other modules post to it without configuration; a business that
 //! cares can rename, deactivate or extend the chart freely.
 //!
-//! Seeding is idempotent — it does nothing if the chart already has system
-//! accounts — so it is safe to run on tenant creation and again on every
-//! boot rollout.
+//! Seeding is idempotent *per account and tax code*: each seeded row is
+//! inserted only when its role (system key, or code for headers) is still
+//! missing. Running again on every boot rollout is therefore safe — and
+//! it is how defaults added in a later release reach existing tenants.
 
 use crate::accounting::account::{self, AccountType};
 use crate::accounting::tax::{self, TaxDirection};
@@ -161,43 +162,54 @@ fn default_accounts() -> Vec<SeedGroup> {
 }
 
 /// Seed the default chart of accounts and tax codes into `db`, in
-/// `currency`. Returns `true` if it seeded, `false` if the chart was
-/// already set up (idempotent).
+/// `currency`. Additive and idempotent: each account is inserted only when
+/// its role is missing, so a later release's new defaults reach an
+/// already-seeded tenant. Returns `true` if anything was inserted.
 pub async fn seed_defaults(db: &DatabaseConnection, currency: &str) -> Result<bool> {
-    // Already seeded? Any system account means the chart is in place.
-    let existing = account::Entity::find()
-        .filter(account::Column::SystemKey.is_not_null())
-        .count(db)
-        .await?;
-    if existing > 0 {
-        return Ok(false);
-    }
-
     let now = chrono::Utc::now();
+    let mut seeded_any = false;
     let txn = db.begin().await?;
 
     for group in default_accounts() {
-        let parent_id = Uuid::new_v4();
         // The header account: a system account with no role, organizing
-        // its postable children.
-        account::ActiveModel {
-            id: Set(parent_id),
-            code: Set(group.code.to_string()),
-            name: Set(group.name.to_string()),
-            account_type: Set(group.account_type.as_str().to_string()),
-            currency: Set(currency.to_string()),
-            parent_id: Set(None),
-            description: Set(None),
-            system_key: Set(None),
-            is_system: Set(true),
-            is_active: Set(true),
-            created_at: Set(now),
-            updated_at: Set(now),
-        }
-        .insert(&txn)
-        .await?;
+        // its postable children. Headers have no system key, so they are
+        // recognized by code.
+        let parent_id = match find_by_code(&txn, group.code).await? {
+            Some(existing) => existing.id,
+            None => {
+                let parent_id = Uuid::new_v4();
+                account::ActiveModel {
+                    id: Set(parent_id),
+                    code: Set(group.code.to_string()),
+                    name: Set(group.name.to_string()),
+                    account_type: Set(group.account_type.as_str().to_string()),
+                    currency: Set(currency.to_string()),
+                    parent_id: Set(None),
+                    description: Set(None),
+                    system_key: Set(None),
+                    is_system: Set(true),
+                    is_active: Set(true),
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                }
+                .insert(&txn)
+                .await?;
+                seeded_any = true;
+                parent_id
+            }
+        };
 
         for child in group.children {
+            if system_account_id(&txn, child.system_key).await?.is_some() {
+                continue;
+            }
+            // A tenant may have claimed the code for its own account; the
+            // role then stays unfulfilled rather than clashing.
+            if find_by_code(&txn, child.code).await?.is_some() {
+                tracing::warn!(code = %child.code, key = %child.system_key,
+                    "seed skipped: account code is already taken");
+                continue;
+            }
             account::ActiveModel {
                 id: Set(Uuid::new_v4()),
                 code: Set(child.code.to_string()),
@@ -214,6 +226,7 @@ pub async fn seed_defaults(db: &DatabaseConnection, currency: &str) -> Result<bo
             }
             .insert(&txn)
             .await?;
+            seeded_any = true;
         }
     }
 
@@ -254,6 +267,13 @@ pub async fn seed_defaults(db: &DatabaseConnection, currency: &str) -> Result<bo
         ),
     ];
     for (code, name, rate, account_id, direction) in tax_codes {
+        let existing = tax::Entity::find()
+            .filter(tax::Column::Code.eq(code))
+            .count(&txn)
+            .await?;
+        if existing > 0 {
+            continue;
+        }
         tax::ActiveModel {
             id: Set(Uuid::new_v4()),
             code: Set(code.to_string()),
@@ -268,10 +288,60 @@ pub async fn seed_defaults(db: &DatabaseConnection, currency: &str) -> Result<bo
         }
         .insert(&txn)
         .await?;
+        seeded_any = true;
     }
 
     txn.commit().await?;
-    Ok(true)
+    Ok(seeded_any)
+}
+
+/// Re-denominate the whole ledger into `currency`.
+///
+/// Onboarding creates the company first and asks for its currency after,
+/// so the chart has already been seeded in the fallback currency by the
+/// time the answer arrives; this is what makes the answer stick. It also
+/// serves a company that simply picked the wrong currency on day one.
+///
+/// Only ever while the ledger is untouched: once anything is posted the
+/// amounts *mean* the currency they were booked in, and restating them is
+/// an accounting exercise, not a column update. So a ledger with postings
+/// is left alone and `false` comes back — the caller decides how loudly to
+/// complain. Drafts are re-denominated with the chart: nothing is recorded
+/// yet, and leaving them behind would only make them unpostable.
+pub async fn redenominate(db: &DatabaseConnection, currency: &str) -> Result<bool> {
+    use crate::accounting::journal::{entry, posting};
+
+    let txn = db.begin().await?;
+    if posting::Entity::find().count(&txn).await? > 0 {
+        return Ok(false);
+    }
+
+    let accounts = account::Entity::update_many()
+        .col_expr(
+            account::Column::Currency,
+            Expr::value(currency.to_string()),
+        )
+        .filter(account::Column::Currency.ne(currency))
+        .exec(&txn)
+        .await?;
+    entry::Entity::update_many()
+        .col_expr(entry::Column::Currency, Expr::value(currency.to_string()))
+        .filter(entry::Column::Currency.ne(currency))
+        .exec(&txn)
+        .await?;
+    txn.commit().await?;
+    Ok(accounts.rows_affected > 0)
+}
+
+async fn find_by_code<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    code: &str,
+) -> Result<Option<account::Model>> {
+    account::Entity::find()
+        .filter(account::Column::Code.eq(code))
+        .one(conn)
+        .await
+        .map_err(nebula::error::Error::from)
 }
 
 async fn system_account_id<C: sea_orm::ConnectionTrait>(

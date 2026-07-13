@@ -310,9 +310,15 @@ pub struct MultitenancyConfig {
     pub header: String,
     /// Provision a dedicated database for each new tenant (named
     /// `{slug}-{key}`) instead of sharing the main database. The
-    /// `database.url` role must be allowed to `CREATE DATABASE`. Off:
-    /// tenants share the main database unless created with an explicit
-    /// connection string.
+    /// `database.url` role must be allowed to `CREATE DATABASE`.
+    ///
+    /// On by default, and it should stay on: a business module's rows
+    /// carry no tenant column — a tenant's isolation *is* the database it
+    /// is handed. Turning this off puts every tenant in the main
+    /// database, where they transparently share one set of module tables
+    /// (one chart of accounts, one journal). Only turn it off for a
+    /// single-tenant deployment, or when every tenant is created with an
+    /// explicit `connection_string`.
     pub provision_databases: bool,
 }
 
@@ -321,7 +327,7 @@ impl Default for MultitenancyConfig {
         Self {
             enabled: false,
             header: "X-Tenant".into(),
-            provision_databases: false,
+            provision_databases: true,
         }
     }
 }

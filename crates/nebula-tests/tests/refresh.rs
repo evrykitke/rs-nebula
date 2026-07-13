@@ -73,6 +73,8 @@ async fn refresh_tokens_and_onboarding_end_to_end() {
         ..DatabaseConfig::default()
     };
     config.multitenancy.enabled = true;
+    // This test asserts against the main database; no per-tenant database.
+    config.multitenancy.provision_databases = false;
     config.auth.jwt_secret = "test-secret-not-for-production".into();
 
     let app = Kernel::builder()

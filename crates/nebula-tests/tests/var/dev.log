@@ -1,0 +1,22 @@
+2026-07-12T20:46:47.066205Z  INFO nebula::kernel: database connection established
+2026-07-12T20:46:47.066296Z  INFO nebula::kernel: applying migrations to the main database
+2026-07-12T20:46:47.139431Z  INFO sqlx::postgres::notice: relation "nebula_migrations" already exists, skipping
+2026-07-12T20:46:47.139520Z  INFO sea_orm_migration::migrator: Applying all pending migrations
+2026-07-12T20:46:47.139712Z  INFO sqlx::postgres::notice: relation "nebula_migrations" already exists, skipping
+2026-07-12T20:46:47.139966Z  INFO sqlx::postgres::notice: relation "nebula_migrations" already exists, skipping
+2026-07-12T20:46:47.140177Z  INFO sqlx::postgres::notice: relation "nebula_migrations" already exists, skipping
+2026-07-12T20:46:47.146992Z  INFO sea_orm_migration::migrator: No pending migrations
+2026-07-12T20:46:47.154430Z  INFO nebula::kernel: currency registry built count=59
+2026-07-12T20:46:47.167257Z  INFO nebula::kernel: job queue connected to redis
+2026-07-12T20:46:47.169963Z  INFO nebula::kernel: cache connected to redis
+2026-07-12T20:46:47.170201Z  INFO nebula::kernel: configuring module module="account"
+2026-07-12T20:46:47.171731Z  INFO nebula::kernel: configuring module module="administration"
+2026-07-12T20:46:47.174569Z  INFO nebula::kernel: configuring module module="workspace"
+2026-07-12T20:46:47.174602Z  INFO nebula::kernel: configuring module module="accounting"
+2026-07-12T20:46:47.323486Z  INFO nebula::events::remote: distributed events connected to rabbitmq exchange=nebula.events queue=nebula bindings=1
+2026-07-12T20:46:47.323670Z  INFO nebula::kernel: permission registry built count=40
+2026-07-12T20:46:47.323706Z  INFO nebula::kernel: document number series registered count=2
+2026-07-12T20:46:47.323747Z  INFO nebula::kernel: reports registered count=5
+2026-07-12T20:46:47.326720Z  INFO nebula::kernel: starting job workers
+2026-07-12T20:46:47.326967Z  INFO nebula::kernel: nebula listening on http://127.0.0.1:5000 environment=dev multitenancy=true
+2026-07-12T20:46:47.334833Z  INFO nebula::events::remote: event consumer started queue=nebula

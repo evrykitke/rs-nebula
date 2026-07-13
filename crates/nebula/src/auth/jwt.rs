@@ -6,10 +6,14 @@
 //! the user's security stamp, and [`CurrentUser`] re-checks it against
 //! the database — changing a password or disabling a user kills every
 //! outstanding token immediately.
+//!
+//! A token also names the tenant it was issued for, and [`CurrentUser`]
+//! refuses to spend it in any other — see [`ensure_token_matches_tenant`].
 
 use super::user;
 use crate::config::AuthConfig;
 use crate::error::{Error, ProblemDetails, Result};
+use crate::tenancy::TenantRef;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -123,6 +127,7 @@ fn claims_from_parts(parts: &Parts) -> Result<Claims, Response> {
 }
 
 async fn load_stamped_user(parts: &Parts, claims: &Claims) -> Result<user::Model, Response> {
+    ensure_token_matches_tenant(parts, claims)?;
     let db = parts
         .extensions
         .get::<DatabaseConnection>()
@@ -144,4 +149,27 @@ async fn load_stamped_user(parts: &Parts, claims: &Claims) -> Result<user::Model
         return Err(Error::Unauthorized.into_response());
     }
     Ok(user)
+}
+
+/// The token must be spent in the tenant it was issued for.
+///
+/// Tenant resolution trusts the request header, so without this a token
+/// from tenant A presented with `X-Tenant: B` would be served against B's
+/// data. Business modules carry no `tenant_id` on their rows — isolation
+/// *is* the connection they are handed — so this is the check that makes
+/// it hold, whether tenants sit in their own databases or share the main
+/// one. A host-context token (no tenant) may not act as a tenant, and a
+/// tenant's token may not act on the host.
+fn ensure_token_matches_tenant(parts: &Parts, claims: &Claims) -> Result<(), Response> {
+    let resolved = parts.extensions.get::<TenantRef>().map(|t| t.id);
+    if resolved == claims.tenant_id {
+        return Ok(());
+    }
+    tracing::warn!(
+        user = %claims.sub,
+        token_tenant = ?claims.tenant_id,
+        request_tenant = ?resolved,
+        "rejected a token presented against a tenant it was not issued for"
+    );
+    Err(Error::Forbidden.into_response())
 }

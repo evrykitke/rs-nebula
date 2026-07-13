@@ -1,12 +1,12 @@
 //! Double-entry journal: entries and their debit/credit postings, plus
 //! the service that enforces the bookkeeping invariants.
 //!
-//! An entry is created as a **draft** (editable, unnumbered), then
-//! **posted** — the point at which it must balance, is assigned a
-//! gap-free number from the `accounting.journal` series, and becomes
-//! immutable. A posted entry is corrected only by a **reversal**: a new
-//! mirror entry (debits and credits swapped) that is posted immediately
-//! and linked back to the original.
+//! An entry is created as a **draft** (editable and deletable,
+//! unnumbered), then **posted** — the point at which it must balance, is
+//! assigned a gap-free number from the `accounting.journal` series, and
+//! becomes immutable. A posted entry is corrected only by a **reversal**:
+//! a new mirror entry (debits and credits swapped) that is posted
+//! immediately and linked back to the original.
 //!
 //! All rows live in the request's tenant database; numbering and the
 //! status change happen inside one transaction so a number is never
@@ -23,9 +23,12 @@ use nebula::error::{Error, Result};
 use nebula::{Numbering, TenantDb, sea_orm};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseConnection, QueryOrder, Set, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, FromQueryResult, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// Where a journal entry is in its lifecycle.
@@ -155,7 +158,7 @@ impl Ledger {
             return Err(Error::Validation("an entry needs a memo".into()));
         }
         nebula::Currency::new(&new.currency, 2)?;
-        self.validate_lines(&new.currency, &new.lines).await?;
+        validate_lines(&self.db, &new.currency, &new.lines).await?;
 
         let txn = self.db.begin().await?;
         let entry_id = Uuid::new_v4();
@@ -181,16 +184,75 @@ impl Ledger {
         self.view(entry_id).await
     }
 
+    /// Replace a draft's header fields and lines wholesale. Only a draft
+    /// may change; posting is the point of no return.
+    pub async fn update_draft(&self, id: Uuid, new: NewEntry) -> Result<JournalEntryView> {
+        if new.memo.trim().is_empty() {
+            return Err(Error::Validation("an entry needs a memo".into()));
+        }
+        nebula::Currency::new(&new.currency, 2)?;
+
+        let txn = self.db.begin().await?;
+        let entry = load_entry_locked(&txn, id).await?;
+        if EntryStatus::parse(&entry.status)? != EntryStatus::Draft {
+            return Err(Error::Validation("only a draft entry can be edited".into()));
+        }
+        validate_lines(&txn, &new.currency, &new.lines).await?;
+
+        posting::Entity::delete_many()
+            .filter(posting::Column::EntryId.eq(id))
+            .exec(&txn)
+            .await?;
+        insert_postings(&txn, id, &new.lines).await?;
+
+        let mut active: entry::ActiveModel = entry.into();
+        active.entry_date = Set(new.entry_date);
+        active.memo = Set(new.memo.trim().to_string());
+        active.reference = Set(new.reference.filter(|r| !r.trim().is_empty()));
+        active.currency = Set(new.currency);
+        active.update(&txn).await?;
+        txn.commit().await?;
+        self.view(id).await
+    }
+
+    /// Delete a draft (its lines cascade). A posted or reversed entry is
+    /// part of the ledger's history and can never be deleted.
+    pub async fn delete_draft(&self, id: Uuid) -> Result<JournalEntryView> {
+        let view = self.view(id).await?;
+        let txn = self.db.begin().await?;
+        let entry = load_entry_locked(&txn, id).await?;
+        if EntryStatus::parse(&entry.status)? != EntryStatus::Draft {
+            return Err(Error::Validation("only a draft entry can be deleted".into()));
+        }
+        entry::Entity::delete_by_id(id).exec(&txn).await?;
+        txn.commit().await?;
+        Ok(view)
+    }
+
     /// Post a draft: enforce the balancing rule, allocate a gap-free
-    /// number and freeze the entry — all in one transaction.
+    /// number and freeze the entry — all in one transaction. The entry row
+    /// is locked so two concurrent posts cannot both succeed, and the
+    /// lines are re-validated because the chart may have changed since the
+    /// draft was written (an account deactivated, sub-accounts added).
     pub async fn post(&self, id: Uuid, numbering: &Numbering) -> Result<JournalEntryView> {
         let txn = self.db.begin().await?;
-        let entry = load_entry(&txn, id).await?;
+        let entry = load_entry_locked(&txn, id).await?;
         if EntryStatus::parse(&entry.status)? != EntryStatus::Draft {
             return Err(Error::Validation("only a draft entry can be posted".into()));
         }
+        super::fiscal::ensure_open_for_post(&txn, entry.entry_date).await?;
         let lines = load_postings(&txn, id).await?;
         check_balanced(&lines)?;
+        let inputs: Vec<PostingInput> = lines
+            .iter()
+            .map(|l| PostingInput {
+                account_id: l.account_id,
+                debit: l.debit,
+                credit: l.credit,
+                memo: None,
+            })
+            .collect();
+        validate_lines(&txn, &entry.currency, &inputs).await?;
 
         let number = numbering.next(&txn, super::JOURNAL_SERIES).await?;
         let mut active: entry::ActiveModel = entry.into();
@@ -202,18 +264,77 @@ impl Ledger {
         self.view(id).await
     }
 
+    /// Create an entry and post it in one transaction, numbered from
+    /// `series` — for source documents (an expense voucher, a POS sale)
+    /// whose entries are born final rather than composed as drafts. The
+    /// lines must balance up front; nothing is written otherwise.
+    pub async fn create_posted(
+        &self,
+        new: NewEntry,
+        series: &str,
+        numbering: &Numbering,
+    ) -> Result<JournalEntryView> {
+        if new.memo.trim().is_empty() {
+            return Err(Error::Validation("an entry needs a memo".into()));
+        }
+        nebula::Currency::new(&new.currency, 2)?;
+
+        let txn = self.db.begin().await?;
+        validate_lines(&txn, &new.currency, &new.lines).await?;
+        let debits: Decimal = new.lines.iter().map(|l| l.debit).sum();
+        let credits: Decimal = new.lines.iter().map(|l| l.credit).sum();
+        if debits != credits {
+            return Err(Error::Validation(format!(
+                "entry does not balance: debits {debits} ≠ credits {credits}"
+            )));
+        }
+        if debits == Decimal::ZERO {
+            return Err(Error::Validation(
+                "entry total must be greater than zero".into(),
+            ));
+        }
+        super::fiscal::ensure_open_for_post(&txn, new.entry_date).await?;
+
+        let entry_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let number = numbering.next(&txn, series).await?;
+        entry::ActiveModel {
+            id: Set(entry_id),
+            number: Set(Some(number.formatted)),
+            entry_date: Set(new.entry_date),
+            memo: Set(new.memo.trim().to_string()),
+            reference: Set(new.reference.filter(|r| !r.trim().is_empty())),
+            currency: Set(new.currency),
+            status: Set(EntryStatus::Posted.as_str().to_string()),
+            reverses_id: Set(None),
+            reversed_by_id: Set(None),
+            posted_at: Set(Some(now)),
+            created_at: Set(now),
+            created_by: Set(new.created_by),
+        }
+        .insert(&txn)
+        .await?;
+        insert_postings(&txn, entry_id, &new.lines).await?;
+        txn.commit().await?;
+        self.view(entry_id).await
+    }
+
     /// Reverse a posted entry: create a mirror entry (debits and credits
     /// swapped), post it immediately, and link the two together. The
     /// original moves to `reversed`; neither entry is ever mutated again.
+    /// The reversal is dated `entry_date` (defaulting to today) — never
+    /// before the original, and always in an open period. The original's
+    /// row is locked so an entry cannot be reversed twice concurrently.
     pub async fn reverse(
         &self,
         id: Uuid,
         reason: &str,
+        entry_date: Option<chrono::NaiveDate>,
         numbering: &Numbering,
         created_by: Option<Uuid>,
     ) -> Result<JournalEntryView> {
         let txn = self.db.begin().await?;
-        let original = load_entry(&txn, id).await?;
+        let original = load_entry_locked(&txn, id).await?;
         match EntryStatus::parse(&original.status)? {
             EntryStatus::Posted => {}
             EntryStatus::Draft => {
@@ -228,6 +349,13 @@ impl Ledger {
         let lines = load_postings(&txn, id).await?;
 
         let now = chrono::Utc::now();
+        let reversal_date = entry_date.unwrap_or_else(|| now.date_naive());
+        if reversal_date < original.entry_date {
+            return Err(Error::Validation(
+                "a reversal cannot be dated before the entry it reverses".into(),
+            ));
+        }
+        super::fiscal::ensure_open_for_post(&txn, reversal_date).await?;
         let reversal_id = Uuid::new_v4();
         let number = numbering.next(&txn, super::JOURNAL_SERIES).await?;
         let memo = if reason.trim().is_empty() {
@@ -245,7 +373,7 @@ impl Ledger {
         entry::ActiveModel {
             id: Set(reversal_id),
             number: Set(Some(number.formatted)),
-            entry_date: Set(now.date_naive()),
+            entry_date: Set(reversal_date),
             memo: Set(memo),
             reference: Set(original.number.clone()),
             currency: Set(original.currency.clone()),
@@ -290,7 +418,15 @@ impl Ledger {
             .order_by_desc(entry::Column::CreatedAt)
             .all(&self.db)
             .await?;
-        // Sum debits per entry in one pass for the register total column.
+        self.headers(rows).await
+    }
+
+    /// Build register rows (header + amount) for a set of entries, with
+    /// the debit totals summed per entry in one pass.
+    pub(crate) async fn headers(
+        &self,
+        rows: Vec<entry::Model>,
+    ) -> Result<Vec<JournalEntryHeader>> {
         let totals = self.debit_totals(&rows).await?;
         rows.into_iter()
             .map(|r| {
@@ -344,45 +480,6 @@ impl Ledger {
         })
     }
 
-    /// Validate each line's shape and that its account exists, is active
-    /// and shares the entry currency.
-    async fn validate_lines(&self, currency: &str, lines: &[PostingInput]) -> Result<()> {
-        if lines.len() < 2 {
-            return Err(Error::Validation(
-                "an entry needs at least two postings (one debit, one credit)".into(),
-            ));
-        }
-        let accounts = account::Store::new(self.db.clone());
-        for line in lines {
-            if line.debit < Decimal::ZERO || line.credit < Decimal::ZERO {
-                return Err(Error::Validation(
-                    "posting amounts must not be negative".into(),
-                ));
-            }
-            let debit_set = line.debit > Decimal::ZERO;
-            let credit_set = line.credit > Decimal::ZERO;
-            if debit_set == credit_set {
-                return Err(Error::Validation(
-                    "each posting must be exactly one of a debit or a credit".into(),
-                ));
-            }
-            let acc = accounts.find_by_id(line.account_id).await?;
-            if !acc.is_active {
-                return Err(Error::Validation(format!(
-                    "account {} is inactive and cannot be posted to",
-                    acc.code
-                )));
-            }
-            if acc.currency != currency {
-                return Err(Error::Validation(format!(
-                    "account {} is in {}, but the entry is in {currency}",
-                    acc.code, acc.currency
-                )));
-            }
-        }
-        Ok(())
-    }
-
     /// `account_id -> (code, name)` for the given ids.
     async fn account_labels(
         &self,
@@ -399,22 +496,107 @@ impl Ledger {
         Ok(rows.into_iter().map(|a| (a.id, (a.code, a.name))).collect())
     }
 
-    /// Total debit per entry, for the register list.
+    /// Total debit per entry, for the register list — summed in the
+    /// database, one row per entry.
     async fn debit_totals(&self, entries: &[entry::Model]) -> Result<HashMap<Uuid, Decimal>> {
+        #[derive(FromQueryResult)]
+        struct EntryTotal {
+            entry_id: Uuid,
+            total: Decimal,
+        }
+
         let ids: Vec<Uuid> = entries.iter().map(|e| e.id).collect();
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let postings = posting::Entity::find()
+        let rows = posting::Entity::find()
+            .select_only()
+            .column(posting::Column::EntryId)
+            .column_as(posting::Column::Debit.sum(), "total")
             .filter(posting::Column::EntryId.is_in(ids))
+            .group_by(posting::Column::EntryId)
+            .into_model::<EntryTotal>()
             .all(&self.db)
             .await?;
-        let mut totals: HashMap<Uuid, Decimal> = HashMap::new();
-        for p in postings {
-            *totals.entry(p.entry_id).or_insert(Decimal::ZERO) += p.debit;
-        }
-        Ok(totals)
+        Ok(rows.into_iter().map(|r| (r.entry_id, r.total)).collect())
     }
+}
+
+/// Validate lines: each is non-negative, single-sided, within the ledger's
+/// two-decimal precision, and posts to an existing, active, non-header
+/// account in the entry's currency.
+async fn validate_lines<C: ConnectionTrait>(
+    conn: &C,
+    currency: &str,
+    lines: &[PostingInput],
+) -> Result<()> {
+    if lines.len() < 2 {
+        return Err(Error::Validation(
+            "an entry needs at least two postings (one debit, one credit)".into(),
+        ));
+    }
+    for line in lines {
+        if line.debit < Decimal::ZERO || line.credit < Decimal::ZERO {
+            return Err(Error::Validation(
+                "posting amounts must not be negative".into(),
+            ));
+        }
+        let debit_set = line.debit > Decimal::ZERO;
+        let credit_set = line.credit > Decimal::ZERO;
+        if debit_set == credit_set {
+            return Err(Error::Validation(
+                "each posting must be exactly one of a debit or a credit".into(),
+            ));
+        }
+        if line.debit.normalize().scale() > 2 || line.credit.normalize().scale() > 2 {
+            return Err(Error::Validation(
+                "posting amounts must not have more than two decimal places".into(),
+            ));
+        }
+    }
+
+    let ids: Vec<Uuid> = lines.iter().map(|l| l.account_id).collect();
+    let accounts: HashMap<Uuid, account::Model> = account::Entity::find()
+        .filter(account::Column::Id.is_in(ids.clone()))
+        .all(conn)
+        .await?
+        .into_iter()
+        .map(|a| (a.id, a))
+        .collect();
+    // An account with sub-accounts is a header: it organizes the chart and
+    // never carries postings itself.
+    let headers: HashSet<Uuid> = account::Entity::find()
+        .filter(account::Column::ParentId.is_in(ids))
+        .all(conn)
+        .await?
+        .into_iter()
+        .filter_map(|a| a.parent_id)
+        .collect();
+
+    for line in lines {
+        let Some(acc) = accounts.get(&line.account_id) else {
+            return Err(Error::NotFound(format!("account {}", line.account_id)));
+        };
+        if !acc.is_active {
+            return Err(Error::Validation(format!(
+                "account {} is inactive and cannot be posted to",
+                acc.code
+            )));
+        }
+        if headers.contains(&acc.id) {
+            return Err(Error::Validation(format!(
+                "account {} is a header with sub-accounts; post to one of its sub-accounts",
+                acc.code
+            )));
+        }
+        if acc.currency != currency {
+            return Err(Error::Validation(format!(
+                "account {} is in {}, but the entry is in {currency}",
+                acc.code, acc.currency
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Insert a set of lines for an entry, numbered from one.
@@ -444,6 +626,20 @@ async fn insert_postings<C: ConnectionTrait>(
 async fn load_entry<C: ConnectionTrait>(conn: &C, id: Uuid) -> Result<entry::Model> {
     entry::Entity::find_by_id(id)
         .one(conn)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("journal entry {id}")))
+}
+
+/// Load an entry holding its row lock, so concurrent state transitions
+/// (post, reverse, edit, delete) on the same entry serialize instead of
+/// both acting on the same stale status.
+async fn load_entry_locked(
+    txn: &sea_orm::DatabaseTransaction,
+    id: Uuid,
+) -> Result<entry::Model> {
+    entry::Entity::find_by_id(id)
+        .lock_exclusive()
+        .one(txn)
         .await?
         .ok_or_else(|| Error::NotFound(format!("journal entry {id}")))
 }
@@ -565,7 +761,10 @@ fn header(row: entry::Model, amount: Decimal) -> Result<JournalEntryHeader> {
 pub(super) fn routes() -> Router {
     Router::new()
         .route("/accounting/journal", get(list_entries).post(create_entry))
-        .route("/accounting/journal/{id}", get(get_entry))
+        .route(
+            "/accounting/journal/{id}",
+            get(get_entry).put(update_entry).delete(delete_entry),
+        )
         .route("/accounting/journal/{id}/post", post(post_entry))
         .route("/accounting/journal/{id}/reverse", post(reverse_entry))
 }
@@ -575,7 +774,15 @@ pub(super) fn api() -> utoipa::openapi::OpenApi {
 }
 
 #[derive(utoipa::OpenApi)]
-#[openapi(paths(list_entries, get_entry, create_entry, post_entry, reverse_entry))]
+#[openapi(paths(
+    list_entries,
+    get_entry,
+    create_entry,
+    update_entry,
+    delete_entry,
+    post_entry,
+    reverse_entry
+))]
 struct ApiDoc;
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -606,6 +813,10 @@ pub struct CreateEntryRequest {
 pub struct ReverseEntryRequest {
     #[serde(default)]
     pub reason: String,
+    /// The reversal's date; defaults to today. Never before the original
+    /// entry's date, and its period must be open.
+    #[schema(value_type = Option<String>, format = Date)]
+    pub entry_date: Option<chrono::NaiveDate>,
 }
 
 /// Optional `?status=draft|posted|reversed` register filter.
@@ -648,27 +859,68 @@ async fn create_entry(
     Json(req): Json<CreateEntryRequest>,
 ) -> Result<Json<JournalEntryView>> {
     authz.require(names::JOURNAL_CREATE).await?;
-    let lines = req
-        .lines
-        .into_iter()
-        .map(|l| PostingInput {
-            account_id: l.account_id,
-            debit: l.debit,
-            credit: l.credit,
-            memo: l.memo,
-        })
-        .collect();
     let view = Ledger::new(db)
-        .create_draft(NewEntry {
-            entry_date: req.entry_date,
-            memo: req.memo,
-            reference: req.reference,
-            currency: req.currency,
-            lines,
-            created_by: Some(authz.user.id),
-        })
+        .create_draft(new_entry(req, Some(authz.user.id)))
         .await?;
     audit.0.created("accounting.journal", view.id, &view).await;
+    Ok(Json(view))
+}
+
+/// Map a request body onto the service input.
+fn new_entry(req: CreateEntryRequest, created_by: Option<Uuid>) -> NewEntry {
+    NewEntry {
+        entry_date: req.entry_date,
+        memo: req.memo,
+        reference: req.reference,
+        currency: req.currency,
+        lines: req
+            .lines
+            .into_iter()
+            .map(|l| PostingInput {
+                account_id: l.account_id,
+                debit: l.debit,
+                credit: l.credit,
+                memo: l.memo,
+            })
+            .collect(),
+        created_by,
+    }
+}
+
+#[utoipa::path(put, path = "/accounting/journal/{id}", tag = "accounting",
+    params(("id" = Uuid, Path, description = "Entry id")),
+    request_body = CreateEntryRequest,
+    responses((status = 200, body = JournalEntryView)))]
+async fn update_entry(
+    authz: Authz,
+    audit: Audit,
+    TenantDb(db): TenantDb,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CreateEntryRequest>,
+) -> Result<Json<JournalEntryView>> {
+    authz.require(names::JOURNAL_CREATE).await?;
+    let ledger = Ledger::new(db);
+    let before = ledger.view(id).await?;
+    let after = ledger.update_draft(id, new_entry(req, None)).await?;
+    audit
+        .0
+        .updated("accounting.journal", id, &before, &after)
+        .await;
+    Ok(Json(after))
+}
+
+#[utoipa::path(delete, path = "/accounting/journal/{id}", tag = "accounting",
+    params(("id" = Uuid, Path, description = "Entry id")),
+    responses((status = 200, body = JournalEntryView)))]
+async fn delete_entry(
+    authz: Authz,
+    audit: Audit,
+    TenantDb(db): TenantDb,
+    Path(id): Path<Uuid>,
+) -> Result<Json<JournalEntryView>> {
+    authz.require(names::JOURNAL_CREATE).await?;
+    let view = Ledger::new(db).delete_draft(id).await?;
+    audit.0.deleted("accounting.journal", view.id, &view).await;
     Ok(Json(view))
 }
 
@@ -708,7 +960,7 @@ async fn reverse_entry(
 ) -> Result<Json<JournalEntryView>> {
     authz.require(names::JOURNAL_REVERSE).await?;
     let view = Ledger::new(db)
-        .reverse(id, &req.reason, &numbering, Some(authz.user.id))
+        .reverse(id, &req.reason, req.entry_date, &numbering, Some(authz.user.id))
         .await?;
     audit
         .0

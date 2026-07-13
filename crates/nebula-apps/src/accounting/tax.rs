@@ -145,6 +145,9 @@ impl Store {
         if self.find_by_code(&code).await?.is_some() {
             return Err(Error::Conflict(format!("tax code {code:?} already exists")));
         }
+        if let Some(account_id) = new.account_id {
+            self.ensure_account_exists(account_id).await?;
+        }
         let now = chrono::Utc::now();
         ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -186,6 +189,9 @@ impl Store {
             active.rate = Set(rate);
         }
         if let Some(account_id) = account_id {
+            if let Some(account_id) = account_id {
+                self.ensure_account_exists(account_id).await?;
+            }
             active.account_id = Set(account_id);
         }
         if let Some(is_active) = is_active {
@@ -193,6 +199,20 @@ impl Store {
         }
         active.updated_at = Set(chrono::Utc::now());
         active.update(&self.db).await.map_err(Error::from)
+    }
+
+    /// A tax code's linked account must exist — caught here so the caller
+    /// gets a validation message instead of a foreign-key error.
+    async fn ensure_account_exists(&self, account_id: Uuid) -> Result<()> {
+        let found = crate::accounting::account::Entity::find_by_id(account_id)
+            .one(&self.db)
+            .await?;
+        if found.is_none() {
+            return Err(Error::Validation(format!(
+                "linked account {account_id} does not exist"
+            )));
+        }
+        Ok(())
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<Model> {

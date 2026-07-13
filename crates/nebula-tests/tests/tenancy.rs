@@ -122,6 +122,10 @@ async fn multitenancy_end_to_end() {
         ..DatabaseConfig::default()
     };
     config.multitenancy.enabled = true;
+    // This case covers the two explicit routings — a tenant sharing the main
+    // database and one given a connection string. Provisioning gets its own
+    // test below.
+    config.multitenancy.provision_databases = false;
 
     let app = Kernel::builder()
         .with_config(config)

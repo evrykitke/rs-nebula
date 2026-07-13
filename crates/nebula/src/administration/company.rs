@@ -233,6 +233,22 @@ async fn tenant_profile_update(
             &company_profile(&updated),
         )
         .await;
+    // Modules that denominate their own rows in the company's currency have
+    // to follow it. Announced on the same channel as `TenantCreated` so a
+    // subscriber sees the two in the order they happened. The profile is
+    // already written; a lost announcement is the broker's to surface.
+    if before.default_currency != updated.default_currency
+        && let Err(e) = state
+            .events
+            .broadcast(crate::tenancy::TenantCurrencyChanged {
+                tenant_id: tenant.id,
+                currency: updated.default_currency.clone(),
+            })
+            .await
+    {
+        tracing::error!(tenant = %tenant.name, error = %e,
+            "failed to broadcast tenant_currency_changed");
+    }
     Ok(Json(company_profile(&updated)))
 }
 

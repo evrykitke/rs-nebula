@@ -47,6 +47,22 @@ impl crate::events::Event for TenantCreated {
     const NAME: &'static str = "tenancy.tenant_created";
 }
 
+/// Published when a company's currency is set or changed on its profile.
+/// A currency is only half a decision here: modules that denominate their
+/// own rows (a ledger's chart of accounts) hold a copy of it and have to
+/// follow. Onboarding leans on this — the company is created first and
+/// picks its currency afterwards.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TenantCurrencyChanged {
+    pub tenant_id: Uuid,
+    /// The code now on the profile; `None` cleared it.
+    pub currency: Option<String>,
+}
+
+impl crate::events::Event for TenantCurrencyChanged {
+    const NAME: &'static str = "tenancy.tenant_currency_changed";
+}
+
 pub struct NewTenant {
     pub name: String,
     pub display_name: String,
