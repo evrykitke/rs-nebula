@@ -32,6 +32,10 @@ events:
 logging:
   level: info
   format: pretty
+  # Per-area overrides: `http: debug` adds request-start lines,
+  # `database: debug` shows every SQL statement with its timing.
+  # http: debug
+  # database: debug
   # Mirror console output to a rolling file under var/ (rolled at 5 MiB).
   file: var/dev.log
 

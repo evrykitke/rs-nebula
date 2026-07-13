@@ -28,6 +28,16 @@ pub async fn connect(config: &DatabaseConfig) -> Result<DatabaseConnection> {
         .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
         .sqlx_logging_level(tracing::log::LevelFilter::Debug);
 
+    // Slow statements surface at warn regardless of the debug filter, so
+    // production (info) still sees them. Applies to tenant databases too —
+    // the tenancy manager connects through this same function.
+    if config.slow_statement_millis > 0 {
+        options.sqlx_slow_statements_logging_settings(
+            tracing::log::LevelFilter::Warn,
+            Duration::from_millis(config.slow_statement_millis),
+        );
+    }
+
     let db = Database::connect(options).await?;
     ping(&db).await?;
     Ok(db)

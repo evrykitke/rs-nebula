@@ -314,6 +314,9 @@ pub struct DatabaseConfig {
     pub connect_timeout_secs: u64,
     pub acquire_timeout_secs: u64,
     pub idle_timeout_secs: u64,
+    /// Statements slower than this many milliseconds are logged at `warn`
+    /// even when database debug tracing is off. 0 disables the check.
+    pub slow_statement_millis: u64,
     pub auto_migrate: bool,
 }
 
@@ -326,6 +329,7 @@ impl Default for DatabaseConfig {
             connect_timeout_secs: 10,
             acquire_timeout_secs: 10,
             idle_timeout_secs: 600,
+            slow_statement_millis: 1000,
             auto_migrate: false,
         }
     }
@@ -449,6 +453,13 @@ impl Default for RabbitMqConfig {
 pub struct LoggingConfig {
     /// A `tracing` filter directive, e.g. `info` or `nebula=debug,info`.
     pub level: String,
+    /// HTTP request tracing, overriding `level` for that area: `debug`
+    /// adds a request-start line to the per-request completion line,
+    /// `off` silences request tracing. Empty means `level` applies.
+    pub http: String,
+    /// Database tracing, overriding `level` for that area: `debug` logs
+    /// every SQL statement with its timing. Empty means `level` applies.
+    pub database: String,
     pub format: LogFormat,
     /// Also append logs to this file (the console output is unaffected).
     /// Empty means console only. Relative paths are resolved against the
@@ -464,6 +475,8 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             level: "info".into(),
+            http: String::new(),
+            database: String::new(),
             format: LogFormat::Pretty,
             file: String::new(),
             max_file_bytes: 5 * 1024 * 1024,

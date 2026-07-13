@@ -1,8 +1,11 @@
 //! Logging bootstrap built on `tracing`.
 //!
-//! The filter comes from `logging.level` in configuration; a `RUST_LOG`
-//! environment variable, when present, takes precedence so developers can
-//! turn diagnostics up without touching config files.
+//! The filter comes from `logging.level` in configuration, extended by the
+//! per-area overrides `logging.http` (request tracing) and
+//! `logging.database` (SQL statements) so operators never need to know
+//! internal target names. A `RUST_LOG` environment variable, when present,
+//! takes precedence over all of it so developers can turn diagnostics up
+//! without touching config files.
 //!
 //! Logs always go to the console. When `logging.file` is set they are also
 //! appended to that file (without ANSI colour), rolled over at
@@ -39,7 +42,7 @@ pub enum LoggingError {
 /// Install the global tracing subscriber according to configuration.
 /// Call once at boot (the kernel does this); a second call fails.
 pub fn init(config: &LoggingConfig) -> Result<(), LoggingError> {
-    let directive = std::env::var("RUST_LOG").unwrap_or_else(|_| config.level.clone());
+    let directive = std::env::var("RUST_LOG").unwrap_or_else(|_| directives(config));
     let filter = EnvFilter::try_new(&directive).map_err(|source| LoggingError::InvalidFilter {
         directive: directive.clone(),
         source,
@@ -66,6 +69,23 @@ pub fn init(config: &LoggingConfig) -> Result<(), LoggingError> {
         .with(layers)
         .try_init()
         .map_err(|_| LoggingError::AlreadyInitialized)
+}
+
+/// The base level plus the per-area overrides, as one filter directive.
+/// The overrides map onto the targets that actually emit those logs:
+/// request tracing lives in this crate's `web::trace` module (plus
+/// tower-http's own layer), SQL statements come from sqlx/SeaORM.
+fn directives(config: &LoggingConfig) -> String {
+    let mut directive = config.level.clone();
+    if !config.http.is_empty() {
+        let level = &config.http;
+        directive.push_str(&format!(",nebula::web::trace={level},tower_http={level}"));
+    }
+    if !config.database.is_empty() {
+        let level = &config.database;
+        directive.push_str(&format!(",sqlx={level},sea_orm={level}"));
+    }
+    directive
 }
 
 /// One formatting layer over a writer, in the configured format. ANSI
@@ -147,15 +167,44 @@ impl RotatingFile {
     }
 }
 
+/// Remove ANSI escape sequences. The file layer formats without colour,
+/// but span fields are formatted once by whichever layer records them
+/// first — the coloured console layer — and cached, so colour codes can
+/// still reach this writer. A log file must stay grep-able.
+fn strip_ansi(buf: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(buf.len());
+    let mut bytes = buf.iter().copied().peekable();
+    while let Some(b) = bytes.next() {
+        if b != 0x1b {
+            out.push(b);
+            continue;
+        }
+        // CSI sequence: `ESC [` then parameter bytes until a final byte
+        // in `@`..`~`. A bare ESC is dropped either way.
+        if bytes.peek() == Some(&b'[') {
+            bytes.next();
+            while let Some(n) = bytes.next() {
+                if (0x40..=0x7e).contains(&n) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 impl Write for RotatingFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.roll_if_needed(buf.len())?;
+        let clean = strip_ansi(buf);
+        self.roll_if_needed(clean.len())?;
         let Some(file) = self.file.as_mut() else {
             return Ok(buf.len());
         };
-        let n = file.write(buf)?;
-        self.written += n as u64;
-        Ok(n)
+        file.write_all(&clean)?;
+        self.written += clean.len() as u64;
+        // The caller's buffer was consumed in full even though fewer
+        // bytes landed on disk.
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -194,6 +243,34 @@ impl Write for FileWriterGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_area_overrides_extend_the_base_directive() {
+        let config = LoggingConfig {
+            http: "debug".into(),
+            database: "debug".into(),
+            ..LoggingConfig::default()
+        };
+        assert_eq!(
+            directives(&config),
+            "info,nebula::web::trace=debug,tower_http=debug,sqlx=debug,sea_orm=debug"
+        );
+        assert_eq!(directives(&LoggingConfig::default()), "info");
+    }
+
+    #[test]
+    fn ansi_sequences_never_reach_the_file() {
+        let dir = std::env::temp_dir().join(format!("nebula-log-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("app.log");
+
+        let mut file = RotatingFile::open(&path, 1024).expect("open");
+        file.write_all(b"request{\x1b[3mmethod\x1b[0m\x1b[2m=\x1b[0mGET}: done\n")
+            .expect("write");
+        file.flush().expect("flush");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "request{method=GET}: done\n");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn rolls_over_at_the_threshold_keeping_one_backup() {

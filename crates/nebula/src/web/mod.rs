@@ -3,6 +3,7 @@
 //! request timeout, panic containment, request ids and tracing.
 
 mod health;
+mod trace;
 
 use crate::config::Config;
 use crate::error::ProblemDetails;
@@ -101,7 +102,19 @@ pub(crate) fn finalize(
     router.layer(
         ServiceBuilder::new()
             .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-            .layer(TraceLayer::new_for_http())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(|request: &axum::http::Request<_>| trace::make_span(request))
+                    .on_request(|request: &axum::http::Request<_>, span: &tracing::Span| {
+                        trace::on_request(request, span)
+                    })
+                    .on_response(
+                        |response: &Response<_>, latency: Duration, span: &tracing::Span| {
+                            trace::on_response(response, latency, span)
+                        },
+                    )
+                    .on_failure(trace::on_failure),
+            )
             .layer(CatchPanicLayer::custom(handle_panic))
             .layer(TimeoutLayer::with_status_code(
                 StatusCode::REQUEST_TIMEOUT,
