@@ -478,6 +478,63 @@ pub(crate) async fn purchase_invoice_request(
     }))
 }
 
+/// The entry for a purchase return (or its reversal): the outbound stock
+/// value against GRNI at the PO-price relief, any gap to purchase price
+/// variance. `grni_value` is the caller's Σ qty × PO price × rate; the
+/// direction follows the movement's own ledger rows (goods out relieve
+/// GRNI with a debit, a reversal re-accrues it with a credit), so the same
+/// builder serves both documents.
+pub(crate) async fn purchase_return_request(
+    txn: &DatabaseTransaction,
+    return_id: Uuid,
+    move_id: Uuid,
+    order_number: Option<&str>,
+    entry_date: chrono::NaiveDate,
+    grni_value: Decimal,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<GlPostingRequested>> {
+    let rows = ledger_rows(txn, move_id).await?;
+    let item_ids: Vec<Uuid> = rows.iter().map(|r| r.item_id).collect();
+    let roles = item_roles(txn, &item_ids).await?;
+
+    let mut entry = EntryBuilder::default();
+    let mut stock_net = Decimal::ZERO;
+    for row in &rows {
+        let r = roles
+            .get(&row.item_id)
+            .ok_or_else(|| Error::internal("ledger row without an item"))?;
+        entry.debit(&r.inventory, row.value_delta, None);
+        stock_net += row.value_delta;
+    }
+    // Goods out (negative net) relieve the accrual: Dr GRNI. Goods back
+    // in re-accrue it: Cr GRNI.
+    if stock_net <= Decimal::ZERO {
+        entry.debit(GRNI_ROLE, grni_value, None);
+    } else {
+        entry.credit(GRNI_ROLE, grni_value, None);
+    }
+    // Moving average rarely equals the PO price exactly; the difference
+    // is a price variance, not inventory value.
+    let gap = stock_net + if stock_net <= Decimal::ZERO { grni_value } else { -grni_value };
+    entry.credit(PPV_ROLE, gap, Some("Return price variance"));
+
+    let lines = entry.lines();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(GlPostingRequested {
+        tenant_id,
+        source: format!("scm.return:{return_id}:post"),
+        entry_date,
+        memo: format!(
+            "Return to supplier against {}",
+            order_number.unwrap_or("purchase order")
+        ),
+        currency: None,
+        lines,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Acknowledgements and the sweeper
 // ---------------------------------------------------------------------------

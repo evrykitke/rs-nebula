@@ -19,6 +19,7 @@ pub mod invoice;
 pub mod order;
 pub mod receipt;
 pub mod reports;
+pub mod returns;
 pub mod supplier;
 
 pub mod permissions {
@@ -42,6 +43,11 @@ pub mod permissions {
         pub const RECEIPTS_CREATE: &str = "Pages.Procurement.Receipts.Create";
         pub const RECEIPTS_POST: &str = "Pages.Procurement.Receipts.Post";
         pub const RECEIPTS_REVERSE: &str = "Pages.Procurement.Receipts.Reverse";
+        pub const RETURNS: &str = "Pages.Procurement.Returns";
+        pub const RETURNS_VIEW: &str = "Pages.Procurement.Returns.View";
+        pub const RETURNS_CREATE: &str = "Pages.Procurement.Returns.Create";
+        pub const RETURNS_POST: &str = "Pages.Procurement.Returns.Post";
+        pub const RETURNS_REVERSE: &str = "Pages.Procurement.Returns.Reverse";
         pub const INVOICES: &str = "Pages.Procurement.Invoices";
         pub const INVOICES_VIEW: &str = "Pages.Procurement.Invoices.View";
         pub const INVOICES_CREATE: &str = "Pages.Procurement.Invoices.Create";
@@ -75,6 +81,16 @@ pub mod permissions {
                     .child(PermissionDef::new(RECEIPTS_CREATE, "Create goods receipts"))
                     .child(PermissionDef::new(RECEIPTS_POST, "Post goods receipts"))
                     .child(PermissionDef::new(RECEIPTS_REVERSE, "Reverse goods receipts")),
+            )
+            .child(
+                PermissionDef::new(RETURNS, "Purchase returns")
+                    .child(PermissionDef::new(RETURNS_VIEW, "View purchase returns"))
+                    .child(PermissionDef::new(RETURNS_CREATE, "Create purchase returns"))
+                    .child(PermissionDef::new(RETURNS_POST, "Post purchase returns"))
+                    .child(PermissionDef::new(
+                        RETURNS_REVERSE,
+                        "Reverse purchase returns",
+                    )),
             )
             .child(
                 PermissionDef::new(INVOICES, "Purchase invoices")

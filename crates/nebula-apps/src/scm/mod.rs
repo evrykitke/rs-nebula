@@ -58,6 +58,11 @@ pub(crate) const ORDER_SERIES: &str = "procurement.order";
 /// Number series for purchase invoices (vendor bills).
 pub(crate) const INVOICE_SERIES: &str = "procurement.invoice";
 
+/// Number series for purchase returns (return to supplier). Like goods
+/// receipts, the one RTS number lands on the return and on the stock
+/// movement it creates.
+pub(crate) const RETURN_SERIES: &str = "procurement.return";
+
 pub struct ScmApp;
 
 impl Module for ScmApp {
@@ -80,6 +85,7 @@ impl Module for ScmApp {
             (ADJUSTMENT_SERIES, "Stock Adjustment", "ADJ-{YYYY}-{SEQ:5}"),
             (ORDER_SERIES, "Purchase Order", "PO-{YYYY}-{SEQ:5}"),
             (INVOICE_SERIES, "Purchase Invoice", "PINV-{YYYY}-{SEQ:5}"),
+            (RETURN_SERIES, "Purchase Return", "RTS-{YYYY}-{SEQ:5}"),
         ] {
             ctx.declare_series(
                 SeriesDef::new(key, name, template, Reset::Yearly)
@@ -95,6 +101,7 @@ impl Module for ScmApp {
         ctx.add_api(procurement::supplier::api());
         ctx.add_api(procurement::order::api());
         ctx.add_api(procurement::receipt::api());
+        ctx.add_api(procurement::returns::api());
         ctx.add_api(procurement::invoice::api());
         ctx.add_api(procurement::reports::api());
         ctx.add_api(gl::api());
@@ -107,6 +114,7 @@ impl Module for ScmApp {
                 .merge(procurement::supplier::routes())
                 .merge(procurement::order::routes())
                 .merge(procurement::receipt::routes())
+                .merge(procurement::returns::routes())
                 .merge(procurement::invoice::routes())
                 .merge(procurement::reports::routes())
                 .merge(gl::routes()),
