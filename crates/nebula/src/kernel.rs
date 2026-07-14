@@ -245,6 +245,7 @@ impl Kernel {
             crate::cache::Cache::disabled(&self.config.cache)
         };
 
+        let numbering_handle = crate::numbering::NumberingHandle::default();
         let mut ctx = ModuleContext::new(
             &self.config,
             database.clone(),
@@ -254,6 +255,7 @@ impl Kernel {
             events.clone(),
             storage.clone(),
             cache.clone(),
+            numbering_handle.clone(),
         );
         for module in &self.modules {
             tracing::info!(module = module.name(), "configuring module");
@@ -273,6 +275,7 @@ impl Kernel {
 
         let numbering =
             crate::numbering::Numbering::build(parts.series, Arc::new(crate::time::SystemClock))?;
+        numbering_handle.install(numbering.clone());
         tracing::info!(count = numbering.len(), "document number series registered");
 
         let reporting =

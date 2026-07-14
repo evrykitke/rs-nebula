@@ -18,6 +18,7 @@
 //! payment phase; until then the AP side is the invoice register).
 //! Totals are computed on the view, never persisted redundantly.
 
+use crate::scm::gl;
 use crate::scm::inventory::item::item;
 use crate::scm::inventory::stock;
 use crate::scm::procurement::order::{
@@ -32,7 +33,7 @@ use axum::{Extension, Json, Router};
 use nebula::audit::Audit;
 use nebula::auth::Authz;
 use nebula::error::{Error, Result};
-use nebula::{Numbering, TenantDb, sea_orm};
+use nebula::{CurrentTenant, Events, Numbering, TenantDb, sea_orm};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 use sea_orm::{
@@ -291,7 +292,15 @@ impl InvoiceService {
 
     /// Post a draft invoice: the three-way match runs under the order row
     /// lock, `billed_qty` bumps, the PINV number lands — one transaction.
-    pub async fn post(&self, id: Uuid, numbering: &Numbering, by: Option<Uuid>) -> Result<InvoiceView> {
+    /// The GL request (Dr GRNI / Cr AP) is staged with it and published
+    /// after commit.
+    pub async fn post(
+        &self,
+        id: Uuid,
+        numbering: &Numbering,
+        by: Option<Uuid>,
+        gl: &gl::Gl,
+    ) -> Result<InvoiceView> {
         let txn = self.db.begin().await?;
         let invoice_row = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&invoice_row.status)? != InvoiceStatus::Draft {
@@ -366,6 +375,14 @@ impl InvoiceService {
 
         let number = numbering.next(&txn, crate::scm::INVOICE_SERIES).await?;
         let now = chrono::Utc::now();
+        // The GL memo names the fresh PINV number, which only lands on the
+        // row below — hand the builder a copy that already carries it.
+        let mut for_gl = invoice_row.clone();
+        for_gl.number = Some(number.formatted.clone());
+        let request = gl::purchase_invoice_request(&txn, &for_gl, false, gl.tenant_id()).await?;
+        if let Some(req) = &request {
+            gl::stage(&txn, req).await?;
+        }
         let mut active: invoice::ActiveModel = invoice_row.into();
         active.status = Set(InvoiceStatus::Posted.as_str().to_string());
         active.number = Set(Some(number.formatted));
@@ -374,12 +391,22 @@ impl InvoiceService {
         active.updated_at = Set(now);
         active.update(&txn).await?;
         txn.commit().await?;
+        if let Some(req) = request {
+            gl.publish(req).await;
+        }
         self.view(id).await
     }
 
     /// Cancel a posted invoice while nothing references it (payments are a
-    /// later concern); restores `billed_qty` under the order row lock.
-    pub async fn cancel(&self, id: Uuid, reason: &str, by: Option<Uuid>) -> Result<InvoiceView> {
+    /// later concern); restores `billed_qty` under the order row lock and
+    /// books the mirror of the posting entry.
+    pub async fn cancel(
+        &self,
+        id: Uuid,
+        reason: &str,
+        by: Option<Uuid>,
+        gl: &gl::Gl,
+    ) -> Result<InvoiceView> {
         let txn = self.db.begin().await?;
         let existing = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&existing.status)? != InvoiceStatus::Posted {
@@ -412,6 +439,10 @@ impl InvoiceService {
             active.update(&txn).await?;
         }
         let now = chrono::Utc::now();
+        let request = gl::purchase_invoice_request(&txn, &existing, true, gl.tenant_id()).await?;
+        if let Some(req) = &request {
+            gl::stage(&txn, req).await?;
+        }
         let mut active: invoice::ActiveModel = existing.into();
         active.status = Set(InvoiceStatus::Cancelled.as_str().to_string());
         active.cancelled_at = Set(Some(now));
@@ -420,6 +451,9 @@ impl InvoiceService {
         active.updated_at = Set(now);
         active.update(&txn).await?;
         txn.commit().await?;
+        if let Some(req) = request {
+            gl.publish(req).await;
+        }
         self.view(id).await
     }
 
@@ -1066,12 +1100,15 @@ async fn post_invoice(
     authz: Authz,
     audit: Audit,
     TenantDb(db): TenantDb,
+    CurrentTenant(tenant): CurrentTenant,
     Extension(numbering): Extension<Numbering>,
+    Extension(events): Extension<Events>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<InvoiceView>> {
     authz.require(names::INVOICES_POST).await?;
+    let gl = gl::Gl::new(events, tenant.map(|t| t.id));
     let view = InvoiceService::new(db)
-        .post(id, &numbering, Some(authz.user.id))
+        .post(id, &numbering, Some(authz.user.id), &gl)
         .await?;
     audit
         .0
@@ -1091,12 +1128,15 @@ async fn cancel_invoice(
     authz: Authz,
     audit: Audit,
     TenantDb(db): TenantDb,
+    CurrentTenant(tenant): CurrentTenant,
+    Extension(events): Extension<Events>,
     Path(id): Path<Uuid>,
     Json(req): Json<CancelInvoiceRequest>,
 ) -> Result<Json<InvoiceView>> {
     authz.require(names::INVOICES_CANCEL).await?;
+    let gl = gl::Gl::new(events, tenant.map(|t| t.id));
     let view = InvoiceService::new(db)
-        .cancel(id, &req.reason, Some(authz.user.id))
+        .cancel(id, &req.reason, Some(authz.user.id), &gl)
         .await?;
     audit
         .0

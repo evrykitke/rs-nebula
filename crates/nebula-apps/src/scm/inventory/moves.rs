@@ -19,6 +19,7 @@
 //! e.g. a procurement goods receipt) can only be reversed through that
 //! source document.
 
+use crate::scm::gl;
 use crate::scm::inventory::item::{self, uom};
 use crate::scm::inventory::permissions::names;
 use crate::scm::inventory::stock::{self, Movement, StockService, ledger};
@@ -29,7 +30,7 @@ use axum::{Extension, Json, Router};
 use nebula::audit::Audit;
 use nebula::auth::Authz;
 use nebula::error::{Error, Result};
-use nebula::{Numbering, TenantDb, sea_orm};
+use nebula::{CurrentTenant, Events, Numbering, TenantDb, sea_orm};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 use sea_orm::{
@@ -287,8 +288,9 @@ impl MoveService {
     /// gap-free number and freeze the document — one transaction. Items
     /// are re-validated (one may have been deactivated since the draft),
     /// and every touched level row is pre-locked in ascending order before
-    /// any is changed, so concurrent posts cannot deadlock.
-    pub async fn post(&self, id: Uuid, numbering: &Numbering) -> Result<MoveView> {
+    /// any is changed, so concurrent posts cannot deadlock. The GL request
+    /// is staged in the same transaction and published after commit.
+    pub async fn post(&self, id: Uuid, numbering: &Numbering, gl: &gl::Gl) -> Result<MoveView> {
         let txn = self.db.begin().await?;
         let doc_row = load_move_locked(&txn, id).await?;
         if MoveStatus::parse(&doc_row.status)? != MoveStatus::Draft {
@@ -344,7 +346,15 @@ impl MoveService {
         active.number = Set(Some(number.formatted));
         active.posted_at = Set(Some(chrono::Utc::now()));
         active.update(&txn).await?;
+
+        let request = gl::stock_move_request(&txn, id, gl.tenant_id()).await?;
+        if let Some(req) = &request {
+            gl::stage(&txn, req).await?;
+        }
         txn.commit().await?;
+        if let Some(req) = request {
+            gl.publish(req).await;
+        }
         self.view(id).await
     }
 
@@ -362,6 +372,7 @@ impl MoveService {
         entry_date: Option<chrono::NaiveDate>,
         numbering: &Numbering,
         created_by: Option<Uuid>,
+        gl: &gl::Gl,
     ) -> Result<MoveView> {
         let txn = self.db.begin().await?;
         let original = load_move_locked(&txn, id).await?;
@@ -501,7 +512,16 @@ impl MoveService {
         active.reversed_by_id = Set(Some(reversal_id));
         active.update(&txn).await?;
 
+        // The reversal is its own posted document; its ledger rows carry
+        // the mirrored signs, so the same builder yields the mirror entry.
+        let request = gl::stock_move_request(&txn, reversal_id, gl.tenant_id()).await?;
+        if let Some(req) = &request {
+            gl::stage(&txn, req).await?;
+        }
         txn.commit().await?;
+        if let Some(req) = request {
+            gl.publish(req).await;
+        }
         self.view(reversal_id).await
     }
 
@@ -1268,12 +1288,15 @@ async fn post_move(
     authz: Authz,
     audit: Audit,
     TenantDb(db): TenantDb,
+    CurrentTenant(tenant): CurrentTenant,
     Extension(numbering): Extension<Numbering>,
+    Extension(events): Extension<Events>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MoveView>> {
     let service = MoveService::new(db);
     authz.require(perm_post(service.move_type_of(id).await?)).await?;
-    let view = service.post(id, &numbering).await?;
+    let gl = gl::Gl::new(events, tenant.map(|t| t.id));
+    let view = service.post(id, &numbering, &gl).await?;
     audit
         .0
         .event(format!(
@@ -1292,11 +1315,14 @@ async fn reverse_move(
     authz: Authz,
     audit: Audit,
     TenantDb(db): TenantDb,
+    CurrentTenant(tenant): CurrentTenant,
     Extension(numbering): Extension<Numbering>,
+    Extension(events): Extension<Events>,
     Path(id): Path<Uuid>,
     Json(req): Json<ReverseMoveRequest>,
 ) -> Result<Json<MoveView>> {
     authz.require(names::MOVEMENTS_REVERSE).await?;
+    let gl = gl::Gl::new(events, tenant.map(|t| t.id));
     let view = MoveService::new(db)
         .reverse(
             id,
@@ -1304,6 +1330,7 @@ async fn reverse_move(
             req.entry_date,
             &numbering,
             Some(authz.user.id),
+            &gl,
         )
         .await?;
     audit

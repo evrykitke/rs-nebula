@@ -16,14 +16,16 @@
 //! Table prefixes stay per submodule (`inventory_*`, `procurement_*`) so a
 //! future split into separate crates never needs renames. Every tenant is
 //! seeded with a default warehouse and starter units of measure so stock
-//! can move with zero configuration. GL integration is a later phase:
-//! documents carry the seams (account-role columns, movement `source`)
-//! but book nothing yet — inventory is periodic from the GL's point of
-//! view.
+//! can move with zero configuration. Inventory is **perpetual**: every
+//! posted document with a financial effect publishes a posting request
+//! over the framework's GL port ([`gl`]), which the accounting app books
+//! against role-resolved seeded accounts — see the posting matrix in
+//! [`gl`]'s module docs.
 //!
 //! Depends on [`AdministrationModule`]: stock is moved by signed-in
 //! people of a tenant.
 
+pub mod gl;
 pub mod inventory;
 pub mod procurement;
 pub mod seed;
@@ -94,6 +96,7 @@ impl Module for ScmApp {
         ctx.add_api(procurement::receipt::api());
         ctx.add_api(procurement::invoice::api());
         ctx.add_api(procurement::reports::api());
+        ctx.add_api(gl::api());
         ctx.add_routes(
             inventory::item::routes()
                 .merge(inventory::warehouse::routes())
@@ -103,7 +106,8 @@ impl Module for ScmApp {
                 .merge(procurement::order::routes())
                 .merge(procurement::receipt::routes())
                 .merge(procurement::invoice::routes())
-                .merge(procurement::reports::routes()),
+                .merge(procurement::reports::routes())
+                .merge(gl::routes()),
         );
 
         ctx.declare_report(Arc::new(inventory::reports::StockBalanceReport));
@@ -112,6 +116,12 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(inventory::reports::ReorderReport));
         ctx.declare_report(Arc::new(procurement::reports::GrniReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierBalancesReport));
+        ctx.declare_report(Arc::new(gl::GlReconciliationReport));
+
+        // GL integration: clear outbox rows on accounting's acknowledgement
+        // and re-publish anything that lingers unbooked.
+        gl::subscribe_acks(ctx);
+        gl::spawn_sweeper(ctx);
 
         self.seed_tenants(ctx);
     }

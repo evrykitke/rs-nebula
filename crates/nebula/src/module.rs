@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::events::Events;
 use crate::jobs::Jobs;
 use crate::money::CurrencyRegistry;
-use crate::numbering::SeriesDef;
+use crate::numbering::{NumberingHandle, SeriesDef};
 use crate::reporting::ReportDefinition;
 use crate::storage::Storage;
 use crate::tenancy::TenantManager;
@@ -98,6 +98,7 @@ pub struct ModuleContext<'a> {
     events: Events,
     storage: Storage,
     cache: Cache,
+    numbering: NumberingHandle,
     router: Router,
     permissions: Vec<PermissionDef>,
     series: Vec<SeriesDef>,
@@ -116,6 +117,7 @@ impl<'a> ModuleContext<'a> {
         events: Events,
         storage: Storage,
         cache: Cache,
+        numbering: NumberingHandle,
     ) -> Self {
         Self {
             config,
@@ -126,6 +128,7 @@ impl<'a> ModuleContext<'a> {
             events,
             storage,
             cache,
+            numbering,
             router: Router::new(),
             permissions: Vec::new(),
             series: Vec::new(),
@@ -222,6 +225,16 @@ impl<'a> ModuleContext<'a> {
     /// A no-op when `cache.enabled` is off, so it is always safe to use.
     pub fn cache(&self) -> Cache {
         self.cache.clone()
+    }
+
+    /// A late-binding handle to the document-numbering registry, for the
+    /// code a module wires now but that runs after boot: event
+    /// subscribers and workers call [`NumberingHandle::get`] when they
+    /// fire. Handlers keep using the [`Numbering`] request extension.
+    ///
+    /// [`Numbering`]: crate::numbering::Numbering
+    pub fn numbering(&self) -> NumberingHandle {
+        self.numbering.clone()
     }
 
     /// Contribute a background worker. The registration runs against the

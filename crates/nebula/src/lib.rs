@@ -19,6 +19,7 @@ pub mod migrations;
 pub mod module;
 pub mod money;
 pub mod numbering;
+pub mod ports;
 pub mod reporting;
 pub mod repository;
 pub mod sql_migrations;
@@ -50,7 +51,7 @@ pub use events::{Event, Events};
 pub use kernel::{App, Kernel};
 pub use module::{Module, ModuleContext};
 pub use money::{Currency, CurrencyRegistry, Money};
-pub use numbering::{Number, Numbering, Reset, SeriesDef};
+pub use numbering::{Number, Numbering, NumberingHandle, Reset, SeriesDef};
 pub use reporting::{
     Align, Callout, CalloutStyle, Chart, ChartKind, Column, CompanyInformation, DataColumn, DataCx,
     DataTable, Group, Image, KeyValue, Metric, Orientation, Progress, Report, ReportData,

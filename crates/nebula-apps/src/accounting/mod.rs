@@ -25,6 +25,7 @@
 pub mod account;
 pub mod expense;
 pub mod fiscal;
+pub mod gl_port;
 pub mod journal;
 pub mod ledger;
 pub mod reports;
@@ -42,6 +43,10 @@ pub(crate) const JOURNAL_SERIES: &str = "accounting.journal";
 
 /// The document number series for expense (payment) vouchers.
 pub(crate) const EXPENSE_SERIES: &str = "accounting.expense";
+
+/// The document number series for entries booked by the system on behalf
+/// of source documents in other modules (the GL posting port).
+pub(crate) const SYSTEM_SERIES: &str = "accounting.system";
 
 /// The currency a tenant with no configured default is seeded in.
 const FALLBACK_CURRENCY: &str = "USD";
@@ -77,6 +82,15 @@ impl Module for AccountingApp {
             )
             .expect("valid expense series template"),
         );
+        ctx.declare_series(
+            SeriesDef::new(
+                SYSTEM_SERIES,
+                "System Journal Entry",
+                "SYS-{YYYY}-{SEQ:5}",
+                Reset::Yearly,
+            )
+            .expect("valid system series template"),
+        );
 
         ctx.add_api(account::api());
         ctx.add_api(journal::api());
@@ -96,6 +110,9 @@ impl Module for AccountingApp {
         ctx.declare_report(Arc::new(reports::TrialBalanceReport));
         ctx.declare_report(Arc::new(reports::BalanceSheetReport));
         ctx.declare_report(Arc::new(reports::IncomeStatementReport));
+
+        // Other modules' financial side effects arrive over the GL port.
+        gl_port::GlPort::subscribe(ctx);
 
         self.seed_tenants(ctx);
     }

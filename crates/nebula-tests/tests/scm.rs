@@ -10,7 +10,8 @@
 //! transactions) while the harness stays sequential.
 
 use nebula::config::{Config, DatabaseConfig, MigrationsConfig};
-use nebula::{Kernel, Module, ModuleContext, Reset, SeriesDef};
+use nebula::{Events, Kernel, Module, ModuleContext, Reset, SeriesDef};
+use nebula_apps::scm::gl::Gl;
 use nebula_apps::scm::inventory::item::{self, CostingMethod, ItemBody, ItemType, UomBody};
 use nebula_apps::scm::inventory::moves::{LineInput, MoveService, MoveStatus, MoveType, NewMove};
 use nebula_apps::scm::inventory::stock;
@@ -381,7 +382,8 @@ async fn scenario() {
     .expect("must connect");
     admin_db
         .execute_unprepared(
-            "DROP TABLE IF EXISTS procurement_invoice_lines; \
+            "DROP TABLE IF EXISTS scm_gl_outbox; \
+             DROP TABLE IF EXISTS procurement_invoice_lines; \
              DROP TABLE IF EXISTS procurement_invoices; \
              DROP TABLE IF EXISTS procurement_receipt_lines; \
              DROP TABLE IF EXISTS procurement_receipts; \
@@ -575,6 +577,8 @@ async fn scenario() {
     // =======================================================================
     let numbering = app.numbering();
     let moves = MoveService::new(db.clone());
+    // A bus with no subscribers: publishes are no-ops, staging still runs.
+    let gl = Gl::new(Events::new(), None);
 
     // --- the moving-average worked example (exact decimals, no epsilons) ---
     let stk = items
@@ -593,7 +597,7 @@ async fn scenario() {
         .unwrap();
     assert_eq!(r1.status, MoveStatus::Draft);
     assert!(r1.number.is_none(), "drafts are unnumbered");
-    let r1 = moves.post(r1.id, &numbering).await.unwrap();
+    let r1 = moves.post(r1.id, &numbering, &gl).await.unwrap();
     assert_eq!(r1.status, MoveStatus::Posted);
     assert!(
         r1.number.as_deref().unwrap().starts_with("GRN-"),
@@ -613,7 +617,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    moves.post(r2.id, &numbering).await.unwrap();
+    moves.post(r2.id, &numbering, &gl).await.unwrap();
     assert_eq!(
         level_of(&db, stk.id, main.id).await,
         (Decimal::from(20), Decimal::from(3000)),
@@ -629,7 +633,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    let i1 = moves.post(i1.id, &numbering).await.unwrap();
+    let i1 = moves.post(i1.id, &numbering, &gl).await.unwrap();
     assert!(i1.number.as_deref().unwrap().starts_with("ISS-"));
     let i1_rows = stock::ledger::Entity::find()
         .filter(stock::ledger::Column::MoveId.eq(i1.id))
@@ -654,7 +658,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    moves.post(i2.id, &numbering).await.unwrap();
+    moves.post(i2.id, &numbering, &gl).await.unwrap();
     let (on_hand, value) = level_of(&db, stk.id, main.id).await;
     assert_eq!(on_hand, Decimal::ZERO);
     assert_eq!(value, Decimal::ZERO, "zero quantity means exactly zero value");
@@ -680,7 +684,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    let err = moves.post(short.id, &numbering).await.unwrap_err();
+    let err = moves.post(short.id, &numbering, &gl).await.unwrap_err();
     assert!(err.to_string().contains("insufficient stock"));
 
     let fractional = moves
@@ -693,7 +697,7 @@ async fn scenario() {
         .await
         .unwrap();
     assert!(
-        moves.post(fractional.id, &numbering).await.is_err(),
+        moves.post(fractional.id, &numbering, &gl).await.is_err(),
         "fractional qty on a whole-unit UoM must be rejected"
     );
 
@@ -707,7 +711,7 @@ async fn scenario() {
         .await
         .unwrap();
     assert!(
-        moves.post(costless.id, &numbering).await.is_err(),
+        moves.post(costless.id, &numbering, &gl).await.is_err(),
         "a receipt line needs a unit cost at post"
     );
 
@@ -749,7 +753,7 @@ async fn scenario() {
         .await
         .unwrap();
     assert!(
-        moves.post(svc_receipt.id, &numbering).await.is_err(),
+        moves.post(svc_receipt.id, &numbering, &gl).await.is_err(),
         "a service item never moves through the ledger"
     );
 
@@ -785,7 +789,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    moves.post(seed_receipt.id, &numbering).await.unwrap();
+    moves.post(seed_receipt.id, &numbering, &gl).await.unwrap();
     let transfer = moves
         .create_draft(stock_move(
             MoveType::Transfer,
@@ -795,7 +799,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    let transfer = moves.post(transfer.id, &numbering).await.unwrap();
+    let transfer = moves.post(transfer.id, &numbering, &gl).await.unwrap();
     assert!(transfer.number.as_deref().unwrap().starts_with("TRF-"));
     assert_eq!(
         level_of(&db, xfr.id, main.id).await,
@@ -822,7 +826,7 @@ async fn scenario() {
         .await
         .unwrap();
     assert!(
-        moves.post(from_zero.id, &numbering).await.is_err(),
+        moves.post(from_zero.id, &numbering, &gl).await.is_err(),
         "counting up from zero stock needs a unit cost"
     );
     let opening = moves
@@ -834,7 +838,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    let opening = moves.post(opening.id, &numbering).await.unwrap();
+    let opening = moves.post(opening.id, &numbering, &gl).await.unwrap();
     assert!(opening.number.as_deref().unwrap().starts_with("ADJ-"));
     assert_eq!(
         level_of(&db, adj_item.id, wh2.id).await,
@@ -851,7 +855,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    moves.post(count_down.id, &numbering).await.unwrap();
+    moves.post(count_down.id, &numbering, &gl).await.unwrap();
     assert_eq!(
         level_of(&db, adj_item.id, wh2.id).await,
         (Decimal::from(2), Decimal::from(40)),
@@ -867,7 +871,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    let confirming = moves.post(confirming.id, &numbering).await.unwrap();
+    let confirming = moves.post(confirming.id, &numbering, &gl).await.unwrap();
     let confirming_rows = stock::ledger::Entity::find()
         .filter(stock::ledger::Column::MoveId.eq(confirming.id))
         .all(&db)
@@ -892,7 +896,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    let rev_receipt = moves.post(rev_receipt.id, &numbering).await.unwrap();
+    let rev_receipt = moves.post(rev_receipt.id, &numbering, &gl).await.unwrap();
     let rev_issue = moves
         .create_draft(stock_move(
             MoveType::Issue,
@@ -902,10 +906,10 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    let rev_issue = moves.post(rev_issue.id, &numbering).await.unwrap();
+    let rev_issue = moves.post(rev_issue.id, &numbering, &gl).await.unwrap();
 
     let err = moves
-        .reverse(rev_receipt.id, "undo", None, &numbering, None)
+        .reverse(rev_receipt.id, "undo", None, &numbering, None, &gl)
         .await
         .unwrap_err();
     assert!(
@@ -914,7 +918,7 @@ async fn scenario() {
     );
 
     let issue_reversal = moves
-        .reverse(rev_issue.id, "wrong item", None, &numbering, None)
+        .reverse(rev_issue.id, "wrong item", None, &numbering, None, &gl)
         .await
         .unwrap();
     assert_eq!(issue_reversal.reverses_id, Some(rev_issue.id));
@@ -927,12 +931,12 @@ async fn scenario() {
     assert_eq!(original.status, MoveStatus::Reversed);
     assert_eq!(original.reversed_by_id, Some(issue_reversal.id));
     assert!(
-        moves.reverse(rev_issue.id, "again", None, &numbering, None).await.is_err(),
+        moves.reverse(rev_issue.id, "again", None, &numbering, None, &gl).await.is_err(),
         "a movement reverses once"
     );
 
     moves
-        .reverse(rev_receipt.id, "undo", None, &numbering, None)
+        .reverse(rev_receipt.id, "undo", None, &numbering, None, &gl)
         .await
         .unwrap();
     assert_eq!(
@@ -950,7 +954,7 @@ async fn scenario() {
         .await
         .unwrap();
     assert!(
-        moves.reverse(draft.id, "not posted", None, &numbering, None).await.is_err(),
+        moves.reverse(draft.id, "not posted", None, &numbering, None, &gl).await.is_err(),
         "drafts cannot be reversed"
     );
     moves.delete_draft(draft.id).await.unwrap();
@@ -972,7 +976,7 @@ async fn scenario() {
         ))
         .await
         .unwrap();
-    moves.post(last_unit.id, &numbering).await.unwrap();
+    moves.post(last_unit.id, &numbering, &gl).await.unwrap();
 
     let mut race_drafts = Vec::new();
     for _ in 0..2 {
@@ -994,8 +998,9 @@ async fn scenario() {
         let numbering = numbering.clone();
         let barrier = barrier.clone();
         handles.push(tokio::spawn(async move {
+            let gl = Gl::new(Events::new(), None);
             barrier.wait().await;
-            MoveService::new(db).post(draft_id, &numbering).await
+            MoveService::new(db).post(draft_id, &numbering, &gl).await
         }));
     }
     let mut outcomes = Vec::new();
@@ -1042,6 +1047,7 @@ async fn procurement_phase(
     let receipts = ReceiptService::new(db.clone());
     let invoices = InvoiceService::new(db.clone());
     let queries = ProcurementQueries::new(db.clone());
+    let gl = Gl::new(Events::new(), None);
 
     // --- supplier master ---
     let acme = suppliers
@@ -1150,7 +1156,7 @@ async fn procurement_phase(
         .create_draft(goods_receipt(po.id, vec![gr_line(po_line_id, Decimal::from(6))]))
         .await
         .unwrap();
-    let rcpt6 = receipts.post(rcpt6.id, &numbering).await.unwrap();
+    let rcpt6 = receipts.post(rcpt6.id, &numbering, &gl).await.unwrap();
     assert_eq!(rcpt6.status, ReceiptStatus::Posted);
     assert!(rcpt6.number.as_deref().unwrap().starts_with("GRN-"));
     let po_view = orders.view(po.id).await.unwrap();
@@ -1178,7 +1184,7 @@ async fn procurement_phase(
         .create_draft(goods_receipt(po.id, vec![gr_line(po_line_id, Decimal::from(5))]))
         .await
         .unwrap();
-    let err = receipts.post(over.id, &numbering).await.unwrap_err();
+    let err = receipts.post(over.id, &numbering, &gl).await.unwrap_err();
     assert!(
         err.to_string().contains("exceeds"),
         "over-receipt is rejected: {err}"
@@ -1190,7 +1196,7 @@ async fn procurement_phase(
         .create_draft(goods_receipt(po.id, vec![gr_line(po_line_id, Decimal::from(4))]))
         .await
         .unwrap();
-    receipts.post(rcpt4.id, &numbering).await.unwrap();
+    receipts.post(rcpt4.id, &numbering, &gl).await.unwrap();
     let po_view = orders.view(po.id).await.unwrap();
     assert_eq!(po_view.status, OrderStatus::Received);
     assert_eq!(
@@ -1203,7 +1209,7 @@ async fn procurement_phase(
     // A movement generated by procurement reverses only through it.
     let source_move = rcpt6.move_id.unwrap();
     let err = moves
-        .reverse(source_move, "sneaky", None, &numbering, None)
+        .reverse(source_move, "sneaky", None, &numbering, None, &gl)
         .await
         .unwrap_err();
     assert!(
@@ -1227,7 +1233,7 @@ async fn procurement_phase(
         ))
         .await
         .unwrap();
-    let err = invoices.post(overbill.id, &numbering, None).await.unwrap_err();
+    let err = invoices.post(overbill.id, &numbering, None, &gl).await.unwrap_err();
     assert!(err.to_string().contains("exceeds"), "overbilling rejected: {err}");
     invoices.delete_draft(overbill.id).await.unwrap();
 
@@ -1241,7 +1247,7 @@ async fn procurement_phase(
         ))
         .await
         .unwrap();
-    let err = invoices.post(priced_wrong.id, &numbering, None).await.unwrap_err();
+    let err = invoices.post(priced_wrong.id, &numbering, None, &gl).await.unwrap_err();
     assert!(
         err.to_string().contains("does not match"),
         "price mismatch rejected: {err}"
@@ -1258,7 +1264,7 @@ async fn procurement_phase(
         ))
         .await
         .unwrap();
-    let bill = invoices.post(bill.id, &numbering, None).await.unwrap();
+    let bill = invoices.post(bill.id, &numbering, None, &gl).await.unwrap();
     assert_eq!(bill.status, InvoiceStatus::Posted);
     assert!(bill.number.as_deref().unwrap().starts_with("PINV-"));
     assert_eq!(bill.total, Decimal::from(500));
@@ -1287,7 +1293,7 @@ async fn procurement_phase(
     );
 
     // Cancelling the bill reopens the GRNI; a corrected entry closes it.
-    invoices.cancel(bill.id, "wrong period", None).await.unwrap();
+    invoices.cancel(bill.id, "wrong period", None, &gl).await.unwrap();
     assert_eq!(queries.grni().await.unwrap().total, Decimal::from(500));
     let rebill = invoices
         .create_draft(vendor_bill(
@@ -1298,7 +1304,7 @@ async fn procurement_phase(
         ))
         .await
         .unwrap();
-    invoices.post(rebill.id, &numbering, None).await.unwrap();
+    invoices.post(rebill.id, &numbering, None, &gl).await.unwrap();
     assert_eq!(queries.grni().await.unwrap().total, Decimal::ZERO);
 
     // A referenced supplier deactivates instead of deleting.
@@ -1333,14 +1339,14 @@ async fn procurement_phase(
         .create_draft(goods_receipt(rev_po.id, vec![gr_line(rev_po_line, Decimal::from(5))]))
         .await
         .unwrap();
-    let rev_rcpt = receipts.post(rev_rcpt.id, &numbering).await.unwrap();
+    let rev_rcpt = receipts.post(rev_rcpt.id, &numbering, &gl).await.unwrap();
     assert_eq!(
         level_of(&db, rev_item.id, main.id).await,
         (Decimal::from(5), Decimal::from(100))
     );
 
     let reversal = receipts
-        .reverse(rev_rcpt.id, "damaged on arrival", &numbering, None)
+        .reverse(rev_rcpt.id, "damaged on arrival", &numbering, None, &gl)
         .await
         .unwrap();
     assert_eq!(reversal.reverses_id, Some(rev_rcpt.id));
@@ -1362,7 +1368,7 @@ async fn procurement_phase(
     assert_eq!(original.status, ReceiptStatus::Reversed);
     assert_eq!(original.reversed_by_id, Some(reversal.id));
     assert!(
-        receipts.reverse(rev_rcpt.id, "again", &numbering, None).await.is_err(),
+        receipts.reverse(rev_rcpt.id, "again", &numbering, None, &gl).await.is_err(),
         "a receipt reverses once"
     );
 
@@ -1371,7 +1377,7 @@ async fn procurement_phase(
         .create_draft(goods_receipt(rev_po.id, vec![gr_line(rev_po_line, Decimal::from(3))]))
         .await
         .unwrap();
-    let rev_rcpt3 = receipts.post(rev_rcpt3.id, &numbering).await.unwrap();
+    let rev_rcpt3 = receipts.post(rev_rcpt3.id, &numbering, &gl).await.unwrap();
     let rev_bill = invoices
         .create_draft(vendor_bill(
             acme.id,
@@ -1381,9 +1387,9 @@ async fn procurement_phase(
         ))
         .await
         .unwrap();
-    invoices.post(rev_bill.id, &numbering, None).await.unwrap();
+    invoices.post(rev_bill.id, &numbering, None, &gl).await.unwrap();
     let err = receipts
-        .reverse(rev_rcpt3.id, "too late", &numbering, None)
+        .reverse(rev_rcpt3.id, "too late", &numbering, None, &gl)
         .await
         .unwrap_err();
     assert!(
@@ -1460,7 +1466,7 @@ async fn procurement_phase(
         ))
         .await
         .unwrap();
-    receipts.post(fx_rcpt.id, &numbering).await.unwrap();
+    receipts.post(fx_rcpt.id, &numbering, &gl).await.unwrap();
     assert_eq!(
         level_of(&db, fx_item.id, main.id).await,
         (Decimal::from(4), Decimal::from(40)),
@@ -1490,7 +1496,7 @@ async fn procurement_phase(
         .create_draft(goods_receipt(race_po.id, vec![gr_line(race_po_line, Decimal::from(6))]))
         .await
         .unwrap();
-    receipts.post(first6.id, &numbering).await.unwrap();
+    receipts.post(first6.id, &numbering, &gl).await.unwrap();
 
     let mut race_receipts = Vec::new();
     for _ in 0..2 {
@@ -1510,8 +1516,9 @@ async fn procurement_phase(
         let numbering = numbering.clone();
         let barrier = barrier.clone();
         handles.push(tokio::spawn(async move {
+            let gl = Gl::new(Events::new(), None);
             barrier.wait().await;
-            ReceiptService::new(db).post(receipt_id, &numbering).await
+            ReceiptService::new(db).post(receipt_id, &numbering, &gl).await
         }));
     }
     let mut outcomes = Vec::new();

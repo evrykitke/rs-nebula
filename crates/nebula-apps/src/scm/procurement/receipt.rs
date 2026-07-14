@@ -18,6 +18,7 @@
 //! counters, and links the pair — billed quantities must be cancelled off
 //! their invoices first.
 
+use crate::scm::gl;
 use crate::scm::inventory::item::{item, uom};
 use crate::scm::inventory::moves::{MoveStatus, MoveType, doc as move_doc, line as move_line};
 use crate::scm::inventory::stock::{self, Movement, StockService, ledger};
@@ -33,7 +34,7 @@ use axum::{Extension, Json, Router};
 use nebula::audit::Audit;
 use nebula::auth::Authz;
 use nebula::error::{Error, Result};
-use nebula::{Numbering, TenantDb, sea_orm};
+use nebula::{CurrentTenant, Events, Numbering, TenantDb, sea_orm};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 use sea_orm::{
@@ -265,7 +266,9 @@ impl ReceiptService {
     }
 
     /// Post a draft receipt: stock in, PO counters up, one transaction.
-    pub async fn post(&self, id: Uuid, numbering: &Numbering) -> Result<ReceiptView> {
+    /// The GRNI accrual (Dr inventory / Cr GRNI) is staged in the same
+    /// transaction and published after commit.
+    pub async fn post(&self, id: Uuid, numbering: &Numbering, gl: &gl::Gl) -> Result<ReceiptView> {
         let txn = self.db.begin().await?;
         let receipt_row = load_receipt_locked(&txn, id).await?;
         if ReceiptStatus::parse(&receipt_row.status)? != ReceiptStatus::Draft {
@@ -432,6 +435,7 @@ impl ReceiptService {
         mv.number = Set(Some(number.formatted.clone()));
         mv.update(&txn).await?;
 
+        let receipt_date = receipt_row.receipt_date;
         let mut active: receipt::ActiveModel = receipt_row.into();
         active.status = Set(ReceiptStatus::Posted.as_str().to_string());
         active.number = Set(Some(number.formatted));
@@ -439,7 +443,23 @@ impl ReceiptService {
         active.posted_at = Set(Some(now));
         active.updated_at = Set(now);
         active.update(&txn).await?;
+
+        let request = gl::goods_receipt_request(
+            &txn,
+            id,
+            move_id,
+            order_row.number.as_deref(),
+            receipt_date,
+            gl.tenant_id(),
+        )
+        .await?;
+        if let Some(req) = &request {
+            gl::stage(&txn, req).await?;
+        }
         txn.commit().await?;
+        if let Some(req) = request {
+            gl.publish(req).await;
+        }
         self.view(id).await
     }
 
@@ -453,6 +473,7 @@ impl ReceiptService {
         reason: &str,
         numbering: &Numbering,
         by: Option<Uuid>,
+        gl: &gl::Gl,
     ) -> Result<ReceiptView> {
         let txn = self.db.begin().await?;
         let original = load_receipt_locked(&txn, id).await?;
@@ -701,7 +722,25 @@ impl ReceiptService {
         active.reversed_by_id = Set(Some(reversal_id));
         active.updated_at = Set(now);
         active.update(&txn).await?;
+
+        // The reversal movement's ledger rows carry the mirrored signs, so
+        // the same builder yields Dr GRNI / Cr inventory.
+        let request = gl::goods_receipt_request(
+            &txn,
+            reversal_id,
+            reversal_move_id,
+            order_row.number.as_deref(),
+            now.date_naive(),
+            gl.tenant_id(),
+        )
+        .await?;
+        if let Some(req) = &request {
+            gl::stage(&txn, req).await?;
+        }
         txn.commit().await?;
+        if let Some(req) = request {
+            gl.publish(req).await;
+        }
         self.view(reversal_id).await
     }
 
@@ -1301,11 +1340,14 @@ async fn post_receipt(
     authz: Authz,
     audit: Audit,
     TenantDb(db): TenantDb,
+    CurrentTenant(tenant): CurrentTenant,
     Extension(numbering): Extension<Numbering>,
+    Extension(events): Extension<Events>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ReceiptView>> {
     authz.require(names::RECEIPTS_POST).await?;
-    let view = ReceiptService::new(db).post(id, &numbering).await?;
+    let gl = gl::Gl::new(events, tenant.map(|t| t.id));
+    let view = ReceiptService::new(db).post(id, &numbering, &gl).await?;
     audit
         .0
         .event(format!(
@@ -1324,13 +1366,16 @@ async fn reverse_receipt(
     authz: Authz,
     audit: Audit,
     TenantDb(db): TenantDb,
+    CurrentTenant(tenant): CurrentTenant,
     Extension(numbering): Extension<Numbering>,
+    Extension(events): Extension<Events>,
     Path(id): Path<Uuid>,
     Json(req): Json<ReverseReceiptRequest>,
 ) -> Result<Json<ReceiptView>> {
     authz.require(names::RECEIPTS_REVERSE).await?;
+    let gl = gl::Gl::new(events, tenant.map(|t| t.id));
     let view = ReceiptService::new(db)
-        .reverse(id, &req.reason, &numbering, Some(authz.user.id))
+        .reverse(id, &req.reason, &numbering, Some(authz.user.id), &gl)
         .await?;
     audit
         .0

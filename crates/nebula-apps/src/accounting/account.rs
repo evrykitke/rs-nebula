@@ -30,6 +30,9 @@ pub mod keys {
     /// Recoverable VAT paid on purchases (an asset).
     pub const VAT_INPUT: &str = "vat_input";
     pub const AP: &str = "ap";
+    /// Goods received not invoiced — the perpetual-inventory interim
+    /// liability a goods receipt accrues and the vendor bill clears.
+    pub const GRNI: &str = "grni";
     /// VAT collected on sales, owed to the authority (a liability).
     pub const VAT_OUTPUT: &str = "vat_output";
     pub const TAX_PAYABLE: &str = "tax_payable";
@@ -38,6 +41,10 @@ pub mod keys {
     pub const SALES: &str = "sales";
     pub const OTHER_INCOME: &str = "other_income";
     pub const COGS: &str = "cogs";
+    /// Stock count gains and losses (shrinkage, breakage, write-ups).
+    pub const STOCK_ADJUSTMENT: &str = "stock_adjustment";
+    /// Differences between the billed price and the receipt's accrual.
+    pub const PURCHASE_PRICE_VARIANCE: &str = "purchase_price_variance";
     pub const OPEX: &str = "opex";
     /// Absorbs sub-unit rounding differences on tax and allocation.
     pub const ROUNDING: &str = "rounding";

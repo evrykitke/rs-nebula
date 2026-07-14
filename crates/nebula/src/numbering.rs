@@ -169,6 +169,46 @@ pub struct Number {
     pub period: String,
 }
 
+/// A late-binding handle to the [`Numbering`] registry, for code that is
+/// wired during `configure` but runs after boot — event subscribers and
+/// background workers. The registry itself cannot exist while modules are
+/// still declaring series, so [`ModuleContext::numbering`] hands out this
+/// handle instead; the kernel installs the built registry into it, and
+/// [`NumberingHandle::get`] cashes it in at runtime.
+///
+/// [`ModuleContext::numbering`]: crate::module::ModuleContext::numbering
+#[derive(Clone, Default)]
+pub struct NumberingHandle {
+    slot: Arc<std::sync::OnceLock<Numbering>>,
+}
+
+impl NumberingHandle {
+    pub(crate) fn install(&self, numbering: Numbering) {
+        // A second install (two kernels sharing a context never happens;
+        // belt and braces) keeps the first registry.
+        let _ = self.slot.set(numbering);
+    }
+
+    /// The registry. Errors before boot has completed — subscribers and
+    /// workers only run afterwards, so this is a wiring bug, not a race.
+    pub fn get(&self) -> Result<Numbering> {
+        self.slot.get().cloned().ok_or_else(|| {
+            Error::internal(
+                "the numbering registry is not built until boot completes; \
+                 use the handle from event handlers or workers, not during configure",
+            )
+        })
+    }
+}
+
+impl std::fmt::Debug for NumberingHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NumberingHandle")
+            .field("installed", &self.slot.get().is_some())
+            .finish()
+    }
+}
+
 /// The document-numbering registry: every series declared by the
 /// application's modules, plus the clock that dates each number. Cheap to
 /// clone (shares one `Arc`); created by the kernel, one per application.

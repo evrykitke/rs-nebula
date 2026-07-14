@@ -86,6 +86,11 @@ fn default_accounts() -> Vec<SeedGroup> {
                     system_key: keys::AP,
                 },
                 SeedChild {
+                    code: "2150",
+                    name: "Goods Received Not Invoiced",
+                    system_key: keys::GRNI,
+                },
+                SeedChild {
                     code: "2200",
                     name: "VAT Payable (Output)",
                     system_key: keys::VAT_OUTPUT,
@@ -135,11 +140,23 @@ fn default_accounts() -> Vec<SeedGroup> {
             code: "5000",
             name: "Cost of Sales",
             account_type: Expense,
-            children: &[SeedChild {
-                code: "5100",
-                name: "Cost of Goods Sold",
-                system_key: keys::COGS,
-            }],
+            children: &[
+                SeedChild {
+                    code: "5100",
+                    name: "Cost of Goods Sold",
+                    system_key: keys::COGS,
+                },
+                SeedChild {
+                    code: "5200",
+                    name: "Stock Adjustments",
+                    system_key: keys::STOCK_ADJUSTMENT,
+                },
+                SeedChild {
+                    code: "5300",
+                    name: "Purchase Price Variance",
+                    system_key: keys::PURCHASE_PRICE_VARIANCE,
+                },
+            ],
         },
         SeedGroup {
             code: "6000",

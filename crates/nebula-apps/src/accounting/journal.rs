@@ -274,13 +274,28 @@ impl Ledger {
         series: &str,
         numbering: &Numbering,
     ) -> Result<JournalEntryView> {
+        let txn = self.db.begin().await?;
+        let entry_id = Self::create_posted_in(&txn, new, series, numbering).await?;
+        txn.commit().await?;
+        self.view(entry_id).await
+    }
+
+    /// The transaction-scoped body of [`Ledger::create_posted`], for
+    /// callers that must couple the entry with their own writes or locks
+    /// (the GL port books under an idempotency lock). Nothing is written
+    /// unless the caller's transaction commits.
+    pub async fn create_posted_in(
+        txn: &sea_orm::DatabaseTransaction,
+        new: NewEntry,
+        series: &str,
+        numbering: &Numbering,
+    ) -> Result<Uuid> {
         if new.memo.trim().is_empty() {
             return Err(Error::Validation("an entry needs a memo".into()));
         }
         nebula::Currency::new(&new.currency, 2)?;
 
-        let txn = self.db.begin().await?;
-        validate_lines(&txn, &new.currency, &new.lines).await?;
+        validate_lines(txn, &new.currency, &new.lines).await?;
         let debits: Decimal = new.lines.iter().map(|l| l.debit).sum();
         let credits: Decimal = new.lines.iter().map(|l| l.credit).sum();
         if debits != credits {
@@ -293,11 +308,11 @@ impl Ledger {
                 "entry total must be greater than zero".into(),
             ));
         }
-        super::fiscal::ensure_open_for_post(&txn, new.entry_date).await?;
+        super::fiscal::ensure_open_for_post(txn, new.entry_date).await?;
 
         let entry_id = Uuid::new_v4();
         let now = chrono::Utc::now();
-        let number = numbering.next(&txn, series).await?;
+        let number = numbering.next(txn, series).await?;
         entry::ActiveModel {
             id: Set(entry_id),
             number: Set(Some(number.formatted)),
@@ -312,11 +327,10 @@ impl Ledger {
             created_at: Set(now),
             created_by: Set(new.created_by),
         }
-        .insert(&txn)
+        .insert(txn)
         .await?;
-        insert_postings(&txn, entry_id, &new.lines).await?;
-        txn.commit().await?;
-        self.view(entry_id).await
+        insert_postings(txn, entry_id, &new.lines).await?;
+        Ok(entry_id)
     }
 
     /// Reverse a posted entry: create a mirror entry (debits and credits
