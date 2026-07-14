@@ -138,6 +138,7 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(inventory::reports::ReorderReport));
         ctx.declare_report(Arc::new(procurement::reports::GrniReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierBalancesReport));
+        ctx.declare_report(Arc::new(procurement::reports::SupplierScorecardReport));
         ctx.declare_report(Arc::new(gl::GlReconciliationReport));
 
         // GL integration: clear outbox rows on accounting's acknowledgement
