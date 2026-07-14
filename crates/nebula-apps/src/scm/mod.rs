@@ -63,6 +63,12 @@ pub(crate) const INVOICE_SERIES: &str = "procurement.invoice";
 /// movement it creates.
 pub(crate) const RETURN_SERIES: &str = "procurement.return";
 
+/// Number series for purchase requisitions, allocated at submit.
+pub(crate) const REQUISITION_SERIES: &str = "procurement.requisition";
+
+/// Number series for requests for quotation, allocated at send.
+pub(crate) const RFQ_SERIES: &str = "procurement.rfq";
+
 pub struct ScmApp;
 
 impl Module for ScmApp {
@@ -86,6 +92,8 @@ impl Module for ScmApp {
             (ORDER_SERIES, "Purchase Order", "PO-{YYYY}-{SEQ:5}"),
             (INVOICE_SERIES, "Purchase Invoice", "PINV-{YYYY}-{SEQ:5}"),
             (RETURN_SERIES, "Purchase Return", "RTS-{YYYY}-{SEQ:5}"),
+            (REQUISITION_SERIES, "Purchase Requisition", "REQ-{YYYY}-{SEQ:5}"),
+            (RFQ_SERIES, "Request for Quotation", "RFQ-{YYYY}-{SEQ:5}"),
         ] {
             ctx.declare_series(
                 SeriesDef::new(key, name, template, Reset::Yearly)
@@ -99,6 +107,8 @@ impl Module for ScmApp {
         ctx.add_api(inventory::levels::api());
         ctx.add_api(inventory::batch::api());
         ctx.add_api(procurement::supplier::api());
+        ctx.add_api(procurement::requisition::api());
+        ctx.add_api(procurement::rfq::api());
         ctx.add_api(procurement::order::api());
         ctx.add_api(procurement::receipt::api());
         ctx.add_api(procurement::returns::api());
@@ -112,6 +122,8 @@ impl Module for ScmApp {
                 .merge(inventory::levels::routes())
                 .merge(inventory::batch::routes())
                 .merge(procurement::supplier::routes())
+                .merge(procurement::requisition::routes())
+                .merge(procurement::rfq::routes())
                 .merge(procurement::order::routes())
                 .merge(procurement::receipt::routes())
                 .merge(procurement::returns::routes())

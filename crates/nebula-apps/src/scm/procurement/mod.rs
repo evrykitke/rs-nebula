@@ -19,7 +19,9 @@ pub mod invoice;
 pub mod order;
 pub mod receipt;
 pub mod reports;
+pub mod requisition;
 pub mod returns;
+pub mod rfq;
 pub mod supplier;
 
 pub mod permissions {
@@ -32,6 +34,18 @@ pub mod permissions {
         pub const SUPPLIERS_CREATE: &str = "Pages.Procurement.Suppliers.Create";
         pub const SUPPLIERS_EDIT: &str = "Pages.Procurement.Suppliers.Edit";
         pub const SUPPLIERS_DELETE: &str = "Pages.Procurement.Suppliers.Delete";
+        pub const REQUISITIONS: &str = "Pages.Procurement.Requisitions";
+        pub const REQUISITIONS_VIEW: &str = "Pages.Procurement.Requisitions.View";
+        pub const REQUISITIONS_CREATE: &str = "Pages.Procurement.Requisitions.Create";
+        pub const REQUISITIONS_SUBMIT: &str = "Pages.Procurement.Requisitions.Submit";
+        pub const REQUISITIONS_APPROVE: &str = "Pages.Procurement.Requisitions.Approve";
+        pub const REQUISITIONS_CONVERT: &str = "Pages.Procurement.Requisitions.Convert";
+        pub const RFQS: &str = "Pages.Procurement.Rfqs";
+        pub const RFQS_VIEW: &str = "Pages.Procurement.Rfqs.View";
+        pub const RFQS_CREATE: &str = "Pages.Procurement.Rfqs.Create";
+        pub const RFQS_SEND: &str = "Pages.Procurement.Rfqs.Send";
+        pub const RFQS_RECORD_QUOTES: &str = "Pages.Procurement.Rfqs.RecordQuotes";
+        pub const RFQS_AWARD: &str = "Pages.Procurement.Rfqs.Award";
         pub const ORDERS: &str = "Pages.Procurement.Orders";
         pub const ORDERS_VIEW: &str = "Pages.Procurement.Orders.View";
         pub const ORDERS_CREATE: &str = "Pages.Procurement.Orders.Create";
@@ -66,6 +80,28 @@ pub mod permissions {
                     .child(PermissionDef::new(SUPPLIERS_CREATE, "Create suppliers"))
                     .child(PermissionDef::new(SUPPLIERS_EDIT, "Edit suppliers"))
                     .child(PermissionDef::new(SUPPLIERS_DELETE, "Delete suppliers")),
+            )
+            .child(
+                PermissionDef::new(REQUISITIONS, "Purchase requisitions")
+                    .child(PermissionDef::new(REQUISITIONS_VIEW, "View requisitions"))
+                    .child(PermissionDef::new(REQUISITIONS_CREATE, "Create requisitions"))
+                    .child(PermissionDef::new(REQUISITIONS_SUBMIT, "Submit requisitions"))
+                    .child(PermissionDef::new(
+                        REQUISITIONS_APPROVE,
+                        "Approve requisitions",
+                    ))
+                    .child(PermissionDef::new(
+                        REQUISITIONS_CONVERT,
+                        "Convert requisitions to orders",
+                    )),
+            )
+            .child(
+                PermissionDef::new(RFQS, "Requests for quotation")
+                    .child(PermissionDef::new(RFQS_VIEW, "View RFQs"))
+                    .child(PermissionDef::new(RFQS_CREATE, "Create RFQs"))
+                    .child(PermissionDef::new(RFQS_SEND, "Send RFQs"))
+                    .child(PermissionDef::new(RFQS_RECORD_QUOTES, "Record RFQ quotes"))
+                    .child(PermissionDef::new(RFQS_AWARD, "Award RFQs")),
             )
             .child(
                 PermissionDef::new(ORDERS, "Purchase orders")
