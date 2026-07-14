@@ -19,6 +19,7 @@
 //! their invoices first.
 
 use crate::scm::gl;
+use crate::scm::inventory::batch;
 use crate::scm::inventory::item::{item, uom};
 use crate::scm::inventory::moves::{MoveStatus, MoveType, doc as move_doc, line as move_line};
 use crate::scm::inventory::stock::{self, Movement, StockService, ledger};
@@ -133,7 +134,12 @@ pub mod receipt_line {
         #[sea_orm(column_type = "Decimal(Some((20, 6)))")]
         pub rejected_qty: Decimal,
         pub reject_reason: Option<String>,
+        /// The lot name as drafted; resolved to `batch_id` at post.
+        pub batch_no: Option<String>,
         pub batch_id: Option<Uuid>,
+        /// The serial numbers as drafted (JSON array of strings).
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub serial_nos: Option<Json>,
         pub memo: Option<String>,
         pub created_at: DateTimeUtc,
     }
@@ -148,12 +154,15 @@ pub mod receipt_line {
 // ---------------------------------------------------------------------------
 
 /// A receipt line as supplied by a caller. `qty` is what goes into stock;
-/// rejected goods stay off the ledger and off `received_qty`.
+/// rejected goods stay off the ledger and off `received_qty`. Batch and
+/// serial names are required exactly when the item tracks them.
 pub struct ReceiptLineInput {
     pub order_line_id: Uuid,
     pub qty: Decimal,
     pub rejected_qty: Option<Decimal>,
     pub reject_reason: Option<String>,
+    pub batch_no: Option<String>,
+    pub serial_nos: Option<Vec<String>>,
     pub memo: Option<String>,
 }
 
@@ -376,6 +385,49 @@ impl ReceiptService {
             let stock_uom = uoms.get(&item.uom_id).ok_or_else(|| {
                 Error::internal(format!("stock uom missing for item {}", item.sku))
             })?;
+
+            // Tracking dimensions: a tracked item must name its lot /
+            // serial units; an untracked one must not.
+            let serial_names = line_serial_names(line)?;
+            if !item.track_serials && !serial_names.is_empty() {
+                return Err(Error::Validation(format!(
+                    "line {}: item {} does not track serial numbers",
+                    line.line_no, item.sku
+                )));
+            }
+            if !item.track_batches && line.batch_no.is_some() {
+                return Err(Error::Validation(format!(
+                    "line {}: item {} does not track batches",
+                    line.line_no, item.sku
+                )));
+            }
+            let batch_id = match (&line.batch_no, item.track_batches) {
+                (Some(no), _) => Some(
+                    batch::find_or_create_batch(
+                        &txn,
+                        item,
+                        no,
+                        receipt_row.receipt_date,
+                        None,
+                        receipt_row.created_by,
+                    )
+                    .await?
+                    .id,
+                ),
+                (None, true) => {
+                    return Err(Error::Validation(format!(
+                        "line {}: item {} tracks batches; name the lot being received",
+                        line.line_no, item.sku
+                    )));
+                }
+                (None, false) => None,
+            };
+            let names = if item.track_serials {
+                batch::check_serial_names(item, line.qty, &serial_names)?
+            } else {
+                Vec::new()
+            };
+
             let unit_cost = stock::round_cost(
                 effective_price(ol.unit_price, ol.discount_pct) * rate,
             );
@@ -387,7 +439,9 @@ impl ReceiptService {
                 qty: Set(line.qty),
                 entered_uom_id: Set(None),
                 unit_cost: Set(Some(unit_cost)),
-                batch_id: Set(line.batch_id),
+                batch_no: Set(line.batch_no.clone()),
+                batch_id: Set(batch_id),
+                serial_nos: Set(line.serial_nos.clone()),
                 memo: Set(line.memo.clone()),
                 created_at: Set(now),
             }
@@ -401,12 +455,31 @@ impl ReceiptService {
                 item,
                 stock_uom,
                 warehouse_id,
+                batch_id,
                 Movement::Receipt {
                     qty: line.qty,
                     unit_cost,
                 },
             )
             .await?;
+            if !names.is_empty() {
+                batch::serials_in(
+                    &txn,
+                    item,
+                    ml.id,
+                    warehouse_id,
+                    batch_id,
+                    &names,
+                    receipt_row.receipt_date,
+                    receipt_row.created_by,
+                )
+                .await?;
+            }
+            if batch_id != line.batch_id {
+                let mut active: receipt_line::ActiveModel = line.clone().into();
+                active.batch_id = Set(batch_id);
+                active.update(&txn).await?;
+            }
         }
 
         // 3. PO counters: received up, open demand down, status refreshed.
@@ -618,7 +691,9 @@ impl ReceiptService {
                 qty: Set(ml.qty),
                 entered_uom_id: Set(ml.entered_uom_id),
                 unit_cost: Set(ml.unit_cost),
+                batch_no: Set(ml.batch_no.clone()),
                 batch_id: Set(ml.batch_id),
+                serial_nos: Set(ml.serial_nos.clone()),
                 memo: Set(ml.memo.clone()),
                 created_at: Set(now),
             }
@@ -634,7 +709,9 @@ impl ReceiptService {
                 qty: Set(line.qty),
                 rejected_qty: Set(Decimal::ZERO),
                 reject_reason: Set(None),
+                batch_no: Set(line.batch_no.clone()),
                 batch_id: Set(line.batch_id),
+                serial_nos: Set(line.serial_nos.clone()),
                 memo: Set(line.memo.clone()),
                 created_at: Set(now),
             }
@@ -667,7 +744,29 @@ impl ReceiptService {
                 item,
                 stock_uom,
                 row.warehouse_id,
+                row.batch_id,
                 mv,
+            )
+            .await?;
+        }
+
+        // Serialized units the receipt brought in leave stock with it.
+        for ml in &original_move_lines {
+            let names = batch::serial_names_of_line(&txn, ml.id).await?;
+            if names.is_empty() {
+                continue;
+            }
+            let item = items.get(&ml.item_id).ok_or_else(|| {
+                Error::internal(format!("item {} missing for reversal", ml.item_id))
+            })?;
+            let mirror_line = mirror_line_ids[&ml.id];
+            batch::serials_out(
+                &txn,
+                item,
+                mirror_line,
+                order_row.deliver_to_warehouse_id,
+                &names,
+                batch::SerialStatus::Scrapped,
             )
             .await?;
         }
@@ -817,6 +916,7 @@ impl ReceiptService {
             .map(|l| {
                 let ol = order_lines.get(&l.order_line_id);
                 let item = ol.and_then(|ol| items.get(&ol.item_id));
+                let serial_nos = line_serial_names(&l).unwrap_or_default();
                 ReceiptLineView {
                     id: l.id,
                     line_no: l.line_no,
@@ -827,6 +927,8 @@ impl ReceiptService {
                     qty: l.qty,
                     rejected_qty: l.rejected_qty,
                     reject_reason: l.reject_reason,
+                    batch_no: l.batch_no,
+                    serial_nos,
                     memo: l.memo,
                 }
             })
@@ -984,7 +1086,9 @@ async fn insert_lines<C: ConnectionTrait>(
             qty: Set(l.qty),
             rejected_qty: Set(l.rejected_qty.unwrap_or(Decimal::ZERO)),
             reject_reason: Set(l.reject_reason.clone().filter(|r| !r.trim().is_empty())),
+            batch_no: Set(l.batch_no.clone().filter(|b| !b.trim().is_empty())),
             batch_id: Set(None),
+            serial_nos: Set(serials_to_json(l.serial_nos.as_deref())),
             memo: Set(l.memo.clone().filter(|m| !m.trim().is_empty())),
             created_at: Set(now),
         }
@@ -992,6 +1096,30 @@ async fn insert_lines<C: ConnectionTrait>(
         .await?;
     }
     Ok(())
+}
+
+/// Draft serial names into their stored JSON form (`None` when empty).
+fn serials_to_json(names: Option<&[String]>) -> Option<sea_orm::JsonValue> {
+    let names: Vec<String> = names
+        .unwrap_or_default()
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!(names))
+    }
+}
+
+/// The serial names stored on a receipt line (empty when none).
+fn line_serial_names(l: &receipt_line::Model) -> Result<Vec<String>> {
+    match &l.serial_nos {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| Error::internal(format!("unreadable serial list on a line: {e}"))),
+        None => Ok(Vec::new()),
+    }
 }
 
 async fn load_receipt<C: ConnectionTrait>(conn: &C, id: Uuid) -> Result<receipt::Model> {
@@ -1068,6 +1196,8 @@ pub struct ReceiptLineView {
     #[schema(value_type = String)]
     pub rejected_qty: Decimal,
     pub reject_reason: Option<String>,
+    pub batch_no: Option<String>,
+    pub serial_nos: Vec<String>,
     pub memo: Option<String>,
 }
 
@@ -1135,6 +1265,11 @@ pub struct ReceiptLineRequest {
     #[schema(value_type = Option<String>)]
     pub rejected_qty: Option<Decimal>,
     pub reject_reason: Option<String>,
+    /// The supplier's lot — required when the item tracks batches
+    /// (created on first sight, expiry from the item's shelf life).
+    pub batch_no: Option<String>,
+    /// The serial units received — required when the item tracks serials.
+    pub serial_nos: Option<Vec<String>>,
     pub memo: Option<String>,
 }
 
@@ -1191,6 +1326,8 @@ fn new_receipt(req: CreateReceiptRequest, created_by: Option<Uuid>) -> NewReceip
                 qty: l.qty,
                 rejected_qty: l.rejected_qty,
                 reject_reason: l.reject_reason,
+                batch_no: l.batch_no,
+                serial_nos: l.serial_nos,
                 memo: l.memo,
             })
             .collect(),

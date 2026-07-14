@@ -20,6 +20,7 @@
 //! source document.
 
 use crate::scm::gl;
+use crate::scm::inventory::batch;
 use crate::scm::inventory::item::{self, uom};
 use crate::scm::inventory::permissions::names;
 use crate::scm::inventory::stock::{self, Movement, StockService, ledger};
@@ -162,7 +163,13 @@ pub mod line {
         pub entered_uom_id: Option<Uuid>,
         #[sea_orm(column_type = "Decimal(Some((20, 6)))", nullable)]
         pub unit_cost: Option<Decimal>,
+        /// The lot name as drafted; resolved to `batch_id` at post.
+        pub batch_no: Option<String>,
         pub batch_id: Option<Uuid>,
+        /// The serial numbers as drafted (JSON array of strings); the
+        /// masters are written at post.
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub serial_nos: Option<Json>,
         pub memo: Option<String>,
         pub created_at: DateTimeUtc,
     }
@@ -176,12 +183,16 @@ pub mod line {
 // Service
 // ---------------------------------------------------------------------------
 
-/// A movement line as supplied by a caller.
+/// A movement line as supplied by a caller. `batch_no` / `serial_nos`
+/// are required exactly when the item tracks that dimension (checked at
+/// post; adjustments name the serials of the *difference*).
 pub struct LineInput {
     pub item_id: Uuid,
     pub qty: Decimal,
     pub unit_cost: Option<Decimal>,
     pub entered_uom_id: Option<Uuid>,
+    pub batch_no: Option<String>,
+    pub serial_nos: Option<Vec<String>>,
     pub memo: Option<String>,
 }
 
@@ -468,7 +479,9 @@ impl MoveService {
                 qty: Set(l.qty),
                 entered_uom_id: Set(l.entered_uom_id),
                 unit_cost: Set(l.unit_cost),
+                batch_no: Set(l.batch_no.clone()),
                 batch_id: Set(l.batch_id),
+                serial_nos: Set(l.serial_nos.clone()),
                 memo: Set(l.memo.clone()),
                 created_at: Set(line_now),
             }
@@ -502,9 +515,99 @@ impl MoveService {
                 item,
                 stock_uom,
                 row.warehouse_id,
+                row.batch_id,
                 mv,
             )
             .await?;
+        }
+
+        // Mirror the serial transitions of every line that named units:
+        // what a receipt brought in leaves, what an issue took out comes
+        // back, a transfer walks home.
+        for l in &original_lines {
+            let names = batch::serial_names_of_line(&txn, l.id).await?;
+            if names.is_empty() {
+                continue;
+            }
+            let mirror_line = mirror_line_ids[&l.id];
+            let item = items.get(&l.item_id).ok_or_else(|| {
+                Error::internal(format!("item {} missing for reversal", l.item_id))
+            })?;
+            match move_type {
+                MoveType::Receipt => {
+                    let to = original
+                        .to_warehouse_id
+                        .ok_or_else(|| Error::internal("receipt without a destination"))?;
+                    batch::serials_out(
+                        &txn,
+                        item,
+                        mirror_line,
+                        to,
+                        &names,
+                        batch::SerialStatus::Scrapped,
+                    )
+                    .await?;
+                }
+                MoveType::Issue => {
+                    let from = original
+                        .from_warehouse_id
+                        .ok_or_else(|| Error::internal("issue without a source"))?;
+                    batch::serials_in(
+                        &txn,
+                        item,
+                        mirror_line,
+                        from,
+                        l.batch_id,
+                        &names,
+                        reversal_date,
+                        created_by,
+                    )
+                    .await?;
+                }
+                MoveType::Transfer => {
+                    let from = original
+                        .from_warehouse_id
+                        .ok_or_else(|| Error::internal("transfer without a source"))?;
+                    let to = original
+                        .to_warehouse_id
+                        .ok_or_else(|| Error::internal("transfer without a destination"))?;
+                    batch::serials_move(&txn, item, mirror_line, to, from, &names).await?;
+                }
+                MoveType::Adjustment => {
+                    let wh = original
+                        .from_warehouse_id
+                        .ok_or_else(|| Error::internal("adjustment without a warehouse"))?;
+                    // The line's single ledger row says which way the count went.
+                    let went_up = rows
+                        .iter()
+                        .find(|r| r.move_line_id == l.id)
+                        .map(|r| r.qty_delta > Decimal::ZERO)
+                        .unwrap_or(false);
+                    if went_up {
+                        batch::serials_out(
+                            &txn,
+                            item,
+                            mirror_line,
+                            wh,
+                            &names,
+                            batch::SerialStatus::Scrapped,
+                        )
+                        .await?;
+                    } else {
+                        batch::serials_in(
+                            &txn,
+                            item,
+                            mirror_line,
+                            wh,
+                            l.batch_id,
+                            &names,
+                            reversal_date,
+                            created_by,
+                        )
+                        .await?;
+                    }
+                }
+            }
         }
 
         let mut active: doc::ActiveModel = original.into();
@@ -589,6 +692,7 @@ impl MoveService {
             .into_iter()
             .map(|l| {
                 let item = items.get(&l.item_id);
+                let serial_nos = line_serial_names(&l).unwrap_or_default();
                 MoveLineView {
                     id: l.id,
                     line_no: l.line_no,
@@ -597,6 +701,8 @@ impl MoveService {
                     item_name: item.map(|i| i.name.clone()).unwrap_or_default(),
                     qty: l.qty,
                     unit_cost: l.unit_cost,
+                    batch_no: l.batch_no,
+                    serial_nos,
                     memo: l.memo,
                 }
             })
@@ -622,7 +728,11 @@ impl MoveService {
     }
 }
 
-/// Apply one document line to the engine per the document's type.
+/// Apply one document line to the engine per the document's type,
+/// resolving the item's tracking dimensions first: an item that tracks
+/// batches must name its lot, an item that tracks serials must name
+/// exactly the units that move (for adjustments, the units of the
+/// *difference*), and an untracked item must name neither.
 async fn apply_line(
     txn: &sea_orm::DatabaseTransaction,
     doc_row: &doc::Model,
@@ -631,6 +741,26 @@ async fn apply_line(
     item: &item::item::Model,
     stock_uom: &uom::Model,
 ) -> Result<()> {
+    let serial_names = line_serial_names(l)?;
+    if !item.track_serials && !serial_names.is_empty() {
+        return Err(Error::Validation(format!(
+            "line {}: item {} does not track serial numbers",
+            l.line_no, item.sku
+        )));
+    }
+    if !item.track_batches && l.batch_no.is_some() {
+        return Err(Error::Validation(format!(
+            "line {}: item {} does not track batches",
+            l.line_no, item.sku
+        )));
+    }
+    let need_batch = |for_what: &str| {
+        Error::Validation(format!(
+            "line {}: item {} tracks batches; name the lot {for_what}",
+            l.line_no, item.sku
+        ))
+    };
+
     match move_type {
         MoveType::Receipt => {
             let cost = l.unit_cost.ok_or_else(|| {
@@ -639,6 +769,27 @@ async fn apply_line(
             let to = doc_row
                 .to_warehouse_id
                 .ok_or_else(|| Error::internal("receipt without a destination warehouse"))?;
+            let batch_id = match (&l.batch_no, item.track_batches) {
+                (Some(no), _) => Some(
+                    batch::find_or_create_batch(
+                        txn,
+                        item,
+                        no,
+                        doc_row.entry_date,
+                        None,
+                        doc_row.created_by,
+                    )
+                    .await?
+                    .id,
+                ),
+                (None, true) => return Err(need_batch("being received")),
+                (None, false) => None,
+            };
+            let names = if item.track_serials {
+                batch::check_serial_names(item, l.qty, &serial_names)?
+            } else {
+                Vec::new()
+            };
             StockService::apply(
                 txn,
                 doc_row.id,
@@ -647,17 +798,56 @@ async fn apply_line(
                 item,
                 stock_uom,
                 to,
+                batch_id,
                 Movement::Receipt {
                     qty: l.qty,
                     unit_cost: cost,
                 },
             )
             .await?;
+            if !names.is_empty() {
+                batch::serials_in(
+                    txn,
+                    item,
+                    l.id,
+                    to,
+                    batch_id,
+                    &names,
+                    doc_row.entry_date,
+                    doc_row.created_by,
+                )
+                .await?;
+            }
+            stamp_batch(txn, l, batch_id).await?;
         }
         MoveType::Issue => {
             let from = doc_row
                 .from_warehouse_id
                 .ok_or_else(|| Error::internal("issue without a source warehouse"))?;
+            let batch_id = match (&l.batch_no, item.track_batches) {
+                (Some(no), _) => {
+                    let b = batch::find_batch(txn, item, no).await?;
+                    let in_lot = batch::batch_on_hand(txn, item.id, from, b.id).await?;
+                    if in_lot < l.qty {
+                        return Err(Error::Validation(format!(
+                            "line {}: batch {} of {} holds {} here, cannot issue {}",
+                            l.line_no,
+                            b.batch_no,
+                            item.sku,
+                            in_lot.normalize(),
+                            l.qty.normalize()
+                        )));
+                    }
+                    Some(b.id)
+                }
+                (None, true) => return Err(need_batch("being issued")),
+                (None, false) => None,
+            };
+            let names = if item.track_serials {
+                batch::check_serial_names(item, l.qty, &serial_names)?
+            } else {
+                Vec::new()
+            };
             StockService::apply(
                 txn,
                 doc_row.id,
@@ -666,9 +856,15 @@ async fn apply_line(
                 item,
                 stock_uom,
                 from,
+                batch_id,
                 Movement::Issue { qty: l.qty },
             )
             .await?;
+            if !names.is_empty() {
+                batch::serials_out(txn, item, l.id, from, &names, batch::SerialStatus::Issued)
+                    .await?;
+            }
+            stamp_batch(txn, l, batch_id).await?;
         }
         MoveType::Transfer => {
             let from = doc_row
@@ -677,6 +873,30 @@ async fn apply_line(
             let to = doc_row
                 .to_warehouse_id
                 .ok_or_else(|| Error::internal("transfer without a destination warehouse"))?;
+            let batch_id = match (&l.batch_no, item.track_batches) {
+                (Some(no), _) => {
+                    let b = batch::find_batch(txn, item, no).await?;
+                    let in_lot = batch::batch_on_hand(txn, item.id, from, b.id).await?;
+                    if in_lot < l.qty {
+                        return Err(Error::Validation(format!(
+                            "line {}: batch {} of {} holds {} here, cannot transfer {}",
+                            l.line_no,
+                            b.batch_no,
+                            item.sku,
+                            in_lot.normalize(),
+                            l.qty.normalize()
+                        )));
+                    }
+                    Some(b.id)
+                }
+                (None, true) => return Err(need_batch("being transferred")),
+                (None, false) => None,
+            };
+            let names = if item.track_serials {
+                batch::check_serial_names(item, l.qty, &serial_names)?
+            } else {
+                Vec::new()
+            };
             // Out at the running average, then in at exactly that cost — a
             // transfer never creates or destroys value.
             let out = StockService::apply(
@@ -687,6 +907,7 @@ async fn apply_line(
                 item,
                 stock_uom,
                 from,
+                batch_id,
                 Movement::Issue { qty: l.qty },
             )
             .await?;
@@ -698,21 +919,50 @@ async fn apply_line(
                 item,
                 stock_uom,
                 to,
+                batch_id,
                 Movement::Receipt {
                     qty: l.qty,
                     unit_cost: out.unit_cost,
                 },
             )
             .await?;
+            if !names.is_empty() {
+                batch::serials_move(txn, item, l.id, from, to, &names).await?;
+            }
+            stamp_batch(txn, l, batch_id).await?;
         }
         MoveType::Adjustment => {
             let wh = doc_row
                 .from_warehouse_id
                 .ok_or_else(|| Error::internal("adjustment without a warehouse"))?;
             // The line carries the counted quantity; the delta is computed
-            // here, with the level lock already held.
+            // here, with the level lock already held. A batch-tracked item
+            // is counted per lot, so the delta is against the lot's
+            // position, not the whole level.
             let level = stock::lock_or_init_level(txn, item.id, wh).await?;
-            let delta = l.qty - level.on_hand;
+            let (batch_id, on_hand) = match (&l.batch_no, item.track_batches) {
+                (Some(no), _) => {
+                    let b = batch::find_or_create_batch(
+                        txn,
+                        item,
+                        no,
+                        doc_row.entry_date,
+                        None,
+                        doc_row.created_by,
+                    )
+                    .await?;
+                    let in_lot = batch::batch_on_hand(txn, item.id, wh, b.id).await?;
+                    (Some(b.id), in_lot)
+                }
+                (None, true) => return Err(need_batch("being counted")),
+                (None, false) => (None, level.on_hand),
+            };
+            let delta = l.qty - on_hand;
+            let names = if item.track_serials {
+                batch::check_serial_names(item, delta.abs(), &serial_names)?
+            } else {
+                Vec::new()
+            };
             if delta > Decimal::ZERO {
                 let cost = match l.unit_cost {
                     Some(cost) => cost,
@@ -732,12 +982,26 @@ async fn apply_line(
                     item,
                     stock_uom,
                     wh,
+                    batch_id,
                     Movement::Receipt {
                         qty: delta,
                         unit_cost: cost,
                     },
                 )
                 .await?;
+                if !names.is_empty() {
+                    batch::serials_in(
+                        txn,
+                        item,
+                        l.id,
+                        wh,
+                        batch_id,
+                        &names,
+                        doc_row.entry_date,
+                        doc_row.created_by,
+                    )
+                    .await?;
+                }
             } else if delta < Decimal::ZERO {
                 StockService::apply(
                     txn,
@@ -747,13 +1011,39 @@ async fn apply_line(
                     item,
                     stock_uom,
                     wh,
+                    batch_id,
                     Movement::Issue { qty: -delta },
                 )
                 .await?;
+                if !names.is_empty() {
+                    batch::serials_out(txn, item, l.id, wh, &names, batch::SerialStatus::Scrapped)
+                        .await?;
+                }
+            } else if !names.is_empty() {
+                return Err(Error::Validation(format!(
+                    "line {}: the count matches; no serial units moved",
+                    l.line_no
+                )));
             }
             // delta == 0: the count matches; nothing to book.
+            stamp_batch(txn, l, batch_id).await?;
         }
     }
+    Ok(())
+}
+
+/// Record the resolved lot on the posted line (drafts only carry the name).
+async fn stamp_batch(
+    txn: &sea_orm::DatabaseTransaction,
+    l: &line::Model,
+    batch_id: Option<Uuid>,
+) -> Result<()> {
+    if batch_id == l.batch_id {
+        return Ok(());
+    }
+    let mut active: line::ActiveModel = l.clone().into();
+    active.batch_id = Set(batch_id);
+    active.update(txn).await?;
     Ok(())
 }
 
@@ -908,7 +1198,9 @@ async fn insert_lines<C: ConnectionTrait>(
             qty: Set(l.qty),
             entered_uom_id: Set(l.entered_uom_id),
             unit_cost: Set(l.unit_cost),
+            batch_no: Set(l.batch_no.clone().filter(|b| !b.trim().is_empty())),
             batch_id: Set(None),
+            serial_nos: Set(serials_to_json(l.serial_nos.as_deref())),
             memo: Set(l.memo.clone().filter(|m| !m.trim().is_empty())),
             created_at: Set(now),
         }
@@ -916,6 +1208,30 @@ async fn insert_lines<C: ConnectionTrait>(
         .await?;
     }
     Ok(())
+}
+
+/// Draft serial names into their stored JSON form (`None` when empty).
+fn serials_to_json(names: Option<&[String]>) -> Option<sea_orm::JsonValue> {
+    let names: Vec<String> = names
+        .unwrap_or_default()
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!(names))
+    }
+}
+
+/// The serial names stored on a line (empty when none were drafted).
+pub(crate) fn line_serial_names(l: &line::Model) -> Result<Vec<String>> {
+    match &l.serial_nos {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| Error::internal(format!("unreadable serial list on a line: {e}"))),
+        None => Ok(Vec::new()),
+    }
 }
 
 async fn load_move<C: ConnectionTrait>(conn: &C, id: Uuid) -> Result<doc::Model> {
@@ -997,6 +1313,8 @@ pub struct MoveLineView {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub unit_cost: Option<Decimal>,
+    pub batch_no: Option<String>,
+    pub serial_nos: Vec<String>,
     pub memo: Option<String>,
 }
 
@@ -1133,6 +1451,12 @@ pub struct MoveLineRequest {
     #[schema(value_type = Option<String>)]
     pub unit_cost: Option<Decimal>,
     pub entered_uom_id: Option<Uuid>,
+    /// The lot moved — required when the item tracks batches (receipts
+    /// and count-ups create the lot on first sight).
+    pub batch_no: Option<String>,
+    /// The serial units moved — required when the item tracks serials;
+    /// for adjustments, the units of the difference.
+    pub serial_nos: Option<Vec<String>>,
     pub memo: Option<String>,
 }
 
@@ -1188,6 +1512,8 @@ fn new_move(req: CreateMoveRequest, created_by: Option<Uuid>) -> NewMove {
                 qty: l.qty,
                 unit_cost: l.unit_cost,
                 entered_uom_id: l.entered_uom_id,
+                batch_no: l.batch_no,
+                serial_nos: l.serial_nos,
                 memo: l.memo,
             })
             .collect(),

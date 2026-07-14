@@ -14,6 +14,7 @@
 //! backdated `entry_date` is descriptive only. Corrections are new
 //! documents (a reversal or an adjustment), never edits.
 
+pub mod batch;
 pub mod item;
 pub mod levels;
 pub mod moves;

@@ -91,6 +91,7 @@ impl Module for ScmApp {
         ctx.add_api(inventory::warehouse::api());
         ctx.add_api(inventory::moves::api());
         ctx.add_api(inventory::levels::api());
+        ctx.add_api(inventory::batch::api());
         ctx.add_api(procurement::supplier::api());
         ctx.add_api(procurement::order::api());
         ctx.add_api(procurement::receipt::api());
@@ -102,6 +103,7 @@ impl Module for ScmApp {
                 .merge(inventory::warehouse::routes())
                 .merge(inventory::moves::routes())
                 .merge(inventory::levels::routes())
+                .merge(inventory::batch::routes())
                 .merge(procurement::supplier::routes())
                 .merge(procurement::order::routes())
                 .merge(procurement::receipt::routes())

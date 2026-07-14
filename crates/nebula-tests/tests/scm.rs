@@ -150,6 +150,8 @@ fn move_line(item_id: Uuid, qty: Decimal, unit_cost: Option<Decimal>) -> LineInp
         qty,
         unit_cost,
         entered_uom_id: None,
+        batch_no: None,
+        serial_nos: None,
         memo: None,
     }
 }
@@ -295,6 +297,8 @@ fn gr_line(order_line_id: Uuid, qty: Decimal) -> ReceiptLineInput {
         qty,
         rejected_qty: None,
         reject_reason: None,
+        batch_no: None,
+        serial_nos: None,
         memo: None,
     }
 }

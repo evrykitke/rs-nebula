@@ -128,6 +128,8 @@ impl StockService {
     /// ledger row and updating the level, all on the caller's transaction.
     /// Returns the ledger row (an issue's `unit_cost` is the average the
     /// stock went out at — transfers feed it to their receipt half).
+    /// `batch_id` stamps the lot dimension on the ledger row; costing is
+    /// untouched by it (moving average stays per item × warehouse).
     pub async fn apply(
         txn: &DatabaseTransaction,
         move_id: Uuid,
@@ -136,6 +138,7 @@ impl StockService {
         item: &item::Model,
         stock_uom: &uom::Model,
         warehouse_id: Uuid,
+        batch_id: Option<Uuid>,
         mv: Movement,
     ) -> Result<ledger::Model> {
         if ItemType::parse(&item.item_type)? != ItemType::Stockable {
@@ -195,7 +198,7 @@ impl StockService {
             move_line_id: Set(move_line_id),
             item_id: Set(item.id),
             warehouse_id: Set(warehouse_id),
-            batch_id: Set(None),
+            batch_id: Set(batch_id),
             entry_date: Set(entry_date),
             qty_delta: Set(qty_delta),
             qty_after: Set(qty_after),
