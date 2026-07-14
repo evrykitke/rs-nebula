@@ -237,55 +237,8 @@ impl OrderService {
     /// supplier; the supplier must be active and not on hold — a hold
     /// blocks new commitments while in-flight documents finish.
     pub async fn create_draft(&self, new: NewOrder) -> Result<OrderView> {
-        let supplier = load_supplier_for_new_order(&self.db, new.supplier_id).await?;
-        validate_order(&self.db, &new).await?;
-        let currency = match &new.currency {
-            Some(c) => validate_currency(c)?,
-            None => supplier.currency.clone(),
-        };
         let txn = self.db.begin().await?;
-        let order_id = Uuid::new_v4();
-        let now = chrono::Utc::now();
-        order::ActiveModel {
-            id: Set(order_id),
-            number: Set(None),
-            supplier_id: Set(new.supplier_id),
-            order_date: Set(new.order_date),
-            expected_date: Set(new.expected_date),
-            deliver_to_warehouse_id: Set(new.deliver_to_warehouse_id),
-            delivery_address: Set(clean(new.delivery_address)),
-            shipping_method: Set(clean(new.shipping_method)),
-            incoterms: Set(clean(new.incoterms)),
-            supplier_contact: Set(clean(new.supplier_contact)),
-            buyer_id: Set(new.created_by),
-            currency: Set(currency),
-            exchange_rate: Set(Decimal::ONE),
-            payment_terms_days: Set(new.payment_terms_days.unwrap_or(supplier.payment_terms_days)),
-            tax_inclusive: Set(new.tax_inclusive),
-            discount_pct: Set(new.discount_pct),
-            discount_amount: Set(new.discount_amount),
-            other_charges: Set(new.other_charges),
-            memo: Set(clean(new.memo)),
-            reference: Set(clean(new.reference)),
-            terms_and_conditions: Set(clean(new.terms_and_conditions)),
-            status: Set(OrderStatus::Draft.as_str().to_string()),
-            submitted_at: Set(None),
-            submitted_by: Set(None),
-            approved_at: Set(None),
-            approved_by: Set(None),
-            cancelled_at: Set(None),
-            cancelled_by: Set(None),
-            cancel_reason: Set(None),
-            closed_at: Set(None),
-            closed_by: Set(None),
-            created_at: Set(now),
-            created_by: Set(new.created_by),
-            updated_at: Set(now),
-            updated_by: Set(None),
-        }
-        .insert(&txn)
-        .await?;
-        insert_lines(&txn, order_id, &new.lines).await?;
+        let order_id = create_draft_in(&txn, new).await?;
         txn.commit().await?;
         self.view(order_id).await
     }
@@ -641,6 +594,64 @@ impl OrderService {
             lines: line_views,
         })
     }
+}
+
+/// Create a draft order on the caller's transaction — validation and all;
+/// the auto-reorder worker batches several orders into one commit through
+/// this. Returns the new order's id.
+pub(crate) async fn create_draft_in(
+    txn: &sea_orm::DatabaseTransaction,
+    new: NewOrder,
+) -> Result<Uuid> {
+    let supplier = load_supplier_for_new_order(txn, new.supplier_id).await?;
+    validate_order(txn, &new).await?;
+    let currency = match &new.currency {
+        Some(c) => validate_currency(c)?,
+        None => supplier.currency.clone(),
+    };
+    let order_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    order::ActiveModel {
+        id: Set(order_id),
+        number: Set(None),
+        supplier_id: Set(new.supplier_id),
+        order_date: Set(new.order_date),
+        expected_date: Set(new.expected_date),
+        deliver_to_warehouse_id: Set(new.deliver_to_warehouse_id),
+        delivery_address: Set(clean(new.delivery_address)),
+        shipping_method: Set(clean(new.shipping_method)),
+        incoterms: Set(clean(new.incoterms)),
+        supplier_contact: Set(clean(new.supplier_contact)),
+        buyer_id: Set(new.created_by),
+        currency: Set(currency),
+        exchange_rate: Set(Decimal::ONE),
+        payment_terms_days: Set(new.payment_terms_days.unwrap_or(supplier.payment_terms_days)),
+        tax_inclusive: Set(new.tax_inclusive),
+        discount_pct: Set(new.discount_pct),
+        discount_amount: Set(new.discount_amount),
+        other_charges: Set(new.other_charges),
+        memo: Set(clean(new.memo)),
+        reference: Set(clean(new.reference)),
+        terms_and_conditions: Set(clean(new.terms_and_conditions)),
+        status: Set(OrderStatus::Draft.as_str().to_string()),
+        submitted_at: Set(None),
+        submitted_by: Set(None),
+        approved_at: Set(None),
+        approved_by: Set(None),
+        cancelled_at: Set(None),
+        cancelled_by: Set(None),
+        cancel_reason: Set(None),
+        closed_at: Set(None),
+        closed_by: Set(None),
+        created_at: Set(now),
+        created_by: Set(new.created_by),
+        updated_at: Set(now),
+        updated_by: Set(None),
+    }
+    .insert(txn)
+    .await?;
+    insert_lines(txn, order_id, &new.lines).await?;
+    Ok(order_id)
 }
 
 /// Release whatever `on_order` demand the order still holds — the ordered

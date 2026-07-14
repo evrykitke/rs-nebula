@@ -113,6 +113,7 @@ impl Module for ScmApp {
         ctx.add_api(procurement::receipt::api());
         ctx.add_api(procurement::returns::api());
         ctx.add_api(procurement::invoice::api());
+        ctx.add_api(procurement::reorder::api());
         ctx.add_api(procurement::reports::api());
         ctx.add_api(gl::api());
         ctx.add_routes(
@@ -128,6 +129,7 @@ impl Module for ScmApp {
                 .merge(procurement::receipt::routes())
                 .merge(procurement::returns::routes())
                 .merge(procurement::invoice::routes())
+                .merge(procurement::reorder::routes())
                 .merge(procurement::reports::routes())
                 .merge(gl::routes()),
         );
@@ -145,6 +147,9 @@ impl Module for ScmApp {
         // and re-publish anything that lingers unbooked.
         gl::subscribe_acks(ctx);
         gl::spawn_sweeper(ctx);
+
+        // Auto reorder: draft purchase orders for short stock positions.
+        procurement::reorder::spawn_worker(ctx);
 
         self.seed_tenants(ctx);
     }

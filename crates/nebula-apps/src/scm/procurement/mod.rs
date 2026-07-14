@@ -18,6 +18,7 @@
 pub mod invoice;
 pub mod order;
 pub mod receipt;
+pub mod reorder;
 pub mod reports;
 pub mod requisition;
 pub mod returns;
