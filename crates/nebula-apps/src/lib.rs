@@ -12,7 +12,9 @@
 //! when that boundary needs to be compiler-enforced.
 
 pub mod accounting;
+pub mod scm;
 pub mod workspace;
 
 pub use accounting::AccountingApp;
+pub use scm::ScmApp;
 pub use workspace::WorkspaceApp;

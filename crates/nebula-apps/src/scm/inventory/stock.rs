@@ -1,0 +1,280 @@
+//! The stock engine: the one place stock quantities and values change.
+//!
+//! Movement documents ([`super::moves`]) and procurement's goods receipt
+//! call [`StockService::apply`] line by line inside their own posting
+//! transaction. Every application locks (or creates) the item×warehouse
+//! level row FOR UPDATE first, so concurrent movements of the same stock
+//! serialize; negative stock is rejected under that lock; then an
+//! immutable ledger row is appended and the level updated — one
+//! transaction, one truth.
+//!
+//! Costing is moving (weighted) average per item × warehouse in the tenant
+//! base currency. Rounding rules live here and only here: unit costs carry
+//! 6 decimals, ledger money 2. An issue that empties the location flushes
+//! the entire remaining value, so zero quantity always means exactly zero
+//! value — no residue drift.
+
+use nebula::error::{Error, Result};
+use nebula::sea_orm;
+use rust_decimal::Decimal;
+use sea_orm::entity::prelude::*;
+use sea_orm::{DatabaseTransaction, DbBackend, NotSet, QuerySelect, Set, Statement};
+use uuid::Uuid;
+
+use super::item::{ItemType, item, uom};
+
+/// One immutable stock ledger row.
+pub mod ledger {
+    use nebula::sea_orm;
+    use sea_orm::entity::prelude::*;
+    use serde::Serialize;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+    #[sea_orm(table_name = "inventory_stock_ledger")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub seq: i64,
+        pub move_id: Uuid,
+        pub move_line_id: Uuid,
+        pub item_id: Uuid,
+        pub warehouse_id: Uuid,
+        pub batch_id: Option<Uuid>,
+        pub entry_date: Date,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))")]
+        pub qty_delta: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))")]
+        pub qty_after: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))")]
+        pub unit_cost: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 4)))")]
+        pub value_delta: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 4)))")]
+        pub value_after: Decimal,
+        pub posted_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// The per-item×warehouse aggregate (and concurrency gate).
+pub mod level {
+    use nebula::sea_orm;
+    use sea_orm::entity::prelude::*;
+    use serde::Serialize;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+    #[sea_orm(table_name = "inventory_stock_levels")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub item_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub warehouse_id: Uuid,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))")]
+        pub on_hand: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))")]
+        pub reserved: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))")]
+        pub on_order: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 4)))")]
+        pub value: Decimal,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))", nullable)]
+        pub reorder_level: Option<Decimal>,
+        #[sea_orm(column_type = "Decimal(Some((20, 6)))", nullable)]
+        pub reorder_qty: Option<Decimal>,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Ledger money is booked to 2 decimals.
+pub(crate) fn round_money(v: Decimal) -> Decimal {
+    v.round_dp(2)
+}
+
+/// Unit costs carry 6 decimals to limit moving-average drift.
+pub(crate) fn round_cost(v: Decimal) -> Decimal {
+    v.round_dp(6)
+}
+
+/// The running average cost of a level row (zero when empty).
+pub(crate) fn level_average(level: &level::Model) -> Decimal {
+    if level.on_hand.is_zero() {
+        Decimal::ZERO
+    } else {
+        round_cost(level.value / level.on_hand)
+    }
+}
+
+/// A single stock effect to apply, already validated for shape.
+pub enum Movement {
+    /// Stock in at a known cost (purchase receipt, opening stock, positive
+    /// adjustment, transfer-in at the issued cost).
+    Receipt { qty: Decimal, unit_cost: Decimal },
+    /// Stock out at the running average (issue, transfer-out, negative
+    /// adjustment).
+    Issue { qty: Decimal },
+}
+
+pub struct StockService;
+
+impl StockService {
+    /// Apply one movement of `item` in `warehouse_id`, appending the
+    /// ledger row and updating the level, all on the caller's transaction.
+    /// Returns the ledger row (an issue's `unit_cost` is the average the
+    /// stock went out at — transfers feed it to their receipt half).
+    pub async fn apply(
+        txn: &DatabaseTransaction,
+        move_id: Uuid,
+        move_line_id: Uuid,
+        entry_date: chrono::NaiveDate,
+        item: &item::Model,
+        stock_uom: &uom::Model,
+        warehouse_id: Uuid,
+        mv: Movement,
+    ) -> Result<ledger::Model> {
+        if ItemType::parse(&item.item_type)? != ItemType::Stockable {
+            return Err(Error::Validation(format!(
+                "item {} is not stockable and cannot move through the ledger",
+                item.sku
+            )));
+        }
+
+        // 1. Lock (or create) the level row for item x warehouse.
+        let level = lock_or_init_level(txn, item.id, warehouse_id).await?;
+
+        // 2. Compute the delta under moving-average rules.
+        let (qty_delta, unit_cost, value_delta) = match mv {
+            Movement::Receipt { qty, unit_cost } => {
+                ensure_valid_qty(qty, item, stock_uom)?;
+                if unit_cost < Decimal::ZERO {
+                    return Err(Error::Validation("unit cost must not be negative".into()));
+                }
+                let unit_cost = round_cost(unit_cost);
+                let value = round_money(qty * unit_cost);
+                (qty, unit_cost, value)
+            }
+            Movement::Issue { qty } => {
+                ensure_valid_qty(qty, item, stock_uom)?;
+                if level.on_hand < qty {
+                    return Err(Error::Validation(format!(
+                        "insufficient stock of {}: on hand {}, requested {}",
+                        item.sku, level.on_hand, qty
+                    )));
+                }
+                let avg = if level.on_hand.is_zero() {
+                    Decimal::ZERO
+                } else {
+                    round_cost(level.value / level.on_hand)
+                };
+                // Emptying the location flushes the full remaining value so
+                // zero quantity always means exactly zero value.
+                let value = if level.on_hand == qty {
+                    level.value
+                } else {
+                    round_money(qty * avg)
+                };
+                (-qty, avg, -value)
+            }
+        };
+
+        let qty_after = level.on_hand + qty_delta;
+        let value_after = level.value + value_delta;
+
+        // 3. Append the ledger row (immutable from birth). seq is assigned
+        //    by Postgres (GENERATED BY DEFAULT AS IDENTITY).
+        let row = ledger::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            seq: NotSet,
+            move_id: Set(move_id),
+            move_line_id: Set(move_line_id),
+            item_id: Set(item.id),
+            warehouse_id: Set(warehouse_id),
+            batch_id: Set(None),
+            entry_date: Set(entry_date),
+            qty_delta: Set(qty_delta),
+            qty_after: Set(qty_after),
+            unit_cost: Set(unit_cost),
+            value_delta: Set(value_delta),
+            value_after: Set(value_after),
+            posted_at: Set(chrono::Utc::now()),
+        }
+        .insert(txn)
+        .await?;
+
+        // 4. Update the locked level.
+        let mut active: level::ActiveModel = level.into();
+        active.on_hand = Set(qty_after);
+        active.value = Set(value_after);
+        active.updated_at = Set(chrono::Utc::now());
+        active.update(txn).await?;
+
+        Ok(row)
+    }
+
+    /// Adjust the open-purchase-order quantity on a level row (procurement
+    /// maintains it at PO approve / receive / cancel / close). Locks the
+    /// row like any other level mutation; the result is floored at zero
+    /// rather than erroring, since `on_order` is advisory.
+    pub async fn adjust_on_order(
+        txn: &DatabaseTransaction,
+        item_id: Uuid,
+        warehouse_id: Uuid,
+        delta: Decimal,
+    ) -> Result<()> {
+        let level = lock_or_init_level(txn, item_id, warehouse_id).await?;
+        let next = (level.on_order + delta).max(Decimal::ZERO);
+        let mut active: level::ActiveModel = level.into();
+        active.on_order = Set(next);
+        active.updated_at = Set(chrono::Utc::now());
+        active.update(txn).await?;
+        Ok(())
+    }
+}
+
+/// Lock the level row FOR UPDATE, inserting a zero row first if the pair
+/// has never moved. The bare INSERT .. ON CONFLICT DO NOTHING is raw SQL:
+/// SeaORM's on_conflict().do_nothing() reports the conflict as an error
+/// instead of moving on. Concurrent first-touch is safe — the second
+/// insert waits on the first, then both queue on the row lock.
+pub(crate) async fn lock_or_init_level(
+    txn: &DatabaseTransaction,
+    item_id: Uuid,
+    warehouse_id: Uuid,
+) -> Result<level::Model> {
+    txn.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO inventory_stock_levels (item_id, warehouse_id) VALUES ($1, $2) \
+         ON CONFLICT DO NOTHING",
+        [item_id.into(), warehouse_id.into()],
+    ))
+    .await?;
+    level::Entity::find_by_id((item_id, warehouse_id))
+        .lock_exclusive()
+        .one(txn)
+        .await?
+        .ok_or_else(|| Error::internal("stock level row vanished under its lock"))
+}
+
+/// Quantities are positive, and whole numbers when the item's stock UoM
+/// does not allow fractions.
+fn ensure_valid_qty(qty: Decimal, item: &item::Model, stock_uom: &uom::Model) -> Result<()> {
+    if qty <= Decimal::ZERO {
+        return Err(Error::Validation(format!(
+            "quantity of {} must be positive",
+            item.sku
+        )));
+    }
+    if !stock_uom.fractional && qty.normalize().scale() > 0 {
+        return Err(Error::Validation(format!(
+            "item {} is stocked in whole {} and cannot move a fractional quantity",
+            item.sku, stock_uom.code
+        )));
+    }
+    Ok(())
+}
