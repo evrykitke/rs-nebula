@@ -470,7 +470,12 @@ pub(crate) fn api() -> utoipa::openapi::OpenApi {
 }
 
 #[derive(utoipa::OpenApi)]
-#[openapi(paths(item_batches, item_serials))]
+#[openapi(
+    paths(item_batches, item_serials),
+    // Referenced from SerialsQuery's query string, which IntoParams does
+    // not auto-register the way response bodies are.
+    components(schemas(SerialStatus))
+)]
 struct ApiDoc;
 
 #[utoipa::path(get, path = "/inventory/items/{id}/batches", tag = "inventory",
