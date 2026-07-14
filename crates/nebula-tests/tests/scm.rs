@@ -387,6 +387,8 @@ async fn scenario() {
     admin_db
         .execute_unprepared(
             "DROP TABLE IF EXISTS scm_gl_outbox; \
+             DROP TABLE IF EXISTS procurement_return_lines; \
+             DROP TABLE IF EXISTS procurement_returns; \
              DROP TABLE IF EXISTS procurement_invoice_lines; \
              DROP TABLE IF EXISTS procurement_invoices; \
              DROP TABLE IF EXISTS procurement_receipt_lines; \
