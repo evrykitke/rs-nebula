@@ -500,7 +500,10 @@ impl MoveService {
                 .get(&row.move_line_id)
                 .ok_or_else(|| Error::internal("ledger row without a document line"))?;
             let mv = if row.qty_delta > Decimal::ZERO {
-                Movement::Issue { qty: row.qty_delta }
+                Movement::Issue {
+                    qty: row.qty_delta,
+                    covered_by_reservation: Decimal::ZERO,
+                }
             } else {
                 Movement::Receipt {
                     qty: -row.qty_delta,
@@ -857,7 +860,10 @@ async fn apply_line(
                 stock_uom,
                 from,
                 batch_id,
-                Movement::Issue { qty: l.qty },
+                Movement::Issue {
+                    qty: l.qty,
+                    covered_by_reservation: Decimal::ZERO,
+                },
             )
             .await?;
             if !names.is_empty() {
@@ -908,7 +914,10 @@ async fn apply_line(
                 stock_uom,
                 from,
                 batch_id,
-                Movement::Issue { qty: l.qty },
+                Movement::Issue {
+                    qty: l.qty,
+                    covered_by_reservation: Decimal::ZERO,
+                },
             )
             .await?;
             StockService::apply(
@@ -1012,7 +1021,10 @@ async fn apply_line(
                     stock_uom,
                     wh,
                     batch_id,
-                    Movement::Issue { qty: -delta },
+                    Movement::Issue {
+                        qty: -delta,
+                        covered_by_reservation: Decimal::ZERO,
+                    },
                 )
                 .await?;
                 if !names.is_empty() {
@@ -1485,6 +1497,7 @@ pub struct ReverseMoveRequest {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListMovesQuery {
     pub move_type: Option<MoveType>,
     pub status: Option<MoveStatus>,

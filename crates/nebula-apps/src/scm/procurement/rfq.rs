@@ -12,7 +12,7 @@
 //! (lines copied on create, the requisition marked converted on award).
 //! No stock or GL effects at any point.
 
-use crate::scm::inventory::item::item;
+use crate::scm::inventory::item::{item, uom};
 use crate::scm::procurement::order::{NewOrder, OrderLineInput, OrderService};
 use crate::scm::procurement::permissions::names;
 use crate::scm::procurement::requisition::{
@@ -633,6 +633,14 @@ impl RfqService {
             .into_iter()
             .map(|i| (i.id, i))
             .collect();
+        let uom_ids: Vec<Uuid> = items.values().map(|i| i.uom_id).collect();
+        let uoms: HashMap<Uuid, uom::Model> = uom::Entity::find()
+            .filter(uom::Column::Id.is_in(uom_ids))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|u| (u.id, u))
+            .collect();
         let requisition_number = match row.requisition_id {
             Some(rid) => requisition_entity::Entity::find_by_id(rid)
                 .one(&self.db)
@@ -673,12 +681,17 @@ impl RfqService {
             .into_iter()
             .map(|l| {
                 let item = items.get(&l.item_id);
+                let uom_code = item
+                    .and_then(|i| uoms.get(&i.uom_id))
+                    .map(|u| u.code.clone())
+                    .unwrap_or_default();
                 RfqLineView {
                     id: l.id,
                     line_no: l.line_no,
                     item_id: l.item_id,
                     sku: item.map(|i| i.sku.clone()).unwrap_or_default(),
                     item_name: item.map(|i| i.name.clone()).unwrap_or_default(),
+                    uom_code,
                     qty: l.qty,
                     memo: l.memo,
                     quotes: quotes_by_line.remove(&l.id).unwrap_or_default(),
@@ -889,6 +902,8 @@ pub struct RfqLineView {
     pub item_id: Uuid,
     pub sku: String,
     pub item_name: String,
+    /// The item's stocking unit of measure (code), for display.
+    pub uom_code: String,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub qty: Decimal,
@@ -997,6 +1012,7 @@ pub struct AwardRfqRequest {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListRfqsQuery {
     pub status: Option<RfqStatus>,
 }

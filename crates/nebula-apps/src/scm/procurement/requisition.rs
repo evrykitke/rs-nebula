@@ -11,7 +11,7 @@
 //! order through the normal approval gate. No stock or GL effects at any
 //! point — a requisition is a request, not a commitment.
 
-use crate::scm::inventory::item::item;
+use crate::scm::inventory::item::{item, uom};
 use crate::scm::inventory::warehouse;
 use crate::scm::procurement::order::{NewOrder, OrderLineInput, OrderService};
 use crate::scm::procurement::permissions::names;
@@ -459,6 +459,14 @@ impl RequisitionService {
             .into_iter()
             .map(|i| (i.id, i))
             .collect();
+        let uom_ids: Vec<Uuid> = items.values().map(|i| i.uom_id).collect();
+        let uoms: HashMap<Uuid, uom::Model> = uom::Entity::find()
+            .filter(uom::Column::Id.is_in(uom_ids))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|u| (u.id, u))
+            .collect();
         let order_number = match row.order_id {
             Some(order_id) => {
                 crate::scm::procurement::order::order::Entity::find_by_id(order_id)
@@ -473,12 +481,17 @@ impl RequisitionService {
             .into_iter()
             .map(|l| {
                 let item = items.get(&l.item_id);
+                let uom_code = item
+                    .and_then(|i| uoms.get(&i.uom_id))
+                    .map(|u| u.code.clone())
+                    .unwrap_or_default();
                 RequisitionLineView {
                     id: l.id,
                     line_no: l.line_no,
                     item_id: l.item_id,
                     sku: item.map(|i| i.sku.clone()).unwrap_or_default(),
                     item_name: item.map(|i| i.name.clone()).unwrap_or_default(),
+                    uom_code,
                     qty: l.qty,
                     needed_by: l.needed_by,
                     memo: l.memo,
@@ -686,6 +699,8 @@ pub struct RequisitionLineView {
     pub item_id: Uuid,
     pub sku: String,
     pub item_name: String,
+    /// The item's stocking unit of measure (code), for display.
+    pub uom_code: String,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub qty: Decimal,
@@ -771,6 +786,7 @@ pub struct ConvertRequisitionRequest {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListRequisitionsQuery {
     pub status: Option<RequisitionStatus>,
     pub warehouse_id: Option<Uuid>,

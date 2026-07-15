@@ -17,6 +17,7 @@
 
 pub mod invoice;
 pub mod order;
+pub mod payment;
 pub mod receipt;
 pub mod reorder;
 pub mod reports;
@@ -68,6 +69,11 @@ pub mod permissions {
         pub const INVOICES_CREATE: &str = "Pages.Procurement.Invoices.Create";
         pub const INVOICES_POST: &str = "Pages.Procurement.Invoices.Post";
         pub const INVOICES_CANCEL: &str = "Pages.Procurement.Invoices.Cancel";
+        pub const PAYMENTS: &str = "Pages.Procurement.Payments";
+        pub const PAYMENTS_VIEW: &str = "Pages.Procurement.Payments.View";
+        pub const PAYMENTS_CREATE: &str = "Pages.Procurement.Payments.Create";
+        pub const PAYMENTS_POST: &str = "Pages.Procurement.Payments.Post";
+        pub const PAYMENTS_REVERSE: &str = "Pages.Procurement.Payments.Reverse";
         pub const REPORTS: &str = "Pages.Procurement.Reports";
         pub const REPORTS_VIEW: &str = "Pages.Procurement.Reports.View";
     }
@@ -137,6 +143,16 @@ pub mod permissions {
                     .child(PermissionDef::new(
                         INVOICES_CANCEL,
                         "Cancel purchase invoices",
+                    )),
+            )
+            .child(
+                PermissionDef::new(PAYMENTS, "Supplier payments")
+                    .child(PermissionDef::new(PAYMENTS_VIEW, "View supplier payments"))
+                    .child(PermissionDef::new(PAYMENTS_CREATE, "Create supplier payments"))
+                    .child(PermissionDef::new(PAYMENTS_POST, "Post supplier payments"))
+                    .child(PermissionDef::new(
+                        PAYMENTS_REVERSE,
+                        "Reverse supplier payments",
                     )),
             )
             .child(

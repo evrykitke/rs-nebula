@@ -11,6 +11,7 @@
 //! | Transfer | — no entry (same asset account) — |
 //! | Goods receipt (against PO) | Inventory | GRNI |
 //! | Purchase invoice | GRNI (+ charges, ± variance) | Accounts payable |
+//! | Supplier payment | Accounts payable | Bank / Cash |
 //! | Reversal / cancellation | the mirror, by sign |
 //!
 //! Account references are **roles** (seeded system keys), resolved per
@@ -30,6 +31,7 @@ use crate::scm::inventory::moves::{MoveType, doc as move_doc};
 use crate::scm::inventory::stock::{ledger, round_money};
 use crate::scm::procurement::invoice as pinvoice;
 use crate::scm::procurement::order::{effective_price, order, order_line};
+use crate::scm::procurement::payment as ppayment;
 use crate::scm::procurement::reports::ProcurementQueries;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -64,6 +66,11 @@ const AP_ROLE: &str = "ap";
 const PPV_ROLE: &str = "purchase_price_variance";
 const OTHER_CHARGES_ROLE: &str = "opex";
 const ROUNDING_ROLE: &str = "rounding";
+/// Order-to-cash role keys — accounts receivable, revenue and the VAT the
+/// sale collected. All seeded in the accounting chart already.
+const AR_ROLE: &str = "ar";
+const SALES_ROLE: &str = "sales";
+const VAT_OUTPUT_ROLE: &str = "vat_output";
 
 /// Rows staged after this long without an acknowledgement are re-published.
 const SWEEP_GRACE_SECS: i64 = 120;
@@ -478,6 +485,69 @@ pub(crate) async fn purchase_invoice_request(
     }))
 }
 
+/// The entry for posting (`mirror = false`) or reversing (`mirror = true`)
+/// a supplier payment: settle the payable against the money that left.
+///
+/// - **Dr Accounts payable** at the payment amount in base (amount × rate).
+/// - **Cr Bank / Cash** the same; `asset_role` is chosen by the method.
+///
+/// Pure over the payment row — the amount and rate are the payment's own,
+/// so no ledger read is needed and the caller can build it inside its
+/// posting transaction.
+pub(crate) fn purchase_payment_request(
+    payment: &ppayment::payment::Model,
+    asset_role: &str,
+    mirror: bool,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<GlPostingRequested>> {
+    let amount_base = round_money(payment.amount * payment.exchange_rate);
+    let mut entry = EntryBuilder::default();
+    entry.debit(AP_ROLE, amount_base, None);
+    entry.credit(asset_role, amount_base, None);
+    let mut lines = entry.lines();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    if mirror {
+        lines = lines
+            .into_iter()
+            .map(|l| GlLine {
+                account_role: l.account_role,
+                debit: l.credit,
+                credit: l.debit,
+                memo: l.memo,
+            })
+            .collect();
+    }
+    let (action, memo, entry_date) = if mirror {
+        (
+            "reverse",
+            format!(
+                "Reversal of supplier payment {}",
+                payment.number.as_deref().unwrap_or("?")
+            ),
+            chrono::Utc::now().date_naive(),
+        )
+    } else {
+        (
+            "post",
+            format!(
+                "Supplier payment {}",
+                payment.number.as_deref().unwrap_or("?")
+            ),
+            payment.payment_date,
+        )
+    };
+    Ok(Some(GlPostingRequested {
+        tenant_id,
+        source: format!("scm.payment:{}:{action}", payment.id),
+        entry_date,
+        memo,
+        currency: None,
+        lines,
+    }))
+}
+
 /// The entry for a purchase return (or its reversal): the outbound stock
 /// value against GRNI at the PO-price relief, any gap to purchase price
 /// variance. `grni_value` is the caller's Σ qty × PO price × rate; the
@@ -533,6 +603,139 @@ pub(crate) async fn purchase_return_request(
         currency: None,
         lines,
     }))
+}
+
+/// The cost-of-sale entry riding on a movement a sales document generated:
+/// a delivery's issue (**Dr COGS / Cr Inventory**) or a credit note's
+/// restock (**Dr Inventory / Cr COGS**). The direction follows the
+/// movement's own ledger value — an issue carries a negative `value_delta`,
+/// a receipt a positive one — so the same builder serves both, and a
+/// delivery reversal (goods back in) mirrors automatically.
+pub(crate) async fn cogs_move_request(
+    txn: &DatabaseTransaction,
+    source: String,
+    move_id: Uuid,
+    memo: String,
+    entry_date: chrono::NaiveDate,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<GlPostingRequested>> {
+    let rows = ledger_rows(txn, move_id).await?;
+    let item_ids: Vec<Uuid> = rows.iter().map(|r| r.item_id).collect();
+    let roles = item_roles(txn, &item_ids).await?;
+
+    let mut entry = EntryBuilder::default();
+    for row in &rows {
+        let r = roles
+            .get(&row.item_id)
+            .ok_or_else(|| Error::internal("ledger row without an item"))?;
+        // Goods out: value_delta < 0, so -value_delta debits COGS and
+        // credits inventory. Goods back in flips both by sign.
+        entry.debit(&r.cogs, -row.value_delta, None);
+        entry.credit(&r.inventory, -row.value_delta, None);
+    }
+    let lines = entry.lines();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(GlPostingRequested {
+        tenant_id,
+        source,
+        entry_date,
+        memo,
+        currency: None,
+        lines,
+    }))
+}
+
+/// The receivable entry for posting (`mirror = false`) or cancelling
+/// (`mirror = true`) a sales invoice, and — with `mirror = true` — the
+/// receivable side of a credit note:
+///
+/// - **Dr Accounts receivable** at the invoice gross in base.
+/// - **Cr Sales** the net revenue in base.
+/// - **Cr VAT output** the tax collected in base.
+/// - A rounding line absorbs any sub-cent gap between the separately
+///   converted components and the converted gross.
+///
+/// The caller has already computed the three base amounts (net, tax,
+/// gross) honouring the tax codes and `tax_inclusive`, so this stays pure.
+pub(crate) fn ar_invoice_request(
+    source: String,
+    memo: String,
+    entry_date: chrono::NaiveDate,
+    net_base: Decimal,
+    tax_base: Decimal,
+    gross_base: Decimal,
+    mirror: bool,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<GlPostingRequested>> {
+    let mut entry = EntryBuilder::default();
+    entry.debit(AR_ROLE, gross_base, None);
+    entry.credit(SALES_ROLE, net_base, None);
+    entry.credit(VAT_OUTPUT_ROLE, tax_base, None);
+    entry.credit(ROUNDING_ROLE, gross_base - net_base - tax_base, None);
+
+    let mut lines = entry.lines();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    if mirror {
+        lines = lines.into_iter().map(flip).collect();
+    }
+    Ok(Some(GlPostingRequested {
+        tenant_id,
+        source,
+        entry_date,
+        memo,
+        currency: None,
+        lines,
+    }))
+}
+
+/// The settlement entry for posting (`mirror = false`) or reversing
+/// (`mirror = true`) a customer payment: the money in against the
+/// receivable it clears.
+///
+/// - **Dr Bank / Cash** at the payment amount in base (`asset_role` follows
+///   the method).
+/// - **Cr Accounts receivable** the same.
+pub(crate) fn ar_payment_request(
+    source: String,
+    memo: String,
+    entry_date: chrono::NaiveDate,
+    amount_base: Decimal,
+    asset_role: &str,
+    mirror: bool,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<GlPostingRequested>> {
+    let mut entry = EntryBuilder::default();
+    entry.debit(asset_role, amount_base, None);
+    entry.credit(AR_ROLE, amount_base, None);
+    let mut lines = entry.lines();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    if mirror {
+        lines = lines.into_iter().map(flip).collect();
+    }
+    Ok(Some(GlPostingRequested {
+        tenant_id,
+        source,
+        entry_date,
+        memo,
+        currency: None,
+        lines,
+    }))
+}
+
+/// Swap a line's debit and credit — the mirror of a posting entry.
+fn flip(l: GlLine) -> GlLine {
+    GlLine {
+        account_role: l.account_role,
+        debit: l.credit,
+        credit: l.debit,
+        memo: l.memo,
+    }
 }
 
 // ---------------------------------------------------------------------------

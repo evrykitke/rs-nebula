@@ -970,6 +970,7 @@ pub(crate) fn api() -> utoipa::openapi::OpenApi {
 struct ApiDoc;
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListItemsQuery {
     /// Matches sku (contains), name (contains) or barcode (exact).
     pub q: Option<String>,

@@ -445,6 +445,7 @@ pub struct BatchLevelView {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct BatchLevelsQuery {
     /// Restrict to one warehouse; otherwise all warehouses summed.
     pub warehouse_id: Option<Uuid>,
@@ -454,6 +455,7 @@ pub struct BatchLevelsQuery {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SerialsQuery {
     pub status: Option<SerialStatus>,
     pub warehouse_id: Option<Uuid>,

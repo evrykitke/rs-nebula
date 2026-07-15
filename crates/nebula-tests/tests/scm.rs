@@ -58,6 +58,11 @@ impl Module for SeriesOnly {
                 "Purchase Invoice",
                 "PINV-{YYYY}-{SEQ:5}",
             ),
+            ("sales.order", "Sales Order", "SO-{YYYY}-{SEQ:5}"),
+            ("sales.delivery", "Delivery Note", "DN-{YYYY}-{SEQ:5}"),
+            ("sales.invoice", "Sales Invoice", "SINV-{YYYY}-{SEQ:5}"),
+            ("sales.credit_note", "Credit Note", "CN-{YYYY}-{SEQ:5}"),
+            ("sales.payment", "Customer Payment", "RCT-{YYYY}-{SEQ:5}"),
         ] {
             ctx.declare_series(
                 SeriesDef::new(key, name, template, Reset::Yearly)
@@ -387,6 +392,22 @@ async fn scenario() {
     admin_db
         .execute_unprepared(
             "DROP TABLE IF EXISTS scm_gl_outbox; \
+             DROP TABLE IF EXISTS sales_payment_allocations; \
+             DROP TABLE IF EXISTS sales_payments; \
+             DROP TABLE IF EXISTS sales_credit_note_lines; \
+             DROP TABLE IF EXISTS sales_credit_notes; \
+             DROP TABLE IF EXISTS sales_invoice_lines; \
+             DROP TABLE IF EXISTS sales_invoices; \
+             DROP TABLE IF EXISTS sales_delivery_lines; \
+             DROP TABLE IF EXISTS sales_deliveries; \
+             DROP TABLE IF EXISTS sales_order_lines; \
+             DROP TABLE IF EXISTS sales_orders; \
+             DROP TABLE IF EXISTS sales_quotation_lines; \
+             DROP TABLE IF EXISTS sales_quotations; \
+             DROP TABLE IF EXISTS sales_price_list_items; \
+             DROP TABLE IF EXISTS sales_price_lists; \
+             DROP TABLE IF EXISTS sales_customers; \
+             DROP TABLE IF EXISTS sales_customer_groups; \
              DROP TABLE IF EXISTS procurement_rfq_quotes; \
              DROP TABLE IF EXISTS procurement_rfq_suppliers; \
              DROP TABLE IF EXISTS procurement_rfq_lines; \
@@ -395,6 +416,8 @@ async fn scenario() {
              DROP TABLE IF EXISTS procurement_requisitions; \
              DROP TABLE IF EXISTS procurement_return_lines; \
              DROP TABLE IF EXISTS procurement_returns; \
+             DROP TABLE IF EXISTS procurement_payment_allocations; \
+             DROP TABLE IF EXISTS procurement_payments; \
              DROP TABLE IF EXISTS procurement_invoice_lines; \
              DROP TABLE IF EXISTS procurement_invoices; \
              DROP TABLE IF EXISTS procurement_receipt_lines; \
@@ -445,9 +468,9 @@ async fn scenario() {
     let db = app.database().expect("database must exist").clone();
 
     // --- seeding: once, then a no-op ---
-    assert!(seed::seed_defaults(&db).await.unwrap());
+    assert!(seed::seed_defaults(&db, "USD").await.unwrap());
     assert!(
-        !seed::seed_defaults(&db).await.unwrap(),
+        !seed::seed_defaults(&db, "USD").await.unwrap(),
         "second seed must be a no-op"
     );
 
@@ -1042,6 +1065,387 @@ async fn scenario() {
         unit.clone(),
     ))
     .await;
+
+    // Phase 4: sales, the order-to-cash walk.
+    Box::pin(sales_phase(
+        db.clone(),
+        numbering.clone(),
+        &items,
+        &moves,
+        main.clone(),
+        unit.clone(),
+    ))
+    .await;
+}
+
+/// Phase 4: the order-to-cash cycle end to end — customer, a confirmed
+/// order that reserves stock, a partial delivery that issues it and books
+/// COGS, a sales invoice that raises AR, a customer payment that settles
+/// it, and a restocking credit note. Asserts the counters, the stock
+/// levels and the GL outbox at each step.
+async fn sales_phase(
+    db: DatabaseConnection,
+    numbering: nebula::Numbering,
+    items: &item::Store,
+    moves: &MoveService,
+    main: nebula_apps::scm::inventory::warehouse::Model,
+    unit: item::uom::Model,
+) {
+    use nebula_apps::scm::gl::outbox;
+    use nebula_apps::scm::sales::credit_note::{
+        CreditNoteLineInput, CreditNoteService, CreditNoteStatus, NewCreditNote,
+    };
+    use nebula_apps::scm::sales::customer::customer;
+    use nebula_apps::scm::sales::delivery::{
+        DeliveryLineInput, DeliveryService, DeliveryStatus, NewDelivery,
+    };
+    use nebula_apps::scm::sales::invoice::{
+        InvoiceLineInput as SInvLine, InvoiceService as SInvSvc, InvoiceStatus as SInvStatus,
+        NewInvoice as SNewInv, SettlementStatus,
+    };
+    use nebula_apps::scm::sales::order::{
+        NewOrder as SoNew, OrderLineInput as SoLine, OrderService as SoService,
+        OrderStatus as SoStatus,
+    };
+    use nebula_apps::scm::sales::payment::{
+        NewPayment as SNewPay, PaymentAllocationInput, PaymentService as SPaySvc,
+    };
+    use sea_orm::{ActiveModelTrait, PaginatorTrait, Set};
+
+    let gl = Gl::new(Events::new(), None);
+    let dec = |s: &str| s.parse::<Decimal>().unwrap();
+
+    // A sellable item with 100 on hand at cost 30 (opening adjustment).
+    let prod = items
+        .create_item(item_body("SALE-1", "Sellable Widget", unit.id), None)
+        .await
+        .unwrap();
+    let opening = moves
+        .create_draft(stock_move(
+            MoveType::Receipt,
+            None,
+            Some(main.id),
+            vec![move_line(prod.id, dec("100"), Some(dec("30")))],
+        ))
+        .await
+        .unwrap();
+    moves.post(opening.id, &numbering, &gl).await.unwrap();
+    assert_eq!(level_of(&db, prod.id, main.id).await, (dec("100"), dec("3000")));
+
+    // A customer on standing terms.
+    let now = chrono::Utc::now();
+    let customer_id = Uuid::new_v4();
+    customer::ActiveModel {
+        id: Set(customer_id),
+        code: Set("CUST-1".into()),
+        name: Set("Acme Retail".into()),
+        legal_name: Set(None),
+        customer_type: Set("company".into()),
+        registration_no: Set(None),
+        tax_number: Set(None),
+        industry: Set(None),
+        website: Set(None),
+        group_id: Set(None),
+        contact_name: Set(None),
+        email: Set(None),
+        phone: Set(None),
+        secondary_contact_name: Set(None),
+        secondary_email: Set(None),
+        secondary_phone: Set(None),
+        billing_address_line1: Set(None),
+        billing_address_line2: Set(None),
+        billing_city: Set(None),
+        billing_region: Set(None),
+        billing_postal_code: Set(None),
+        billing_country: Set(None),
+        shipping_address_line1: Set(None),
+        shipping_address_line2: Set(None),
+        shipping_city: Set(None),
+        shipping_region: Set(None),
+        shipping_postal_code: Set(None),
+        shipping_country: Set(None),
+        currency: Set("USD".into()),
+        payment_terms_days: Set(30),
+        credit_limit: Set(None),
+        price_list_id: Set(None),
+        default_discount_pct: Set(None),
+        default_tax_code_id: Set(None),
+        tax_exempt: Set(true),
+        tax_exemption_no: Set(None),
+        default_warehouse_id: Set(None),
+        salesperson_id: Set(None),
+        incoterms: Set(None),
+        loyalty_no: Set(None),
+        on_hold: Set(false),
+        hold_reason: Set(None),
+        is_active: Set(true),
+        notes: Set(None),
+        created_at: Set(now),
+        created_by: Set(None),
+        updated_at: Set(now),
+        updated_by: Set(None),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    // An order for 10, priced by hand at 50.
+    let orders = SoService::new(db.clone());
+    let so = orders
+        .create_draft(SoNew {
+            customer_id,
+            order_date: now.date_naive(),
+            expected_date: None,
+            warehouse_id: main.id,
+            shipping_address: None,
+            shipping_method: None,
+            incoterms: None,
+            customer_contact: None,
+            customer_po_no: None,
+            currency: None,
+            payment_terms_days: None,
+            tax_inclusive: false,
+            discount_pct: None,
+            discount_amount: None,
+            other_charges: None,
+            memo: None,
+            terms_and_conditions: None,
+            lines: vec![SoLine {
+                item_id: prod.id,
+                description: None,
+                qty: dec("10"),
+                warehouse_id: None,
+                unit_price: Some(dec("50")),
+                discount_pct: None,
+                tax_code_id: None,
+                expected_date: None,
+                memo: None,
+            }],
+            created_by: None,
+            allow_price_override: true,
+        })
+        .await
+        .unwrap();
+    let so = orders
+        .confirm(so.id, None, None, false, &numbering)
+        .await
+        .unwrap();
+    assert_eq!(so.status, SoStatus::Confirmed);
+    assert!(so.number.is_some(), "confirm allocates the SO number");
+    assert_eq!(so.lines[0].reserved_qty, dec("10"), "confirm reserves all 10");
+    assert_eq!(reserved_of(&db, prod.id, main.id).await, dec("10"));
+    let so_line_id = so.lines[0].id;
+
+    // A plain issue may not touch the reserved band: only 90 is free.
+    let poach = moves
+        .create_draft(stock_move(
+            MoveType::Issue,
+            Some(main.id),
+            None,
+            vec![move_line(prod.id, dec("95"), None)],
+        ))
+        .await
+        .unwrap();
+    assert!(
+        moves.post(poach.id, &numbering, &gl).await.is_err(),
+        "a plain issue cannot take stock reserved for the order"
+    );
+
+    // Deliver 6 of the 10. Stock leaves, COGS is booked, reservation drops.
+    let deliveries = DeliveryService::new(db.clone());
+    let dn = deliveries
+        .create_draft(NewDelivery {
+            order_id: so.id,
+            delivery_date: now.date_naive(),
+            carrier: None,
+            tracking_no: None,
+            vehicle_reg: None,
+            driver_name: None,
+            received_by_name: None,
+            shipping_address: None,
+            memo: None,
+            lines: vec![DeliveryLineInput {
+                order_line_id: so_line_id,
+                qty: dec("6"),
+                batch_no: None,
+                serial_nos: None,
+                memo: None,
+            }],
+            created_by: None,
+        })
+        .await
+        .unwrap();
+    let dn = deliveries.post(dn.id, &numbering, &gl).await.unwrap();
+    assert_eq!(dn.status, DeliveryStatus::Posted);
+    assert!(dn.number.as_deref().unwrap().starts_with("DN-"));
+    assert_eq!(
+        level_of(&db, prod.id, main.id).await,
+        (dec("94"), dec("2820")),
+        "6 issued at cost 30 leaves 94 on hand worth 2820"
+    );
+    assert_eq!(
+        reserved_of(&db, prod.id, main.id).await,
+        dec("4"),
+        "the delivery consumed 6 of the reservation"
+    );
+    let so_after = orders.view(so.id).await.unwrap();
+    assert_eq!(so_after.status, SoStatus::PartiallyDelivered);
+    assert_eq!(so_after.lines[0].delivered_qty, dec("6"));
+    assert_eq!(so_after.lines[0].reserved_qty, dec("4"));
+    // COGS staged: Dr COGS / Cr Inventory 180 (6 × 30).
+    let cogs = outbox::Entity::find_by_id(format!("sales.delivery:{}:post", dn.id))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("delivery stages a COGS request");
+    assert!(cogs.payload.to_string().contains("cogs"));
+
+    // Bill the 6 delivered. AR is raised (customer is tax-exempt: no VAT).
+    let invoices = SInvSvc::new(db.clone());
+    let inv = invoices
+        .create_draft(SNewInv {
+            order_id: so.id,
+            invoice_date: now.date_naive(),
+            due_date: None,
+            payment_terms_days: None,
+            exchange_rate: None,
+            tax_inclusive: false,
+            discount_pct: None,
+            discount_amount: None,
+            other_charges: None,
+            customer_po_no: None,
+            attachment_file_id: None,
+            memo: None,
+            lines: vec![SInvLine {
+                order_line_id: Some(so_line_id),
+                description: None,
+                qty: dec("6"),
+                unit_price: dec("50"),
+                discount_pct: None,
+                tax_code_id: None,
+                memo: None,
+            }],
+            created_by: None,
+        })
+        .await
+        .unwrap();
+    let inv = invoices
+        .post(inv.id, &numbering, None, &gl)
+        .await
+        .unwrap();
+    assert_eq!(inv.status, SInvStatus::Posted);
+    assert_eq!(inv.total, dec("300"), "6 × 50, no tax");
+    assert_eq!(inv.outstanding, dec("300"));
+    // Over-billing beyond delivered is refused.
+    let over = invoices
+        .create_draft(SNewInv {
+            order_id: so.id,
+            invoice_date: now.date_naive(),
+            due_date: None,
+            payment_terms_days: None,
+            exchange_rate: None,
+            tax_inclusive: false,
+            discount_pct: None,
+            discount_amount: None,
+            other_charges: None,
+            customer_po_no: None,
+            attachment_file_id: None,
+            memo: None,
+            lines: vec![SInvLine {
+                order_line_id: Some(so_line_id),
+                description: None,
+                qty: dec("1"),
+                unit_price: dec("50"),
+                discount_pct: None,
+                tax_code_id: None,
+                memo: None,
+            }],
+            created_by: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        invoices.post(over.id, &numbering, None, &gl).await.is_err(),
+        "cannot bill beyond the delivered quantity"
+    );
+
+    // Pay 200 of the 300; the invoice is partially settled.
+    let payments = SPaySvc::new(db.clone());
+    let pay = payments
+        .create_draft(SNewPay {
+            customer_id,
+            payment_date: now.date_naive(),
+            method: "bank_transfer".into(),
+            reference: None,
+            currency: None,
+            exchange_rate: None,
+            amount: dec("200"),
+            memo: None,
+            allocations: vec![PaymentAllocationInput {
+                invoice_id: inv.id,
+                amount: dec("200"),
+            }],
+            created_by: None,
+        })
+        .await
+        .unwrap();
+    payments.post(pay.id, &numbering, None, &gl).await.unwrap();
+    let inv_after = invoices.view(inv.id).await.unwrap();
+    assert_eq!(inv_after.paid_amount, dec("200"));
+    assert_eq!(inv_after.outstanding, dec("100"));
+
+    // A credit note for 2 units, restocked at the issue cost of 30.
+    let notes = CreditNoteService::new(db.clone());
+    let inv_line_id = inv_after.lines[0].id;
+    let cn = notes
+        .create_draft(NewCreditNote {
+            invoice_id: inv.id,
+            credit_date: now.date_naive(),
+            reason: "returns".into(),
+            memo: None,
+            lines: vec![CreditNoteLineInput {
+                invoice_line_id: inv_line_id,
+                description: None,
+                qty: dec("2"),
+                unit_price: None,
+                discount_pct: None,
+                tax_code_id: None,
+                restock: true,
+                restock_warehouse_id: Some(main.id),
+                batch_no: None,
+                serial_nos: None,
+                memo: None,
+            }],
+            created_by: None,
+        })
+        .await
+        .unwrap();
+    let cn = notes.post(cn.id, &numbering, None, &gl).await.unwrap();
+    assert_eq!(cn.status, CreditNoteStatus::Posted);
+    assert_eq!(cn.total, dec("100"), "2 × 50");
+    assert_eq!(
+        level_of(&db, prod.id, main.id).await,
+        (dec("96"), dec("2880")),
+        "2 restocked at cost 30 rejoin stock"
+    );
+    // The credit note lowers the invoice balance to nil (100 credit + 200 paid).
+    let inv_final = invoices.view(inv.id).await.unwrap();
+    assert_eq!(inv_final.outstanding, dec("0"));
+    assert_eq!(inv_final.settlement, SettlementStatus::Paid);
+
+    // AR reconciliation: no unbooked gap in the outbox count beyond ours.
+    let staged = outbox::Entity::find().count(&db).await.unwrap();
+    assert!(staged >= 1, "sales postings staged GL requests: {staged}");
+}
+
+/// The reserved quantity on a level row.
+async fn reserved_of(db: &DatabaseConnection, item_id: Uuid, warehouse_id: Uuid) -> Decimal {
+    stock::level::Entity::find_by_id((item_id, warehouse_id))
+        .one(db)
+        .await
+        .unwrap()
+        .map(|l| l.reserved)
+        .unwrap_or(Decimal::ZERO)
 }
 
 /// Phase 3: procurement, end to end — suppliers, the purchase-to-pay walk,

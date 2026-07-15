@@ -729,7 +729,10 @@ impl ReceiptService {
                 .get(&row.move_line_id)
                 .ok_or_else(|| Error::internal("ledger row without a document line"))?;
             let mv = if row.qty_delta > Decimal::ZERO {
-                Movement::Issue { qty: row.qty_delta }
+                Movement::Issue {
+                    qty: row.qty_delta,
+                    covered_by_reservation: Decimal::ZERO,
+                }
             } else {
                 Movement::Receipt {
                     qty: -row.qty_delta,
@@ -1299,6 +1302,7 @@ pub struct ReverseReceiptRequest {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListReceiptsQuery {
     pub order_id: Option<Uuid>,
     pub status: Option<ReceiptStatus>,

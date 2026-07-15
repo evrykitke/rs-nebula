@@ -118,7 +118,18 @@ pub enum Movement {
     Receipt { qty: Decimal, unit_cost: Decimal },
     /// Stock out at the running average (issue, transfer-out, negative
     /// adjustment).
-    Issue { qty: Decimal },
+    Issue {
+        qty: Decimal,
+        /// How much of this issue is covered by a reservation the caller
+        /// holds (a sales delivery consuming its order's reservation).
+        /// The availability check becomes
+        /// `on_hand − (reserved − covered) ≥ qty`, so a plain issue
+        /// (covered = 0) can no longer silently take stock promised to a
+        /// confirmed order, while a delivery spends exactly what it
+        /// reserved. The engine decrements `reserved` by `covered` in
+        /// the same level update.
+        covered_by_reservation: Decimal,
+    },
 }
 
 pub struct StockService;
@@ -152,7 +163,7 @@ impl StockService {
         let level = lock_or_init_level(txn, item.id, warehouse_id).await?;
 
         // 2. Compute the delta under moving-average rules.
-        let (qty_delta, unit_cost, value_delta) = match mv {
+        let (qty_delta, unit_cost, value_delta, reserved_after) = match mv {
             Movement::Receipt { qty, unit_cost } => {
                 ensure_valid_qty(qty, item, stock_uom)?;
                 if unit_cost < Decimal::ZERO {
@@ -160,14 +171,33 @@ impl StockService {
                 }
                 let unit_cost = round_cost(unit_cost);
                 let value = round_money(qty * unit_cost);
-                (qty, unit_cost, value)
+                (qty, unit_cost, value, level.reserved)
             }
-            Movement::Issue { qty } => {
+            Movement::Issue {
+                qty,
+                covered_by_reservation: covered,
+            } => {
                 ensure_valid_qty(qty, item, stock_uom)?;
-                if level.on_hand < qty {
+                if covered < Decimal::ZERO || covered > qty {
+                    return Err(Error::internal(format!(
+                        "reservation coverage {covered} outside 0..={qty} for {}",
+                        item.sku
+                    )));
+                }
+                if covered > level.reserved {
+                    return Err(Error::internal(format!(
+                        "issue of {} claims {covered} reserved but only {} is held",
+                        item.sku, level.reserved
+                    )));
+                }
+                // Free stock = on hand minus what other documents hold.
+                // An issue may spend its own reservation plus free stock,
+                // but never stock promised elsewhere.
+                let held_by_others = level.reserved - covered;
+                if level.on_hand - held_by_others < qty {
                     return Err(Error::Validation(format!(
-                        "insufficient stock of {}: on hand {}, requested {}",
-                        item.sku, level.on_hand, qty
+                        "insufficient stock of {}: on hand {}, reserved for others {}, requested {}",
+                        item.sku, level.on_hand, held_by_others, qty
                     )));
                 }
                 let avg = if level.on_hand.is_zero() {
@@ -182,7 +212,7 @@ impl StockService {
                 } else {
                     round_money(qty * avg)
                 };
-                (-qty, avg, -value)
+                (-qty, avg, -value, level.reserved - covered)
             }
         };
 
@@ -210,14 +240,72 @@ impl StockService {
         .insert(txn)
         .await?;
 
-        // 4. Update the locked level.
+        // 4. Update the locked level (an issue that consumed reservation
+        //    releases it in the same write).
         let mut active: level::ActiveModel = level.into();
         active.on_hand = Set(qty_after);
         active.value = Set(value_after);
+        active.reserved = Set(reserved_after);
         active.updated_at = Set(chrono::Utc::now());
         active.update(txn).await?;
 
         Ok(row)
+    }
+
+    /// Reserve up to `want` of an item in a warehouse for a demand
+    /// document (a confirmed sales order line), granting what free stock
+    /// allows: `granted = min(want, on_hand − reserved)`, floored at
+    /// zero. Computed and written under the level row lock, so the grant
+    /// can never promise the same stock twice; the caller records the
+    /// granted quantity on its own line and the shortfall stays visible.
+    pub async fn reserve_up_to(
+        txn: &DatabaseTransaction,
+        item_id: Uuid,
+        warehouse_id: Uuid,
+        want: Decimal,
+    ) -> Result<Decimal> {
+        if want <= Decimal::ZERO {
+            return Ok(Decimal::ZERO);
+        }
+        let level = lock_or_init_level(txn, item_id, warehouse_id).await?;
+        let free = (level.on_hand - level.reserved).max(Decimal::ZERO);
+        let granted = want.min(free);
+        if granted.is_zero() {
+            return Ok(Decimal::ZERO);
+        }
+        let next = level.reserved + granted;
+        let mut active: level::ActiveModel = level.into();
+        active.reserved = Set(next);
+        active.updated_at = Set(chrono::Utc::now());
+        active.update(txn).await?;
+        Ok(granted)
+    }
+
+    /// Release `qty` of reservation on a level row (order cancellation,
+    /// short-close, or a delivery reversal returning less than was
+    /// held). Clamped at zero: releasing more than is held is a caller
+    /// bookkeeping slip that must not wedge the level, but it is logged
+    /// by the clamp being visible in the returned value.
+    pub async fn release_reserved(
+        txn: &DatabaseTransaction,
+        item_id: Uuid,
+        warehouse_id: Uuid,
+        qty: Decimal,
+    ) -> Result<Decimal> {
+        if qty <= Decimal::ZERO {
+            return Ok(Decimal::ZERO);
+        }
+        let level = lock_or_init_level(txn, item_id, warehouse_id).await?;
+        let released = qty.min(level.reserved);
+        if released.is_zero() {
+            return Ok(Decimal::ZERO);
+        }
+        let next = level.reserved - released;
+        let mut active: level::ActiveModel = level.into();
+        active.reserved = Set(next);
+        active.updated_at = Set(chrono::Utc::now());
+        active.update(txn).await?;
+        Ok(released)
     }
 
     /// Adjust the open-purchase-order quantity on a level row (procurement

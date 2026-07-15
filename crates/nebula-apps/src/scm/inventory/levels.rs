@@ -355,6 +355,7 @@ pub(crate) fn api() -> utoipa::openapi::OpenApi {
 struct ApiDoc;
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct LevelsQuery {
     pub warehouse_id: Option<Uuid>,
     pub item_id: Option<Uuid>,
@@ -364,6 +365,7 @@ pub struct LevelsQuery {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct LedgerQuery {
     pub item_id: Option<Uuid>,
     pub warehouse_id: Option<Uuid>,
@@ -377,6 +379,7 @@ pub struct LedgerQuery {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ValuationQuery {
     pub warehouse_id: Option<Uuid>,
 }

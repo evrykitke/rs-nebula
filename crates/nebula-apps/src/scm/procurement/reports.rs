@@ -661,6 +661,7 @@ impl ReportDefinition for GrniReport {
     }
 }
 
+
 pub struct SupplierBalancesDataSource;
 
 #[async_trait::async_trait]
@@ -891,6 +892,7 @@ pub(crate) fn api() -> utoipa::openapi::OpenApi {
 struct ApiDoc;
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ScorecardQuery {
     /// Document date window, inclusive; open-ended when omitted.
     pub from: Option<chrono::NaiveDate>,
