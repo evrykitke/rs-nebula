@@ -766,8 +766,10 @@ pub fn subscribe_acks(ctx: &mut ModuleContext) {
         let tenants = tenants.clone();
         let main = main.clone();
         async move {
-            // Only SCM sources are ours to clear.
-            if !ev.source.starts_with("scm.") {
+            // Only SCM's own sources are ours to clear: the inventory /
+            // procurement postings (`scm.*`) and the order-to-cash ones
+            // (`sales.*`), both staged in this module's outbox.
+            if !(ev.source.starts_with("scm.") || ev.source.starts_with("sales.")) {
                 return Ok(());
             }
             if let Some(db) = resolve_db(&tenants, &main, ev.tenant_id).await? {
