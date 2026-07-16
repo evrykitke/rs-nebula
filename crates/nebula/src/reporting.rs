@@ -50,6 +50,12 @@ pub struct Report {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
+    /// The document's own number, set on its own line under the title. A trade
+    /// document is filed, quoted and chased by this number, so it is given its
+    /// own line rather than trailing the title — carried without the `#`, which
+    /// the renderer adds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<String>,
     #[serde(default)]
     pub orientation: Orientation,
     /// What to call the downloaded file, without an extension. A report that
@@ -67,10 +73,18 @@ impl Report {
         Self {
             title: title.into(),
             subtitle: None,
+            number: None,
             orientation: Orientation::Portrait,
             file_name: None,
             widgets: Vec::new(),
         }
+    }
+
+    /// The document's own number, e.g. `SO-2026-00001`. Pass it bare: the
+    /// renderer sets it under the title and adds the `#`.
+    pub fn number(mut self, number: impl Into<String>) -> Self {
+        self.number = Some(number.into());
+        self
     }
 
     /// Name the downloaded file after the record this report renders, e.g. a
@@ -2142,6 +2156,10 @@ mod typst_backend {
         /// read as a column of figures and wants to stay tight, while the
         /// blocks above it are read as facts and want room around them.
         block_inset: &'static str,
+        /// The document number under the title. Navy across every format: the
+        /// number is the one string on the page a reader comes looking for, and
+        /// it should read as an identifier rather than as more of the heading.
+        number_fill: &'static str,
     }
 
     fn theme(format: ReportFormat) -> Theme {
@@ -2168,6 +2186,7 @@ mod typst_backend {
                 head_fill: "f1f5f9",
                 cell_inset: "5pt",
                 block_inset: "6pt",
+                number_fill: "1e3a8a",
             },
             // Dense, near-monochrome, thin rules — an RDLC-style list look.
             ReportFormat::Compact => Theme {
@@ -2189,6 +2208,7 @@ mod typst_backend {
                 head_fill: "f3f4f6",
                 cell_inset: "3pt",
                 block_inset: "6pt",
+                number_fill: "1e3a8a",
             },
             // Classic, restrained, serif-heavy corporate stationery.
             // The house look: ruled, dense, and squarely aligned — a trade
@@ -2220,6 +2240,7 @@ mod typst_backend {
                 head_fill: "eef2f7",
                 cell_inset: "4pt",
                 block_inset: "9pt",
+                number_fill: "1e3a8a",
             },
         }
     }
@@ -2308,7 +2329,20 @@ mod typst_backend {
         s.push_str(&color(t.accent));
         s.push_str(")[");
         s.push_str(&lit(&doc.report.title));
-        s.push_str("]], [");
+        s.push(']');
+        // The number on its own line beneath the title: a step down in size so
+        // it reads as the document's identifier rather than as more heading,
+        // and hashed the way anyone quoting it would write it.
+        if let Some(number) = &doc.report.number {
+            s.push_str("\\\n#text(size: ");
+            s.push_str(t.h2);
+            s.push_str(", weight: \"bold\", fill: ");
+            s.push_str(&color(t.number_fill));
+            s.push_str(")[");
+            s.push_str(&lit(&format!("#{number}")));
+            s.push(']');
+        }
+        s.push_str("], [");
         if let Some(sub) = &doc.report.subtitle {
             s.push_str("#text(size: ");
             s.push_str(t.small);

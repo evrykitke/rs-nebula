@@ -62,15 +62,18 @@ impl Document {
             Orientation::Portrait
         };
 
+        // An unissued document must not look like it has an identity.
         let heading = match &self.number {
-            Some(n) => format!("{} {}", self.title, n),
-            // An unissued document must not look like it has an identity.
+            Some(_) => self.title.clone(),
             None => format!("{} (unissued)", self.title),
         };
 
         let mut report = Report::new(heading)
             .subtitle(self.status)
             .orientation(orientation);
+        if let Some(number) = &self.number {
+            report = report.number(number.clone());
+        }
 
         // The file is named after the document, not the report: someone
         // filing three invoices needs three distinct files, and the number is
