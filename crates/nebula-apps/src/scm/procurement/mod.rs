@@ -15,6 +15,7 @@
 //! is `Orders.Approve`; amount thresholds and workflow come later, as do
 //! payments (accounting's domain).
 
+pub mod documents;
 pub mod invoice;
 pub mod order;
 pub mod payment;

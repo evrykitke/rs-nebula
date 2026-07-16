@@ -879,7 +879,7 @@ async fn load_suppliers<C: ConnectionTrait>(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RfqQuoteView {
     pub supplier_id: Uuid,
     pub supplier_name: String,
@@ -895,7 +895,7 @@ pub struct RfqQuoteView {
     pub quoted_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RfqLineView {
     pub id: Uuid,
     pub line_no: i32,
@@ -911,7 +911,7 @@ pub struct RfqLineView {
     pub quotes: Vec<RfqQuoteView>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RfqSupplierView {
     pub supplier_id: Uuid,
     pub code: String,
@@ -920,7 +920,7 @@ pub struct RfqSupplierView {
     pub invited_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RfqView {
     pub id: Uuid,
     pub number: Option<String>,

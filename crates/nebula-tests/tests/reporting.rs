@@ -30,10 +30,7 @@ async fn boot(url: &str) -> App {
 }
 
 fn render_cx(app: &App) -> RenderCx {
-    RenderCx {
-        db: app.database().cloned(),
-        tenant: None,
-    }
+    RenderCx::new(app.database().cloned(), None)
 }
 
 #[tokio::test]
@@ -132,7 +129,7 @@ async fn run_jobs(url: &str, redis_url: &str) -> Result<(), String> {
 
     let reporting = app.reporting();
     let db = app.database().cloned();
-    let cx = RenderCx { db: db.clone(), tenant: None };
+    let cx = RenderCx::new(db.clone(), None);
     let jobs = app.jobs().ok_or("jobs client must exist")?;
 
     // An unsupported output is rejected synchronously, before anything queues.

@@ -52,6 +52,13 @@ pub struct Report {
     pub subtitle: Option<String>,
     #[serde(default)]
     pub orientation: Orientation,
+    /// What to call the downloaded file, without an extension. A report that
+    /// renders a *particular* record should name itself after it: without
+    /// this every invoice downloads as `sales-invoice.pdf`, and filing three
+    /// of them means three files with the same name. `None` falls back to the
+    /// report's registry name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
     pub widgets: Vec<Widget>,
 }
 
@@ -61,8 +68,16 @@ impl Report {
             title: title.into(),
             subtitle: None,
             orientation: Orientation::Portrait,
+            file_name: None,
             widgets: Vec::new(),
         }
+    }
+
+    /// Name the downloaded file after the record this report renders, e.g. a
+    /// document's own number.
+    pub fn file_name(mut self, name: impl Into<String>) -> Self {
+        self.file_name = Some(name.into());
+        self
     }
 
     pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
@@ -437,18 +452,28 @@ pub struct Column {
     pub label: String,
     #[serde(default)]
     pub align: Align,
+    /// Absorb the table's spare width. Without a hint every text column
+    /// shares the slack equally, which gives a line-number column the same
+    /// width as a description — so mark the column that actually holds prose.
+    /// When no column is marked, the text columns share it as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wide: bool,
 }
 
 impl Column {
     pub fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into(), align: Align::Start }
+        Self { label: label.into(), align: Align::Start, wide: false }
     }
     /// Right-align — for amounts and other numbers.
     pub fn number(label: impl Into<String>) -> Self {
-        Self { label: label.into(), align: Align::End }
+        Self { label: label.into(), align: Align::End, wide: false }
     }
     pub fn center(label: impl Into<String>) -> Self {
-        Self { label: label.into(), align: Align::Center }
+        Self { label: label.into(), align: Align::Center, wide: false }
+    }
+    /// The column that takes the leftover width — a description or a name.
+    pub fn wide(label: impl Into<String>) -> Self {
+        Self { label: label.into(), align: Align::Start, wide: true }
     }
 }
 
@@ -564,14 +589,87 @@ impl ReportOutput {
 // Data sources
 // ---------------------------------------------------------------------------
 
+/// The arguments a report was asked for: everything in the render request's
+/// query string that is not `format` or `output`.
+///
+/// This is what makes a report a *function* rather than a fixed view — a
+/// document report is told which invoice to draw (`?id=…`), a register which
+/// window to cover (`?from=…&to=…`). Values arrive as strings from the URL,
+/// so the typed readers below are where a bad one is caught, once, with a
+/// message naming the parameter.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReportParams(HashMap<String, String>);
+
+impl ReportParams {
+    pub fn new(values: HashMap<String, String>) -> Self {
+        // A blank value is not an answer: `?from=` means "unset", not "".
+        Self(values.into_iter().filter(|(_, v)| !v.trim().is_empty()).collect())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The raw value, if the caller supplied one.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
+    }
+
+    /// A value the report cannot do without.
+    pub fn require(&self, key: &str) -> Result<&str> {
+        self.get(key)
+            .ok_or_else(|| Error::Validation(format!("this report needs the {key:?} parameter")))
+    }
+
+    /// Parse a value, reporting *which* parameter was malformed rather than
+    /// letting a parse error surface with no context.
+    pub fn parse<T>(&self, key: &str) -> Result<Option<T>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        match self.get(key) {
+            None => Ok(None),
+            Some(raw) => raw
+                .parse::<T>()
+                .map(Some)
+                .map_err(|e| Error::Validation(format!("the {key:?} parameter is not valid: {e}"))),
+        }
+    }
+
+    /// Parse a value the report cannot do without.
+    pub fn require_parse<T>(&self, key: &str) -> Result<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        self.require(key)?;
+        Ok(self.parse(key)?.expect("require checked the key is present"))
+    }
+
+    /// The record a document report draws.
+    pub fn id(&self) -> Result<uuid::Uuid> {
+        self.require_parse("id")
+    }
+
+    /// An optional date, e.g. a register's `from`/`to` bounds.
+    pub fn date(&self, key: &str) -> Result<Option<chrono::NaiveDate>> {
+        self.parse(key)
+    }
+}
+
 /// What a datasource is handed to fetch its data: the request's
-/// (tenant-swapped) database connection, the current tenant, and the
-/// framework primitives a datasource might need.
+/// (tenant-swapped) database connection, the current tenant, the arguments
+/// the report was asked for, and the framework primitives a datasource might
+/// need.
 pub struct DataCx<'a> {
     pub db: Option<&'a DatabaseConnection>,
     pub tenant: Option<&'a TenantRef>,
     pub tenants: Option<&'a Arc<TenantManager>>,
     pub storage: &'a Storage,
+    /// The render request's arguments — how a datasource knows *which*
+    /// record or window to load.
+    pub params: &'a ReportParams,
 }
 
 impl DataCx<'_> {
@@ -769,13 +867,31 @@ pub struct Rendered {
     pub bytes: Vec<u8>,
     pub content_type: &'static str,
     pub extension: &'static str,
+    /// What to call the file, without an extension — a document's own number
+    /// where it has one. Filled in by the engine from
+    /// [`Report::file_name`]; renderers do not set it.
+    pub file_name: Option<String>,
 }
 
 /// What a render endpoint receives from the request to pass through to the
-/// engine: the (tenant-swapped) connection and the current tenant.
+/// engine: the (tenant-swapped) connection, the current tenant, and the
+/// arguments the report was asked for.
 pub struct RenderCx {
     pub db: Option<DatabaseConnection>,
     pub tenant: Option<TenantRef>,
+    pub params: ReportParams,
+}
+
+impl RenderCx {
+    /// A render with no arguments — reports that take none, and tests.
+    pub fn new(db: Option<DatabaseConnection>, tenant: Option<TenantRef>) -> Self {
+        Self { db, tenant, params: ReportParams::default() }
+    }
+
+    pub fn with_params(mut self, params: ReportParams) -> Self {
+        self.params = params;
+        self
+    }
 }
 
 /// A report's public metadata for the viewer catalogue.
@@ -924,6 +1040,12 @@ pub(crate) struct RenderReportJob {
     pub report: String,
     pub format: Option<ReportFormat>,
     pub output: ReportOutput,
+    /// The arguments the report was queued with. Carried on the job (and
+    /// persisted with the row) because a parameterized report renders a
+    /// *different document* without them — a worker that dropped them would
+    /// quietly produce the wrong one.
+    #[serde(default)]
+    pub params: ReportParams,
 }
 
 /// Worker state for [`run_report_job`]: the engine (which carries the
@@ -1134,17 +1256,30 @@ impl Reporting {
         }
 
         let doc = self.document(cx, def.as_ref(), format).await?;
+        self.render_document(&doc, output)
+    }
 
-        match output {
-            ReportOutput::Pdf => self.inner.pdf.render(&doc),
-            ReportOutput::Excel => self.inner.excel.render(&doc),
+    /// Render an assembled document and stamp the file name the report chose,
+    /// so a caller downloading a document gets a file named after the record
+    /// rather than after the report.
+    fn render_document(&self, doc: &Document, output: ReportOutput) -> Result<Rendered> {
+        let file_name = doc.report.file_name.clone();
+        let mut rendered = match output {
+            ReportOutput::Pdf => self.inner.pdf.render(doc)?,
+            ReportOutput::Excel => self.inner.excel.render(doc)?,
             ReportOutput::Table => {
-                let tables = tables_of(&doc);
-                let bytes = serde_json::to_vec(&tables)
+                let bytes = serde_json::to_vec(&tables_of(doc))
                     .map_err(|e| Error::internal(e.to_string()))?;
-                Ok(Rendered { bytes, content_type: "application/json", extension: "json" })
+                Rendered {
+                    bytes,
+                    content_type: "application/json",
+                    extension: "json",
+                    file_name: None,
+                }
             }
-        }
+        };
+        rendered.file_name = file_name;
+        Ok(rendered)
     }
 
     /// Render a caller-supplied [`Report`] that no [`ReportDefinition`] backs.
@@ -1168,15 +1303,7 @@ impl Reporting {
         output: ReportOutput,
     ) -> Result<Rendered> {
         let doc = self.ad_hoc_document(cx, report, format).await?;
-        match output {
-            ReportOutput::Pdf => self.inner.pdf.render(&doc),
-            ReportOutput::Excel => self.inner.excel.render(&doc),
-            ReportOutput::Table => {
-                let bytes = serde_json::to_vec(&tables_of(&doc))
-                    .map_err(|e| Error::internal(e.to_string()))?;
-                Ok(Rendered { bytes, content_type: "application/json", extension: "json" })
-            }
-        }
+        self.render_document(&doc, output)
     }
 
     /// Wrap a caller-supplied report in the same chrome [`document`] gives a
@@ -1197,6 +1324,7 @@ impl Reporting {
             tenant: cx.tenant.as_ref(),
             tenants: self.inner.tenants.as_ref(),
             storage: &self.inner.storage,
+            params: &cx.params,
         };
         let company: CompanyInformation = {
             let value = CompanyInformationDataSource.load(&datacx).await?;
@@ -1287,6 +1415,7 @@ impl Reporting {
             tenant: cx.tenant.as_ref(),
             tenants: self.inner.tenants.as_ref(),
             storage: &self.inner.storage,
+            params: &cx.params,
         };
 
         let company: CompanyInformation = {
@@ -1377,7 +1506,8 @@ impl Reporting {
             Some((id, name)) => (Some(id), Some(name)),
             None => (None, None),
         };
-        job_store::insert(db, id, name, format, output, by_name.as_deref(), by_id).await?;
+        job_store::insert(db, id, name, format, output, &cx.params, by_name.as_deref(), by_id)
+            .await?;
 
         jobs.enqueue(
             REPORT_QUEUE,
@@ -1387,6 +1517,7 @@ impl Reporting {
                 report: name.to_string(),
                 format,
                 output,
+                params: cx.params.clone(),
             },
         )
         .await?;
@@ -1533,10 +1664,14 @@ impl Reporting {
             tracing::warn!(error = %e, job = %job.job_id, "could not mark report job running");
         }
 
-        let cx = RenderCx { db: Some(db.clone()), tenant: tenant.clone() };
+        let cx = RenderCx { db: Some(db.clone()), tenant: tenant.clone(), params: job.params.clone() };
         match self.render(&cx, &job.report, job.format, job.output).await {
             Ok(rendered) => {
-                let resource = format!("{}.{}", job.report, rendered.extension);
+                let resource = format!(
+                    "{}.{}",
+                    rendered.file_name.as_deref().unwrap_or(&job.report),
+                    rendered.extension
+                );
                 // Private storage: an artifact may hold financial data, so
                 // it must only leave through the permission-checked
                 // download endpoint — never the unauthenticated `/public`.
@@ -1630,7 +1765,7 @@ mod renderers {
             });
             let bytes = serde_json::to_vec_pretty(&payload)
                 .map_err(|e| Error::internal(e.to_string()))?;
-            Ok(Rendered { bytes, content_type: "application/json", extension: "json" })
+            Ok(Rendered { bytes, content_type: "application/json", extension: "json", file_name: None })
         }
     }
 }
@@ -1693,25 +1828,36 @@ mod job_store {
     const COLUMNS: &str = "id, report, format, output, status, file_name, content_type, \
                            byte_size, error, requested_by, created_at, completed_at";
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn insert(
         db: &DatabaseConnection,
         id: uuid::Uuid,
         report: &str,
         format: Option<ReportFormat>,
         output: ReportOutput,
+        params: &ReportParams,
         requested_by: Option<&str>,
         requested_by_id: Option<uuid::Uuid>,
     ) -> Result<()> {
+        // The arguments are stored with the row, not only on the queue
+        // message: the job history has to be able to say which document a
+        // render was for, and a retried job must render the same one.
+        let params_json = if params.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(params).map_err(|e| Error::internal(e.to_string()))?)
+        };
         let stmt = Statement::from_sql_and_values(
             db.get_database_backend(),
             "INSERT INTO report_jobs \
-             (id, report, format, output, status, requested_by, requested_by_id, created_at) \
-             VALUES ($1, $2, $3, $4, 'queued', $5, $6, now())",
+             (id, report, format, output, status, params, requested_by, requested_by_id, created_at) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now())",
             [
                 id.into(),
                 report.into(),
                 format.map(|f| f.as_str().to_owned()).into(),
                 output.as_str().to_owned().into(),
+                params_json.into(),
                 requested_by.map(str::to_owned).into(),
                 requested_by_id.into(),
             ],
@@ -1920,7 +2066,7 @@ mod typst_backend {
                 .map_err(|e| Error::internal(format!("report typesetting failed: {e}")))?;
             let pdf = typst_pdf::pdf(&document, &Default::default())
                 .map_err(|e| Error::internal(format!("report PDF export failed: {e:?}")))?;
-            Ok(Rendered { bytes: pdf, content_type: "application/pdf", extension: "pdf" })
+            Ok(Rendered { bytes: pdf, content_type: "application/pdf", extension: "pdf", file_name: None })
         }
     }
 
@@ -1977,6 +2123,16 @@ mod typst_backend {
         header_ascent: &'static str,
         leading: &'static str,
         zebra: bool,
+        /// Rule every cell, not just the row below. A ruled grid is what makes
+        /// a column of figures read as a column — a business document is
+        /// scanned across and down, and hairline row rules leave the eye to
+        /// guess which price belongs to which line.
+        grid: bool,
+        /// Fill behind the header row of a table.
+        head_fill: &'static str,
+        /// Padding inside a table cell. Documents are dense on purpose: the
+        /// reader wants the whole order on one page.
+        cell_inset: &'static str,
     }
 
     fn theme(format: ReportFormat) -> Theme {
@@ -1996,38 +2152,57 @@ mod typst_backend {
                 header_ascent: "0.5cm",
                 leading: "0.75em",
                 zebra: true,
+                // The airy one: zebra banding already leads the eye across a
+                // row, so a full grid would only add noise.
+                grid: false,
+                head_fill: "f1f5f9",
+                cell_inset: "5pt",
             },
             // Dense, near-monochrome, thin rules — an RDLC-style list look.
             ReportFormat::Compact => Theme {
-                body: "8.5pt",
+                body: "9pt",
                 h1: "14pt",
-                h2: "10.5pt",
-                h3: "9pt",
-                small: "7pt",
+                h2: "11pt",
+                h3: "9.5pt",
+                small: "8pt",
                 accent: "111827",
                 muted: "6b7280",
-                rule: "d1d5db",
+                rule: "9ca3af",
                 header_fill: "ffffff",
                 top_margin: "2.8cm",
                 header_ascent: "0.7cm",
                 leading: "0.55em",
                 zebra: false,
+                grid: true,
+                head_fill: "f3f4f6",
+                cell_inset: "3pt",
             },
             // Classic, restrained, serif-heavy corporate stationery.
+            // The house look: ruled, dense, and squarely aligned — a trade
+            // document, not a page of prose.
             ReportFormat::Corporate => Theme {
                 body: "10pt",
-                h1: "18pt",
-                h2: "13pt",
+                h1: "16pt",
+                h2: "12.5pt",
                 h3: "10.5pt",
-                small: "8pt",
+                // The letterhead's contacts and every table's labels are set
+                // at this size, so it has to stay comfortably readable in
+                // print — not merely legible.
+                small: "8.5pt",
                 accent: "1f2937",
                 muted: "4b5563",
-                rule: "9ca3af",
+                rule: "6b7280",
                 header_fill: "f3f4f6",
-                top_margin: "6.0cm",
+                // The letterhead's own height plus its ascent, and a little
+                // over: too little and the logo is clipped by the paper edge,
+                // too much and the document starts halfway down the page.
+                top_margin: "4.6cm",
                 header_ascent: "0.5cm",
-                leading: "0.7em",
+                leading: "0.6em",
                 zebra: false,
+                grid: true,
+                head_fill: "eef2f7",
+                cell_inset: "4pt",
             },
         }
     }
@@ -2102,24 +2277,31 @@ mod typst_backend {
         s.push_str(t.leading);
         s.push_str(", justify: false)\n\n");
 
-        // Title block.
+        // Title bar: the title on the left, what qualifies it on the right,
+        // closed by a rule. One band across the page rather than a heading
+        // with a caption adrift beneath it — and it gives the blocks below a
+        // top edge to align to.
+        s.push_str("#block(width: 100%, above: 0em, below: 0.5em, inset: (bottom: 3pt), ");
+        s.push_str("stroke: (bottom: 1pt + ");
+        s.push_str(&color(t.accent));
+        s.push_str("))[#grid(columns: (1fr, auto), align: (left + bottom, right + bottom),\n[");
         s.push_str("#text(size: ");
         s.push_str(t.h1);
         s.push_str(", weight: \"bold\", fill: ");
         s.push_str(&color(t.accent));
         s.push_str(")[");
         s.push_str(&lit(&doc.report.title));
-        s.push_str("]\n");
+        s.push_str("]], [");
         if let Some(sub) = &doc.report.subtitle {
-            s.push_str("\n#text(size: ");
+            s.push_str("#text(size: ");
             s.push_str(t.small);
             s.push_str(", fill: ");
             s.push_str(&color(t.muted));
             s.push_str(")[");
             s.push_str(&lit(sub));
-            s.push_str("]\n");
+            s.push(']');
         }
-        s.push_str("\n#v(0.6em)\n");
+        s.push_str("])]\n");
 
         for widget in &doc.report.widgets {
             s.push_str(&widget_markup(widget, &t, assets, true));
@@ -2128,8 +2310,15 @@ mod typst_backend {
         s
     }
 
-    /// The company logo as a Typst `#image(...)` at the given height, if a
-    /// logo is set; registers the image bytes as a virtual asset.
+    /// The company logo in a box of exactly [`LOGO_BOX`], if a logo is set;
+    /// registers the image bytes as a virtual asset.
+    ///
+    /// The box is fixed and the image is `fit: "contain"`, so the letterhead
+    /// occupies the same space whatever the tenant uploaded: a tall logo
+    /// scales down instead of pushing the header off the top of the page, and
+    /// a wide one is not stretched to fit. Scaling by height alone let either
+    /// dimension run away — which is how a logo ends up clipped by the paper
+    /// edge.
     fn logo_markup(
         company: &CompanyInformation,
         assets: &mut Vec<(String, Vec<u8>)>,
@@ -2139,8 +2328,26 @@ mod typst_backend {
         let bytes = base64_decode(&logo.data_base64)?;
         let name = format!("logo.{}", sanitize_ext(&logo.format));
         assets.push((name.clone(), bytes));
-        Some(format!("#image({}, height: {height})", str_lit(&name)))
+        Some(format!(
+            "#box(width: {LOGO_MAX_WIDTH}, height: {height})[\
+             #image({}, width: 100%, height: 100%, fit: \"contain\")]",
+            str_lit(&name)
+        ))
     }
+
+    /// The widest a logo may print. Bounded so a long horizontal logo cannot
+    /// crowd out the contact block beside it.
+    const LOGO_MAX_WIDTH: &str = "3.4cm";
+
+    /// The height a logo prints at in the letterhead. Fixed, so the header is
+    /// the same height for every tenant and the page's top margin can be set
+    /// to clear it — the letterhead must not resize itself around whatever
+    /// image was uploaded.
+    const LOGO_HEIGHT: &str = "1.1cm";
+
+    /// The height a logo prints at when it sits inline beside the company
+    /// name (the Compact letterhead's single band) rather than above it.
+    const LOGO_HEIGHT_INLINE: &str = "0.75cm";
 
     /// The brand mark for the letterhead: the tenant's uploaded logo, or
     /// nothing. A tenant that has set no logo gets a letterhead of its name
@@ -2203,7 +2410,7 @@ mod typst_backend {
     fn header_modern(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut left = String::new();
-        let mark = brand_mark(c, assets, "1.3cm");
+        let mark = brand_mark(c, assets, LOGO_HEIGHT);
         if !mark.is_empty() {
             left.push_str(&mark);
             if !c.name.is_empty() {
@@ -2249,7 +2456,7 @@ mod typst_backend {
     fn header_compact(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut left = String::new();
-        let mark = brand_mark(c, assets, "0.75cm");
+        let mark = brand_mark(c, assets, LOGO_HEIGHT_INLINE);
         if !mark.is_empty() {
             left.push_str(&format!("#box(baseline: 30%)[{mark}] "));
         }
@@ -2288,9 +2495,9 @@ mod typst_backend {
     fn header_corporate(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut inner = String::new();
-        let mark = brand_mark(c, assets, "1.1cm");
+        let mark = brand_mark(c, assets, LOGO_HEIGHT);
         if !mark.is_empty() {
-            inner.push_str(&format!("#align(center)[{mark}]\n#v(4pt)\n"));
+            inner.push_str(&format!("#align(center)[{mark}]\n#v(3pt)\n"));
         }
         if !c.name.is_empty() {
             inner.push_str(&format!(
@@ -2334,9 +2541,8 @@ mod typst_backend {
         }
 
         format!(
-            "#block(width: 100%, inset: (bottom: 6pt))[{inner}#v(5pt)\
-             #line(length: 100%, stroke: 1pt + {rule})#v(1.6pt)\
-             #line(length: 100%, stroke: 0.4pt + {rule})]",
+            "#block(width: 100%, inset: (bottom: 4pt))[{inner}#v(4pt)\
+             #line(length: 100%, stroke: 0.8pt + {rule})]",
             rule = color(t.rule)
         )
     }
@@ -2428,15 +2634,38 @@ mod typst_backend {
             Widget::KeyValues { title, items, columns } => {
                 let mut s = String::new();
                 if let Some(title) = title {
-                    s.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets, full_width));
-                    s.push('\n');
+                    // A block heading, not a section heading: this labels the
+                    // fields beneath it ("Bill to"), it does not open a part
+                    // of the document.
+                    s.push_str("#block(below: 0.35em)[#text(size: ");
+                    s.push_str(t.small);
+                    s.push_str(", weight: \"bold\", fill: ");
+                    s.push_str(&color(t.accent));
+                    s.push_str(")[");
+                    s.push_str(&lit(&title.to_uppercase()));
+                    s.push_str("]]\n");
+                }
+                // A label-less pair is a run of lines, not a field: an address
+                // block has nothing to put in the label column, and forcing it
+                // through the grid indents the value against nothing.
+                let unlabelled = items.iter().all(|kv| kv.label.trim().is_empty());
+                if unlabelled {
+                    s.push_str("#block(width: 100%)[");
+                    let lines: Vec<String> = items
+                        .iter()
+                        .flat_map(|kv| kv.value.lines())
+                        .map(|l| lit(l.trim()))
+                        .collect();
+                    s.push_str(&lines.join(" \\ "));
+                    s.push(']');
+                    return s;
                 }
                 let cols = (*columns).max(1) as usize;
                 s.push_str("#grid(columns: (");
                 for _ in 0..cols {
                     s.push_str("auto, 1fr, ");
                 }
-                s.push_str("), column-gutter: 10pt, row-gutter: 4pt,\n");
+                s.push_str("), column-gutter: 8pt, row-gutter: 3pt,\n");
                 for kv in items {
                     s.push_str("[#text(fill: ");
                     s.push_str(&color(t.muted));
@@ -2444,9 +2673,11 @@ mod typst_backend {
                     s.push_str(t.small);
                     s.push_str(")[");
                     s.push_str(&lit(&kv.label));
-                    s.push_str("]], [");
+                    s.push_str("]], [#text(size: ");
+                    s.push_str(t.small);
+                    s.push_str(")[");
                     s.push_str(&lit(&kv.value));
-                    s.push_str("], ");
+                    s.push_str("]], ");
                 }
                 s.push_str(")");
                 s
@@ -2568,23 +2799,38 @@ mod typst_backend {
                 placeholder_box("BARCODE", data, caption.as_deref(), t)
             }
             Widget::Signatures { items } => {
-                let mut s = String::from("#v(1.2cm)\n#grid(columns: (");
+                // Boxed panels of equal size: a signature needs somewhere
+                // definite to go, and equal boxes say the sign-offs carry
+                // equal weight. The date sits at the foot of each box so the
+                // signatures share a baseline however long the labels run.
+                let mut s = String::from("#grid(columns: (");
                 for _ in items {
                     s.push_str("1fr, ");
                 }
-                s.push_str("), gutter: 24pt,\n");
+                s.push_str("), gutter: 8pt,\n");
                 for sig in items {
-                    s.push_str("[#line(length: 100%, stroke: 0.6pt) #text(size: ");
+                    s.push_str("[#block(width: 100%, height: 2.1cm, inset: 5pt, stroke: 0.5pt + ");
+                    s.push_str(&color(t.rule));
+                    s.push_str(")[#text(size: ");
                     s.push_str(t.small);
-                    s.push_str(")[");
+                    s.push_str(", weight: \"bold\")[");
                     s.push_str(&lit(&sig.label));
+                    s.push(']');
                     if let Some(name) = &sig.name {
-                        s.push_str(" \\ ");
+                        s.push_str(" \\ #text(size: ");
+                        s.push_str(t.small);
+                        s.push_str(")[");
                         s.push_str(&lit(name));
+                        s.push(']');
                     }
                     if sig.dated {
-                        s.push_str(" \\ ");
+                        s.push_str("#place(bottom + left)[#text(size: ");
+                        s.push_str(t.small);
+                        s.push_str(", fill: ");
+                        s.push_str(&color(t.muted));
+                        s.push_str(")[");
                         s.push_str(&lit("Date: ____________"));
+                        s.push_str("]]");
                     }
                     s.push_str("]], ");
                 }
@@ -2606,8 +2852,11 @@ mod typst_backend {
                 s.push_str("), column-gutter: 14pt,\n");
                 for col in columns {
                     s.push('[');
-                    // Side-by-side content is not full width.
-                    s.push_str(&children(col, t, assets, false));
+                    // Content fills its column, so the blocks in a row share
+                    // their edges: a totals table in the right-hand column
+                    // ends where the lines table above it ends, instead of
+                    // floating in the middle of the page.
+                    s.push_str(&children(col, t, assets, true));
                     s.push_str("], ");
                 }
                 s.push(')');
@@ -2618,17 +2867,35 @@ mod typst_backend {
                 let mut s = String::new();
                 let body = if let Some(title) = &group.title {
                     let mut b = String::new();
-                    b.push_str(&widget_markup(&Widget::heading(3, title.clone()), t, assets, full_width));
-                    b.push('\n');
+                    // A boxed block is labelled, not headed: a small caps
+                    // label reads as the box's name, where a section heading
+                    // would claim the box opens a new part of the document.
+                    if group.boxed {
+                        b.push_str("#block(below: 0.35em)[#text(size: ");
+                        b.push_str(t.small);
+                        b.push_str(", weight: \"bold\", fill: ");
+                        b.push_str(&color(t.accent));
+                        b.push_str(")[");
+                        b.push_str(&lit(&title.to_uppercase()));
+                        b.push_str("]]\n");
+                    } else {
+                        b.push_str(&widget_markup(
+                            &Widget::heading(3, title.clone()),
+                            t,
+                            assets,
+                            full_width,
+                        ));
+                        b.push('\n');
+                    }
                     b.push_str(&inner);
                     b
                 } else {
                     inner
                 };
                 if group.boxed {
-                    s.push_str("#block(width: 100%, inset: 10pt, radius: 4pt, stroke: 0.6pt + ");
+                    s.push_str("#block(width: 100%, inset: 6pt, radius: 2pt, stroke: 0.5pt + ");
                     s.push_str(&color(t.rule));
-                    s.push_str(", above: 0.6em, below: 0.6em)[");
+                    s.push_str(", above: 0.4em, below: 0.4em)[");
                     s.push_str(&body);
                     s.push(']');
                 } else {
@@ -2664,13 +2931,19 @@ mod typst_backend {
         }
         s.push_str("#table(\n  columns: ");
         if full_width {
-            // Stretch to the full width: text (Start) columns absorb the
-            // slack as `1fr`; numeric/centered columns stay content-sized.
-            // If no column is Start-aligned, the first one stretches.
+            // Stretch to the full width. Columns marked `wide` take the
+            // slack; failing that, text (Start) columns share it; failing
+            // that, the first column stretches. Everything else stays
+            // content-sized, so a line-number column stays a line number wide.
+            let any_wide = table.columns.iter().any(|c| c.wide);
             let any_start = table.columns.iter().any(|c| c.align == Align::Start);
             s.push('(');
             for (i, c) in table.columns.iter().enumerate() {
-                let flex = c.align == Align::Start || (!any_start && i == 0);
+                let flex = if any_wide {
+                    c.wide
+                } else {
+                    c.align == Align::Start || (!any_start && i == 0)
+                };
                 s.push_str(if flex { "1fr, " } else { "auto, " });
             }
             s.push(')');
@@ -2679,29 +2952,47 @@ mod typst_backend {
         }
         s.push_str(",\n  align: (");
         for c in &table.columns {
+            // Cells sit on the baseline of their row: a wrapped description
+            // must not drag its own price up with it.
             s.push_str(align_word(c.align));
-            s.push_str(", ");
+            s.push_str(" + horizon, ");
         }
-        s.push_str("),\n  stroke: (x, y) => (bottom: 0.5pt + ");
-        s.push_str(&color(t.rule));
-        s.push_str("),\n  inset: 5pt,\n");
+        s.push_str("),\n  stroke: ");
+        if t.grid {
+            s.push_str("0.5pt + ");
+            s.push_str(&color(t.rule));
+        } else {
+            s.push_str("(x, y) => (bottom: 0.5pt + ");
+            s.push_str(&color(t.rule));
+            s.push(')');
+        }
+        s.push_str(",\n  inset: ");
+        s.push_str(t.cell_inset);
+        s.push_str(",\n");
         if t.zebra {
             s.push_str("  fill: (x, y) => if calc.odd(y) { ");
             s.push_str(&color("f9fafb"));
             s.push_str(" },\n");
         }
-        // Header row.
-        s.push_str("  table.header(");
-        for c in &table.columns {
-            s.push_str("[#text(fill: ");
-            s.push_str(&color(t.accent));
-            s.push_str(", weight: \"bold\", size: ");
-            s.push_str(t.small);
-            s.push_str(")[");
-            s.push_str(&lit(&c.label));
-            s.push_str("]], ");
+        // Header row: filled, so it reads as the label band rather than a
+        // first line of data. A table whose columns are all unlabelled (a
+        // totals block) gets no header at all — an empty filled band is a
+        // heading that says nothing.
+        if table.columns.iter().any(|c| !c.label.trim().is_empty()) {
+            s.push_str("  table.header(");
+            for c in &table.columns {
+                s.push_str("table.cell(fill: ");
+                s.push_str(&color(t.head_fill));
+                s.push_str(")[#text(fill: ");
+                s.push_str(&color(t.accent));
+                s.push_str(", weight: \"bold\", size: ");
+                s.push_str(t.small);
+                s.push_str(")[");
+                s.push_str(&lit(&c.label));
+                s.push_str("]], ");
+            }
+            s.push_str("),\n");
         }
-        s.push_str("),\n");
         // Body rows.
         for row in &table.rows {
             s.push_str("  ");
@@ -2712,11 +3003,14 @@ mod typst_backend {
             }
             s.push('\n');
         }
-        // Totals as a bold footer row.
+        // Totals as a bold, filled footer row — the line the reader's eye
+        // goes to first, so it must not look like one more row of data.
         if let Some(totals) = &table.totals {
             s.push_str("  table.footer(");
             for cell in totals {
-                s.push_str("[#strong[");
+                s.push_str("table.cell(fill: ");
+                s.push_str(&color(t.head_fill));
+                s.push_str(")[#strong[");
                 s.push_str(&lit(cell));
                 s.push_str("]], ");
             }
@@ -3091,6 +3385,7 @@ mod excel_backend {
                 content_type:
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 extension: "xlsx",
+                file_name: None,
             })
         }
     }
@@ -3350,6 +3645,58 @@ mod tests {
         };
         assert_eq!(table.title, None, "the table repeats the report's title");
         assert_eq!(report.title, "Purchase Orders");
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> ReportParams {
+        ReportParams::new(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+
+    /// A malformed argument must name itself. A report asked for the wrong
+    /// thing should say which parameter was wrong, not fail as a bare parse
+    /// error the caller cannot act on.
+    #[test]
+    fn a_bad_parameter_names_itself() {
+        let p = params(&[("id", "not-a-uuid"), ("from", "13/01/2026")]);
+
+        let err = p.id().unwrap_err().to_string();
+        assert!(err.contains("\"id\""), "{err}");
+
+        let err = p.date("from").unwrap_err().to_string();
+        assert!(err.contains("\"from\""), "{err}");
+
+        let err = params(&[]).id().unwrap_err().to_string();
+        assert!(err.contains("\"id\""), "{err}");
+    }
+
+    /// A blank value is not an answer: `?from=` in a URL means the caller
+    /// left the box empty, which must read as unset rather than as a date
+    /// that fails to parse.
+    #[test]
+    fn blank_parameters_read_as_unset() {
+        let p = params(&[("from", ""), ("to", "   "), ("id", "x")]);
+        assert!(p.get("from").is_none());
+        assert!(p.date("to").unwrap().is_none());
+        assert_eq!(p.get("id"), Some("x"));
+    }
+
+    #[test]
+    fn parameters_parse_what_reports_ask_for() {
+        let p = params(&[
+            ("id", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
+            ("from", "2026-01-01"),
+        ]);
+        assert_eq!(p.id().unwrap().to_string(), "3f2504e0-4f89-11d3-9a0c-0305e82c3301");
+        assert_eq!(
+            p.date("from").unwrap(),
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+        );
+        assert!(p.date("to").unwrap().is_none());
+        assert!(params(&[]).is_empty());
     }
 
     #[test]

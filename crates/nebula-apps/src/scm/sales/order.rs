@@ -1128,7 +1128,7 @@ pub(crate) async fn recompute_status(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = SalesOrderLineView)]
 pub struct OrderLineView {
     pub id: Uuid,
@@ -1171,7 +1171,7 @@ pub struct OrderLineView {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = SalesOrderView)]
 pub struct OrderView {
     pub id: Uuid,

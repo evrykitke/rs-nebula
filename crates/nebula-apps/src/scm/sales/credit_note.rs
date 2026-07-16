@@ -1258,7 +1258,7 @@ async fn load_note_lines<C: ConnectionTrait>(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreditNoteLineView {
     pub id: Uuid,
     pub line_no: i32,
@@ -1287,7 +1287,7 @@ pub struct CreditNoteLineView {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreditNoteView {
     pub id: Uuid,
     pub number: Option<String>,

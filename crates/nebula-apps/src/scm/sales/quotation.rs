@@ -806,7 +806,7 @@ async fn load_lines<C: ConnectionTrait>(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QuotationLineView {
     pub id: Uuid,
     pub line_no: i32,
@@ -833,7 +833,7 @@ pub struct QuotationLineView {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QuotationView {
     pub id: Uuid,
     pub number: Option<String>,

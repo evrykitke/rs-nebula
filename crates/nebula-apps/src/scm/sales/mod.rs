@@ -22,6 +22,7 @@
 pub mod credit_note;
 pub mod customer;
 pub mod delivery;
+pub mod documents;
 pub mod invoice;
 pub mod order;
 pub mod payment;

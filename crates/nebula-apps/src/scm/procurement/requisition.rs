@@ -692,7 +692,7 @@ pub(crate) async fn load_lines<C: ConnectionTrait>(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RequisitionLineView {
     pub id: Uuid,
     pub line_no: i32,
@@ -709,7 +709,7 @@ pub struct RequisitionLineView {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RequisitionView {
     pub id: Uuid,
     pub number: Option<String>,

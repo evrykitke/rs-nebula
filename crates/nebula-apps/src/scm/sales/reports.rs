@@ -144,6 +144,14 @@ pub struct RegisterRow {
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RegisterView {
+    /// The window the rows were selected from — carried so a rendered
+    /// register states what it covers instead of implying it is everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = Date)]
+    pub from: Option<chrono::NaiveDate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = Date)]
+    pub to: Option<chrono::NaiveDate>,
     pub rows: Vec<RegisterRow>,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -181,6 +189,13 @@ pub struct MarginRow {
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MarginsView {
+    /// The window the rows were selected from — see [`RegisterView::from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = Date)]
+    pub from: Option<chrono::NaiveDate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = Date)]
+    pub to: Option<chrono::NaiveDate>,
     pub rows: Vec<MarginRow>,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -417,6 +432,8 @@ impl SalesQueries {
             });
         }
         Ok(RegisterView {
+            from,
+            to,
             rows,
             net: net_t,
             tax: tax_t,
@@ -520,6 +537,8 @@ impl SalesQueries {
         }
         rows.sort_by(|a, b| a.sku.cmp(&b.sku));
         Ok(MarginsView {
+            from,
+            to,
             rows,
             revenue: rev_t,
             cogs: cogs_t,
@@ -726,6 +745,17 @@ fn money(amount: Decimal) -> String {
     }
 }
 
+/// The window a report covers, as a subtitle clause — empty when unbounded,
+/// so an unfiltered report says nothing rather than "from ∞".
+fn window(from: Option<chrono::NaiveDate>, to: Option<chrono::NaiveDate>) -> String {
+    match (from, to) {
+        (Some(f), Some(t)) => format!(", {f} to {t}"),
+        (Some(f), None) => format!(", from {f}"),
+        (None, Some(t)) => format!(", to {t}"),
+        (None, None) => String::new(),
+    }
+}
+
 fn qty(v: Decimal) -> String {
     if v.is_zero() {
         String::new()
@@ -742,9 +772,13 @@ impl ReportDataSource for ArAgingDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let view = SalesQueries::new(db.clone())
-            .ar_aging(chrono::Utc::now().date_naive())
-            .await?;
+        // `?as_of=` ages the book at a past date — what the balances looked
+        // like at a month end, not only today.
+        let as_of = cx
+            .params
+            .date("as_of")?
+            .unwrap_or_else(|| chrono::Utc::now().date_naive());
+        let view = SalesQueries::new(db.clone()).ar_aging(as_of).await?;
         serde_json::to_value(view).map_err(|e| Error::internal(e.to_string()))
     }
 }
@@ -770,7 +804,13 @@ impl ReportDataSource for RegisterDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let view = SalesQueries::new(db.clone()).register(None, None, None).await?;
+        let view = SalesQueries::new(db.clone())
+            .register(
+                cx.params.date("from")?,
+                cx.params.date("to")?,
+                cx.params.parse("customer_id")?,
+            )
+            .await?;
         serde_json::to_value(view).map_err(|e| Error::internal(e.to_string()))
     }
 }
@@ -783,7 +823,9 @@ impl ReportDataSource for MarginsDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let view = SalesQueries::new(db.clone()).margins(None, None).await?;
+        let view = SalesQueries::new(db.clone())
+            .margins(cx.params.date("from")?, cx.params.date("to")?)
+            .await?;
         serde_json::to_value(view).map_err(|e| Error::internal(e.to_string()))
     }
 }
@@ -856,7 +898,10 @@ impl ReportDefinition for ArAgingReport {
             money(view.total),
         ]);
         Ok(Report::new("AR Aging")
-            .subtitle("Open customer balances by age of the due date")
+            .subtitle(format!(
+                "Open customer balances by age of the due date, as of {}",
+                view.as_of
+            ))
             .with(table.into_widget()))
     }
 }
@@ -967,7 +1012,7 @@ impl ReportDefinition for SalesRegisterReport {
             money(view.total),
         ]);
         Ok(Report::new("Sales Register")
-            .subtitle("Posted sales invoices")
+            .subtitle(format!("Posted sales invoices{}", window(view.from, view.to)))
             .with(table.into_widget()))
     }
 }
@@ -1021,7 +1066,10 @@ impl ReportDefinition for SalesMarginsReport {
             String::new(),
         ]);
         Ok(Report::new("Sales Margins")
-            .subtitle("Invoiced revenue against the moving-average COGS deliveries booked")
+            .subtitle(format!(
+                "Invoiced revenue against the moving-average COGS deliveries booked{}",
+                window(view.from, view.to)
+            ))
             .with(table.into_widget()))
     }
 }

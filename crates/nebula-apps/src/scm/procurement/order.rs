@@ -902,7 +902,9 @@ pub(crate) async fn recompute_status(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+// Deserialize as well as Serialize: the reporting engine hands a datasource's
+// output to `build` as JSON, so a view a document renders must round-trip.
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OrderLineView {
     pub id: Uuid,
     pub line_no: i32,
@@ -937,7 +939,7 @@ pub struct OrderLineView {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OrderView {
     pub id: Uuid,
     pub number: Option<String>,

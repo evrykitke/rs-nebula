@@ -676,7 +676,7 @@ async fn load_allocations<C: ConnectionTrait>(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PaymentAllocationView {
     pub id: Uuid,
     pub invoice_id: Uuid,
@@ -690,7 +690,7 @@ pub struct PaymentAllocationView {
     pub amount: Decimal,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PaymentView {
     pub id: Uuid,
     pub number: Option<String>,

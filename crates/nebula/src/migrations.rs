@@ -27,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateReportSettings),
             Box::new(CreateReportJobs),
             Box::new(AddTenantCompanyContact),
+            Box::new(AddReportJobParams),
         ]
     }
 
@@ -1277,6 +1278,7 @@ enum ReportJobs {
     Format,
     Output,
     Status,
+    Params,
     FilePath,
     ContentType,
     Extension,
@@ -1288,6 +1290,43 @@ enum ReportJobs {
     CreatedAt,
     StartedAt,
     CompletedAt,
+}
+
+/// The arguments a queued report was asked for, as JSON. A parameterized
+/// report renders a different document per argument set, so a job that did
+/// not carry them would quietly render the wrong one when the worker picked
+/// it up. Null for the reports that take none.
+struct AddReportJobParams;
+
+impl MigrationName for AddReportJobParams {
+    fn name(&self) -> &str {
+        "m20260716_000016_add_report_job_params"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddReportJobParams {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ReportJobs::Table)
+                    .add_column_if_not_exists(ColumnDef::new(ReportJobs::Params).text().null())
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ReportJobs::Table)
+                    .drop_column(ReportJobs::Params)
+                    .to_owned(),
+            )
+            .await
+    }
 }
 
 /// Company contact details shown on report chrome (running header/footer)

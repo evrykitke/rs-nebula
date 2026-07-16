@@ -31,6 +31,7 @@
 //! Depends on [`AdministrationModule`]: stock is moved by signed-in
 //! people of a tenant.
 
+pub mod document;
 pub mod gl;
 pub mod inventory;
 pub mod procurement;
@@ -200,9 +201,15 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(inventory::reports::StockLedgerReport));
         ctx.declare_report(Arc::new(inventory::reports::ValuationSummaryReport));
         ctx.declare_report(Arc::new(inventory::reports::ReorderReport));
+        ctx.declare_report(Arc::new(procurement::documents::PurchaseOrderDocument));
         ctx.declare_report(Arc::new(procurement::reports::GrniReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierBalancesReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierScorecardReport));
+        ctx.declare_report(Arc::new(sales::documents::QuotationDocument));
+        ctx.declare_report(Arc::new(sales::documents::SalesOrderDocument));
+        ctx.declare_report(Arc::new(sales::documents::DeliveryNoteDocument));
+        ctx.declare_report(Arc::new(sales::documents::SalesInvoiceDocument));
+        ctx.declare_report(Arc::new(sales::documents::CreditNoteDocument));
         ctx.declare_report(Arc::new(sales::reports::ArAgingReport));
         ctx.declare_report(Arc::new(sales::reports::DeliveredNotBilledReport));
         ctx.declare_report(Arc::new(sales::reports::SalesRegisterReport));

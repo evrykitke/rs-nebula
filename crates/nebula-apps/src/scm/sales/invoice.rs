@@ -1048,7 +1048,7 @@ fn settlement_status(paid: Decimal, total: Decimal, status: InvoiceStatus) -> Se
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = SalesInvoiceLineView)]
 pub struct InvoiceLineView {
     pub id: Uuid,
@@ -1078,7 +1078,7 @@ pub struct InvoiceLineView {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = SalesInvoiceView)]
 pub struct InvoiceView {
     pub id: Uuid,

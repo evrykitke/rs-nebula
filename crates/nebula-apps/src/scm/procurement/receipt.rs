@@ -1184,7 +1184,7 @@ where
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ReceiptLineView {
     pub id: Uuid,
     pub line_no: i32,
@@ -1204,7 +1204,7 @@ pub struct ReceiptLineView {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ReceiptView {
     pub id: Uuid,
     pub number: Option<String>,

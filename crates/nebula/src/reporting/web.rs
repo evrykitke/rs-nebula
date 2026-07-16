@@ -4,8 +4,9 @@
 
 use super::{
     Column, Orientation, RenderCx, Report, ReportFormat, ReportInfo, ReportJob, ReportOutput,
-    ReportSettings, ReportTables, Reporting, Table,
+    ReportParams, ReportSettings, ReportTables, Reporting, Table,
 };
+use std::collections::HashMap;
 use crate::auth::authz::Authz;
 use crate::auth::permission;
 use crate::error::{Error, Result};
@@ -48,10 +49,25 @@ pub(crate) fn routes() -> Router {
         .route("/reports/jobs/{id}/download", get(download_report_job))
 }
 
+/// A render request's query string: the engine's own two knobs, plus whatever
+/// else the report declared as its arguments.
 #[derive(Debug, Deserialize)]
 struct RenderParams {
     format: Option<String>,
     output: Option<String>,
+    /// Everything else — `?id=…`, `?from=…&to=…`. Flattened so a report's
+    /// arguments need no registration in this layer: the report reads what it
+    /// asked for and this stays agnostic.
+    #[serde(flatten)]
+    rest: HashMap<String, String>,
+}
+
+impl RenderParams {
+    /// The report's arguments, without the engine's `format`/`output`, which
+    /// serde has already peeled off into their own fields.
+    fn report_params(&self) -> ReportParams {
+        ReportParams::new(self.rest.clone())
+    }
 }
 
 /// Parse an optional `format` query value into a [`ReportFormat`].
@@ -130,10 +146,14 @@ async fn render_report(
     let cx = RenderCx {
         db: db.map(|e| e.0),
         tenant: tenant.map(|e| e.0),
+        params: params.report_params(),
     };
     let rendered = reporting.render(&cx, &name, format, output).await?;
 
-    let disposition = format!("inline; filename=\"{name}.{}\"", rendered.extension);
+    // A document names its own file after the record it draws, so three
+    // invoices do not all save as `sales-invoice.pdf`.
+    let file = slug(rendered.file_name.as_deref().unwrap_or(&name));
+    let disposition = format!("inline; filename=\"{file}.{}\"", rendered.extension);
     Ok((
         [
             (axum::http::header::CONTENT_TYPE, rendered.content_type.to_string()),
@@ -257,6 +277,7 @@ async fn export_list(
     let cx = RenderCx {
         db: db.map(|e| e.0),
         tenant: tenant.map(|e| e.0),
+        params: params.report_params(),
     };
     let rendered = reporting.render_ad_hoc(&cx, report, format, output).await?;
 
@@ -287,6 +308,7 @@ async fn preview_report(
     let cx = RenderCx {
         db: db.map(|e| e.0),
         tenant: tenant.map(|e| e.0),
+        params: params.report_params(),
     };
     let pages = reporting.preview(&cx, &name, format).await?;
     Ok(Json(ReportPreview { pages }))
@@ -308,6 +330,7 @@ async fn table_report(
     let cx = RenderCx {
         db: db.map(|e| e.0),
         tenant: tenant.map(|e| e.0),
+        params: params.report_params(),
     };
     Ok(Json(reporting.datatables(&cx, &name, format).await?))
 }
@@ -341,6 +364,7 @@ async fn enqueue_report_job(
     let cx = RenderCx {
         db: db.map(|e| e.0),
         tenant: tenant.map(|e| e.0),
+        params: params.report_params(),
     };
     let requested_by = Some((authz.user.id, authz.user.user_name.clone()));
     let job = reporting
