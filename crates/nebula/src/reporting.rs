@@ -2117,6 +2117,10 @@ mod typst_backend {
         muted: &'static str,
         rule: &'static str,
         header_fill: &'static str,
+        /// The letterhead's address and contact lines. Its own size, a step
+        /// above `small`: this is the company's address on its own
+        /// stationery, and someone has to be able to read it and write back.
+        contact: &'static str,
         top_margin: &'static str,
         /// Gap between the letterhead and the body; a smaller value floats the
         /// header down from the paper's top edge, giving it breathing room.
@@ -2148,6 +2152,7 @@ mod typst_backend {
                 muted: "6b7280",
                 rule: "e5e7eb",
                 header_fill: "f8fafc",
+                contact: "9pt",
                 top_margin: "4.2cm",
                 header_ascent: "0.5cm",
                 leading: "0.75em",
@@ -2169,6 +2174,7 @@ mod typst_backend {
                 muted: "6b7280",
                 rule: "9ca3af",
                 header_fill: "ffffff",
+                contact: "8.5pt",
                 top_margin: "2.8cm",
                 header_ascent: "0.7cm",
                 leading: "0.55em",
@@ -2193,10 +2199,11 @@ mod typst_backend {
                 muted: "4b5563",
                 rule: "6b7280",
                 header_fill: "f3f4f6",
+                contact: "9.5pt",
                 // The letterhead's own height plus its ascent, and a little
                 // over: too little and the logo is clipped by the paper edge,
                 // too much and the document starts halfway down the page.
-                top_margin: "4.6cm",
+                top_margin: "4.9cm",
                 header_ascent: "0.5cm",
                 leading: "0.6em",
                 zebra: false,
@@ -2433,7 +2440,7 @@ mod typst_backend {
         } else {
             format!(
                 "#align(right + horizon, text(size: {}, fill: {})[{}])",
-                t.small,
+                t.contact,
                 color(t.muted),
                 bits.join(" \\ ")
             )
@@ -2475,7 +2482,7 @@ mod typst_backend {
         } else {
             format!(
                 "#align(right + horizon, text(size: {}, fill: {})[{}])",
-                t.small,
+                t.contact,
                 color(t.muted),
                 bits.join(" · ")
             )
@@ -2533,7 +2540,7 @@ mod typst_backend {
             if !line.is_empty() {
                 inner.push_str(&format!(
                     "#v(2.5pt)\n#align(center, text(size: {}, fill: {})[{}])\n",
-                    t.small,
+                    t.contact,
                     color(t.muted),
                     line.join("  ·  ")
                 ));
