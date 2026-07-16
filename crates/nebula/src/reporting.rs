@@ -498,12 +498,16 @@ pub struct Series {
 // ---------------------------------------------------------------------------
 
 /// The visual theme applied at render time; UI-selectable.
+///
+/// `Corporate` is the house look: formal stationery is what an ERP prints, so
+/// it is what a report gets unless the caller, the tenant's settings, or the
+/// report itself asks for something else.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportFormat {
-    #[default]
     Modern,
     Compact,
+    #[default]
     Corporate,
 }
 
@@ -706,9 +710,10 @@ pub trait ReportDefinition: Send + Sync {
     fn group(&self) -> &'static str {
         "General"
     }
-    /// The default theme when the caller doesn't pick one.
+    /// The default theme when the caller doesn't pick one. Override only for
+    /// a report whose shape genuinely needs another look.
     fn default_format(&self) -> ReportFormat {
-        ReportFormat::Modern
+        ReportFormat::default()
     }
     /// Which outputs this report supports. List reports add Excel.
     fn outputs(&self) -> &'static [ReportOutput] {
@@ -1140,6 +1145,71 @@ impl Reporting {
                 Ok(Rendered { bytes, content_type: "application/json", extension: "json" })
             }
         }
+    }
+
+    /// Render a caller-supplied [`Report`] that no [`ReportDefinition`] backs.
+    ///
+    /// This is the seam for **list exports**: an on-screen datatable already
+    /// knows its columns, its formatting and the rows the user filtered to, so
+    /// it hands that model over rather than a report re-deriving it (and
+    /// drifting from what the screen showed). Everything downstream is shared
+    /// with declared reports — the company letterhead, the tenant's house
+    /// format and watermark, and the renderers — so an exported list is the
+    /// same stationery as the rest of the catalogue.
+    ///
+    /// The rows come from the caller, so this renders *the caller's own data
+    /// back to them*: it grants no read access that the list endpoints did not
+    /// already give, and the result is a document, never a source of truth.
+    pub async fn render_ad_hoc(
+        &self,
+        cx: &RenderCx,
+        report: Report,
+        format: Option<ReportFormat>,
+        output: ReportOutput,
+    ) -> Result<Rendered> {
+        let doc = self.ad_hoc_document(cx, report, format).await?;
+        match output {
+            ReportOutput::Pdf => self.inner.pdf.render(&doc),
+            ReportOutput::Excel => self.inner.excel.render(&doc),
+            ReportOutput::Table => {
+                let bytes = serde_json::to_vec(&tables_of(&doc))
+                    .map_err(|e| Error::internal(e.to_string()))?;
+                Ok(Rendered { bytes, content_type: "application/json", extension: "json" })
+            }
+        }
+    }
+
+    /// Wrap a caller-supplied report in the same chrome [`document`] gives a
+    /// declared one: resolved company information, house format, watermark.
+    async fn ad_hoc_document(
+        &self,
+        cx: &RenderCx,
+        report: Report,
+        format: Option<ReportFormat>,
+    ) -> Result<Document> {
+        let settings = self.settings(cx.db.as_ref()).await;
+        let format = format
+            .or(settings.default_format)
+            .unwrap_or_default();
+
+        let datacx = DataCx {
+            db: cx.db.as_ref(),
+            tenant: cx.tenant.as_ref(),
+            tenants: self.inner.tenants.as_ref(),
+            storage: &self.inner.storage,
+        };
+        let company: CompanyInformation = {
+            let value = CompanyInformationDataSource.load(&datacx).await?;
+            serde_json::from_value(value).map_err(|e| Error::internal(e.to_string()))?
+        };
+
+        Ok(Document {
+            company,
+            title: report.title.clone(),
+            report,
+            format,
+            watermark: settings.watermark,
+        })
     }
 
     /// Build a report and return its tables as an interactive datatable
@@ -1993,7 +2063,10 @@ mod typst_backend {
         }
     }
 
-    fn emit(doc: &Document, assets: &mut Vec<(String, Vec<u8>)>) -> String {
+    /// The Typst source for a document, registering any embedded images as
+    /// virtual assets along the way. Visible to the module's tests, which
+    /// assert on the markup rather than on rendered glyphs.
+    pub(super) fn emit(doc: &Document, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let t = theme(doc.format);
         let mut s = String::new();
 
@@ -2069,41 +2142,16 @@ mod typst_backend {
         Some(format!("#image({}, height: {height})", str_lit(&name)))
     }
 
-    /// Up to two uppercase initials from the company name, for the monogram
-    /// fallback (e.g. "Acme Manufacturing Ltd" → "AM").
-    fn monogram(name: &str) -> String {
-        name.split_whitespace()
-            .filter_map(|w| w.chars().next())
-            .filter(|c| c.is_alphanumeric())
-            .take(2)
-            .collect::<String>()
-            .to_uppercase()
-    }
-
-    /// The brand mark for the letterhead: the uploaded logo when present,
-    /// otherwise a square accent tile with the company's initials — so every
-    /// report carries a logo. `dim` is the square size, `font` the initials
-    /// size. Empty only when there is no logo *and* no name.
+    /// The brand mark for the letterhead: the tenant's uploaded logo, or
+    /// nothing. A tenant that has set no logo gets a letterhead of its name
+    /// and contacts alone — an invented mark would be a graphic the company
+    /// never chose, printed on its stationery. `dim` is the mark's height.
     fn brand_mark(
         company: &CompanyInformation,
         assets: &mut Vec<(String, Vec<u8>)>,
         dim: &str,
-        font: &str,
-        accent: &str,
     ) -> String {
-        if let Some(logo) = logo_markup(company, assets, dim) {
-            return logo;
-        }
-        let initials = monogram(&company.name);
-        if initials.is_empty() {
-            return String::new();
-        }
-        format!(
-            "#box(width: {dim}, height: {dim}, radius: 4pt, fill: {fill})\
-             [#align(center + horizon)[#text(fill: white, weight: \"bold\", size: {font})[{init}]]]",
-            fill = color(accent),
-            init = lit(&initials)
-        )
+        logo_markup(company, assets, dim).unwrap_or_default()
     }
 
     /// The company's contact lines for the header — address (one entry per
@@ -2155,7 +2203,7 @@ mod typst_backend {
     fn header_modern(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut left = String::new();
-        let mark = brand_mark(c, assets, "1.3cm", "15pt", t.accent);
+        let mark = brand_mark(c, assets, "1.3cm");
         if !mark.is_empty() {
             left.push_str(&mark);
             if !c.name.is_empty() {
@@ -2201,7 +2249,7 @@ mod typst_backend {
     fn header_compact(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut left = String::new();
-        let mark = brand_mark(c, assets, "0.75cm", "8pt", t.accent);
+        let mark = brand_mark(c, assets, "0.75cm");
         if !mark.is_empty() {
             left.push_str(&format!("#box(baseline: 30%)[{mark}] "));
         }
@@ -2240,7 +2288,7 @@ mod typst_backend {
     fn header_corporate(doc: &Document, t: &Theme, assets: &mut Vec<(String, Vec<u8>)>) -> String {
         let c = &doc.company;
         let mut inner = String::new();
-        let mark = brand_mark(c, assets, "1.1cm", "14pt", t.accent);
+        let mark = brand_mark(c, assets, "1.1cm");
         if !mark.is_empty() {
             inner.push_str(&format!("#align(center)[{mark}]\n#v(4pt)\n"));
         }
@@ -3208,6 +3256,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A tenant that has uploaded no logo gets a letterhead of its name and
+    /// contacts — never an invented mark. The company's stationery must not
+    /// carry a graphic the company never chose.
+    #[cfg(feature = "reporting")]
+    #[test]
+    fn no_logo_means_no_brand_mark() {
+        let company = CompanyInformation {
+            name: "Acme Manufacturing Ltd".into(),
+            logo: None,
+            ..Default::default()
+        };
+        for format in [
+            ReportFormat::Modern,
+            ReportFormat::Compact,
+            ReportFormat::Corporate,
+        ] {
+            let mut assets = Vec::new();
+            let doc = Document {
+                company: company.clone(),
+                report: Report::new("Quarterly Summary"),
+                title: "Quarterly Summary".into(),
+                format,
+                watermark: None,
+            };
+            let markup = typst_backend::emit(&doc, &mut assets);
+            assert!(
+                assets.is_empty(),
+                "{format:?} registered an image asset with no logo set"
+            );
+            assert!(
+                !markup.contains("#image("),
+                "{format:?} drew an image with no logo set"
+            );
+            // The old monogram tile: initials reversed out of an accent square.
+            assert!(
+                !markup.contains("AM"),
+                "{format:?} still draws a monogram fallback"
+            );
+            // The name itself must survive — that is the letterhead now.
+            assert!(
+                markup.contains("Acme Manufacturing Ltd"),
+                "{format:?} dropped the company name"
+            );
+        }
+    }
+
+    /// The logo is embedded when the tenant has one — the counterpart to
+    /// [`no_logo_means_no_brand_mark`], so "no mark" cannot pass by drawing
+    /// nothing ever.
+    #[cfg(feature = "reporting")]
+    #[test]
+    fn a_set_logo_is_embedded() {
+        // A 1×1 PNG.
+        let png = base64_encode(&[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
+        ]);
+        let company = CompanyInformation {
+            name: "Acme Manufacturing Ltd".into(),
+            logo: Some(LogoImage { format: "png".into(), data_base64: png }),
+            ..Default::default()
+        };
+        let mut assets = Vec::new();
+        let doc = Document {
+            company,
+            report: Report::new("Quarterly Summary"),
+            title: "Quarterly Summary".into(),
+            format: ReportFormat::Modern,
+            watermark: None,
+        };
+        let markup = typst_backend::emit(&doc, &mut assets);
+        assert!(markup.contains("#image("), "a set logo was not drawn");
+        assert_eq!(assets.len(), 1, "the logo bytes were not registered");
+        assert_eq!(assets[0].0, "logo.png");
+    }
+
+    /// A list export is a report like any other: it carries the title once,
+    /// on the page, and the table beneath it adds no heading of its own.
+    #[test]
+    fn an_exported_list_titles_itself_once() {
+        let report = Report::new("Purchase Orders")
+            .subtitle("Status: confirmed · 2 records")
+            .with(
+                Table::new(vec![Column::new("Number"), Column::number("Total")])
+                    .row(["PO-2026-00001", "1,240.00"])
+                    .into_widget(),
+            );
+        let Widget::Table(table) = &report.widgets[0] else {
+            panic!("expected a table widget");
+        };
+        assert_eq!(table.title, None, "the table repeats the report's title");
+        assert_eq!(report.title, "Purchase Orders");
     }
 
     #[test]

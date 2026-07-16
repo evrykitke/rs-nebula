@@ -3,15 +3,15 @@
 //! parent module so the transport layer and the logic evolve apart.
 
 use super::{
-    RenderCx, ReportFormat, ReportInfo, ReportJob, ReportOutput, ReportSettings, ReportTables,
-    Reporting,
+    Column, Orientation, RenderCx, Report, ReportFormat, ReportInfo, ReportJob, ReportOutput,
+    ReportSettings, ReportTables, Reporting, Table,
 };
 use crate::auth::authz::Authz;
 use crate::auth::permission;
 use crate::error::{Error, Result};
 use crate::jobs::Jobs;
 use crate::tenancy::TenantRef;
-use axum::extract::{Path, Query};
+use axum::extract::{DefaultBodyLimit, Path, Query};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 /// The reporting routes, merged into the app by the kernel:
 /// - `GET /reports` — the report catalogue
 /// - `GET|PUT /reports/settings` — the tenant's report preferences
+/// - `POST /reports/list-export?output=pdf` — render a caller-supplied list
 /// - `GET /reports/{name}?format=modern&output=pdf` — render a report
 /// - `GET /reports/{name}/preview` — themed SVG preview pages
 /// - `GET /reports/{name}/table` — the interactive datatable payload
@@ -31,6 +32,13 @@ pub(crate) fn routes() -> Router {
     Router::new()
         .route("/reports", get(list_reports))
         .route("/reports/settings", get(get_settings).put(put_settings))
+        .route(
+            "/reports/list-export",
+            // A list export carries its rows in the body, so it needs far more
+            // room than axum's 2 MB default — which a wide list of a few
+            // thousand rows reaches, and would fail as an opaque 413.
+            post(export_list).layer(DefaultBodyLimit::max(EXPORT_BODY_LIMIT)),
+        )
         .route("/reports/{name}", get(render_report))
         .route("/reports/{name}/preview", get(preview_report))
         .route("/reports/{name}/table", get(table_report))
@@ -126,6 +134,133 @@ async fn render_report(
     let rendered = reporting.render(&cx, &name, format, output).await?;
 
     let disposition = format!("inline; filename=\"{name}.{}\"", rendered.extension);
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, rendered.content_type.to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        rendered.bytes,
+    )
+        .into_response())
+}
+
+/// The most rows one export may carry. A list far past this is a data dump,
+/// not a document someone reads — it belongs in Excel, and holding a request
+/// (and the renderer) that long is worse than saying no.
+const MAX_EXPORT_ROWS: usize = 20_000;
+
+/// Body room for an export: enough for [`MAX_EXPORT_ROWS`] of a wide list,
+/// so the row cap is what rejects an oversized export (with an explanation)
+/// rather than the transport.
+const EXPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// A list handed over for rendering: the table the user is looking at, with
+/// its columns already resolved (hidden ones dropped) and its cells already
+/// formatted by the client that displayed them.
+#[derive(Debug, Deserialize)]
+struct ListExport {
+    title: String,
+    #[serde(default)]
+    subtitle: Option<String>,
+    #[serde(default)]
+    orientation: Orientation,
+    columns: Vec<Column>,
+    rows: Vec<Vec<String>>,
+    #[serde(default)]
+    totals: Option<Vec<String>>,
+}
+
+impl ListExport {
+    /// Validate the payload and turn it into a one-table [`Report`]. The
+    /// table takes no title of its own: the report's title heads the page,
+    /// and repeating it directly beneath is the duplication this endpoint
+    /// exists to avoid.
+    fn into_report(self) -> Result<Report> {
+        if self.title.trim().is_empty() {
+            return Err(Error::Validation("an export needs a title".into()));
+        }
+        if self.columns.is_empty() {
+            return Err(Error::Validation("an export needs at least one column".into()));
+        }
+        if self.rows.len() > MAX_EXPORT_ROWS {
+            return Err(Error::Validation(format!(
+                "an export carries at most {MAX_EXPORT_ROWS} rows; this one has {}",
+                self.rows.len()
+            )));
+        }
+        let width = self.columns.len();
+        if let Some((n, row)) = self.rows.iter().enumerate().find(|(_, r)| r.len() != width) {
+            return Err(Error::Validation(format!(
+                "row {n} has {} cells but there are {width} columns",
+                row.len()
+            )));
+        }
+        if let Some(totals) = self.totals.as_ref().filter(|t| t.len() != width) {
+            return Err(Error::Validation(format!(
+                "the totals row has {} cells but there are {width} columns",
+                totals.len()
+            )));
+        }
+
+        let table = Table {
+            title: None,
+            columns: self.columns,
+            rows: self.rows,
+            totals: self.totals,
+        };
+        let mut report = Report::new(self.title).orientation(self.orientation);
+        if let Some(sub) = self.subtitle.filter(|s| !s.trim().is_empty()) {
+            report = report.subtitle(sub);
+        }
+        Ok(report.with(table.into_widget()))
+    }
+}
+
+/// A filename-safe slug of a title, e.g. "Purchase Orders" → "purchase-orders".
+/// Falls back to `export` when a title has nothing slug-able in it.
+fn slug(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let slug = out.trim_matches('-');
+    if slug.is_empty() { "export".to_string() } else { slug.to_string() }
+}
+
+/// Render a list the caller supplies — the datatable "Export PDF" action.
+///
+/// Unlike `/reports/{name}`, no report definition backs this: the client
+/// sends the columns and rows it is showing, and the engine dresses them in
+/// the tenant's letterhead. That keeps one definition of a list's columns
+/// (the client's table config) instead of a second copy on the server that
+/// would drift from the screen.
+///
+/// Any authenticated tenant user may call it: the rows are data the caller
+/// already holds, so this discloses nothing new — it only re-renders it.
+async fn export_list(
+    Extension(reporting): Extension<Reporting>,
+    _authz: Authz,
+    db: Option<Extension<DatabaseConnection>>,
+    tenant: Option<Extension<TenantRef>>,
+    Query(params): Query<RenderParams>,
+    Json(payload): Json<ListExport>,
+) -> Result<Response> {
+    let format = parse_format(params.format.as_deref())?;
+    let output = parse_output(params.output.as_deref())?;
+    let name = slug(&payload.title);
+    let report = payload.into_report()?;
+
+    let cx = RenderCx {
+        db: db.map(|e| e.0),
+        tenant: tenant.map(|e| e.0),
+    };
+    let rendered = reporting.render_ad_hoc(&cx, report, format, output).await?;
+
+    let disposition = format!("attachment; filename=\"{name}.{}\"", rendered.extension);
     Ok((
         [
             (axum::http::header::CONTENT_TYPE, rendered.content_type.to_string()),

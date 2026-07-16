@@ -32,8 +32,7 @@ use axum::{Json, Router};
 use nebula::auth::Authz;
 use nebula::error::Error;
 use nebula::{
-    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
-    ReportFormat, ReportOutput, Result, Table, TenantDb, sea_orm,
+    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportOutput, Result, Table, TenantDb, sea_orm,
 };
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
@@ -604,10 +603,6 @@ impl ReportDefinition for GrniReport {
         "Procurement"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -631,8 +626,7 @@ impl ReportDefinition for GrniReport {
             ReportColumn::number("Qty"),
             ReportColumn::number("Unit value"),
             ReportColumn::number("Value"),
-        ])
-        .title("Goods Received Not Invoiced");
+        ]);
 
         for row in &view.rows {
             table = table.row([
@@ -660,7 +654,6 @@ impl ReportDefinition for GrniReport {
             .with(table.into_widget()))
     }
 }
-
 
 pub struct SupplierBalancesDataSource;
 
@@ -692,10 +685,6 @@ impl ReportDefinition for SupplierBalancesReport {
         "Procurement"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -718,8 +707,7 @@ impl ReportDefinition for SupplierBalancesReport {
             ReportColumn::number("Invoices"),
             ReportColumn::number("Balance"),
             ReportColumn::number("Base balance"),
-        ])
-        .title("Supplier Balances");
+        ]);
 
         for row in &view.rows {
             table = table.row([
@@ -778,10 +766,6 @@ impl ReportDefinition for SupplierScorecardReport {
         "Procurement"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -810,8 +794,7 @@ impl ReportDefinition for SupplierScorecardReport {
             ReportColumn::number("Price var %"),
             ReportColumn::number("Price drift %"),
             ReportColumn::number("Received value"),
-        ])
-        .title("Supplier Scorecards");
+        ]);
 
         for row in &view.rows {
             table = table.row([

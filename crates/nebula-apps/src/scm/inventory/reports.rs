@@ -12,7 +12,7 @@ use crate::scm::inventory::levels::{
 };
 use crate::scm::inventory::permissions::names;
 use nebula::{
-    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportFormat,
+    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
     ReportOutput, Result, Table,
 };
 use rust_decimal::Decimal;
@@ -67,10 +67,6 @@ impl ReportDefinition for StockBalanceReport {
         "Inventory"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -94,8 +90,7 @@ impl ReportDefinition for StockBalanceReport {
             Column::number("On order"),
             Column::number("Avg cost"),
             Column::number("Value"),
-        ])
-        .title("Stock Balance");
+        ]);
 
         let mut total_value = Decimal::ZERO;
         for row in &levels {
@@ -170,10 +165,6 @@ impl ReportDefinition for StockLedgerReport {
         "Inventory"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -198,8 +189,7 @@ impl ReportDefinition for StockLedgerReport {
             Column::number("Balance"),
             Column::number("Unit cost"),
             Column::number("Value"),
-        ])
-        .title("Stock Ledger");
+        ]);
 
         for row in &rows {
             table = table.row([
@@ -254,10 +244,6 @@ impl ReportDefinition for ValuationSummaryReport {
         "Inventory"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -278,8 +264,7 @@ impl ReportDefinition for ValuationSummaryReport {
             Column::new("Name"),
             Column::number("Items"),
             Column::number("Value"),
-        ])
-        .title("Stock Valuation");
+        ]);
 
         for row in &summary.warehouses {
             table = table.row([
@@ -343,10 +328,6 @@ impl ReportDefinition for ReorderReport {
         "Inventory"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -370,8 +351,7 @@ impl ReportDefinition for ReorderReport {
             Column::number("On order"),
             Column::number("Reorder level"),
             Column::number("Reorder qty"),
-        ])
-        .title("Reorder Advice");
+        ]);
 
         for row in &levels {
             table = table.row([

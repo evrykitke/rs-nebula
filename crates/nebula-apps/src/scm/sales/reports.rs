@@ -33,8 +33,7 @@ use axum::{Json, Router};
 use nebula::auth::Authz;
 use nebula::error::Error;
 use nebula::{
-    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
-    ReportFormat, ReportOutput, Result, Table, TenantDb, sea_orm,
+    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportOutput, Result, Table, TenantDb, sea_orm,
 };
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
@@ -813,9 +812,6 @@ impl ReportDefinition for ArAgingReport {
     fn group(&self) -> &'static str {
         "Sales"
     }
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -836,8 +832,7 @@ impl ReportDefinition for ArAgingReport {
             ReportColumn::number("61–90"),
             ReportColumn::number("90+"),
             ReportColumn::number("Total"),
-        ])
-        .title("AR Aging");
+        ]);
         for r in &view.rows {
             table = table.row([
                 r.code.clone(),
@@ -877,9 +872,6 @@ impl ReportDefinition for DeliveredNotBilledReport {
     fn group(&self) -> &'static str {
         "Sales"
     }
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -899,8 +891,7 @@ impl ReportDefinition for DeliveredNotBilledReport {
             ReportColumn::number("Qty"),
             ReportColumn::number("Unit price"),
             ReportColumn::number("Value"),
-        ])
-        .title("Delivered Not Billed");
+        ]);
         for r in &view.rows {
             table = table.row([
                 r.customer_name.clone(),
@@ -938,9 +929,6 @@ impl ReportDefinition for SalesRegisterReport {
     fn group(&self) -> &'static str {
         "Sales"
     }
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -959,8 +947,7 @@ impl ReportDefinition for SalesRegisterReport {
             ReportColumn::number("Net"),
             ReportColumn::number("Tax"),
             ReportColumn::number("Total"),
-        ])
-        .title("Sales Register");
+        ]);
         for r in &view.rows {
             table = table.row([
                 r.number.clone().unwrap_or_default(),
@@ -996,9 +983,6 @@ impl ReportDefinition for SalesMarginsReport {
     fn group(&self) -> &'static str {
         "Sales"
     }
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -1017,8 +1001,7 @@ impl ReportDefinition for SalesMarginsReport {
             ReportColumn::number("COGS"),
             ReportColumn::number("Margin"),
             ReportColumn::number("Margin %"),
-        ])
-        .title("Sales Margins");
+        ]);
         for r in &view.rows {
             table = table.row([
                 r.sku.clone(),
@@ -1054,9 +1037,6 @@ impl ReportDefinition for ArReconciliationReport {
     fn group(&self) -> &'static str {
         "Sales"
     }
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -1075,7 +1055,6 @@ impl ReportDefinition for ArReconciliationReport {
             ReportColumn::number("GL balance"),
             ReportColumn::number("Gap"),
         ])
-        .title("AR Reconciliation")
         .row([
             "Accounts receivable".to_string(),
             format!("{:.2}", view.ar_open),

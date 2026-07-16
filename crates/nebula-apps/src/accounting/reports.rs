@@ -11,7 +11,7 @@ use crate::accounting::ledger::{
 };
 use crate::accounting::permissions::names;
 use nebula::{
-    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportFormat,
+    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
     ReportOutput, Result, Table,
 };
 use rust_decimal::Decimal;
@@ -53,10 +53,6 @@ impl ReportDefinition for TrialBalanceReport {
         "Accounting"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -78,8 +74,7 @@ impl ReportDefinition for TrialBalanceReport {
             Column::center("Type"),
             Column::number("Debit"),
             Column::number("Credit"),
-        ])
-        .title("Trial Balance");
+        ]);
 
         for row in &tb.rows {
             table = table.row([
@@ -143,10 +138,6 @@ impl ReportDefinition for BalanceSheetReport {
         "Accounting"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -162,8 +153,7 @@ impl ReportDefinition for BalanceSheetReport {
     fn build(&self, data: &ReportData) -> Result<Report> {
         let bs: BalanceSheet = data.get(BALANCE_SHEET_KEY)?;
 
-        let mut table = Table::new(vec![Column::new("Account"), Column::number("Amount")])
-            .title("Balance Sheet");
+        let mut table = Table::new(vec![Column::new("Account"), Column::number("Amount")]);
 
         table = section_rows(table, &bs.assets);
         table = section_rows(table, &bs.liabilities);
@@ -227,10 +217,6 @@ impl ReportDefinition for IncomeStatementReport {
         "Accounting"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -246,8 +232,7 @@ impl ReportDefinition for IncomeStatementReport {
     fn build(&self, data: &ReportData) -> Result<Report> {
         let is: IncomeStatement = data.get(INCOME_STATEMENT_KEY)?;
 
-        let mut table = Table::new(vec![Column::new("Account"), Column::number("Amount")])
-            .title("Income Statement");
+        let mut table = Table::new(vec![Column::new("Account"), Column::number("Amount")]);
 
         table = section_rows(table, &is.revenue);
         table = section_rows(table, &is.expenses);

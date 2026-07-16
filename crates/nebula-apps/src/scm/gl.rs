@@ -42,7 +42,7 @@ use nebula::sea_orm;
 use nebula::tenancy::TenantManager;
 use nebula::{
     Column as ReportColumn, DataCx, Events, ModuleContext, Report, ReportData, ReportDataSource,
-    ReportDefinition, ReportFormat, ReportOutput, Table, TenantDb,
+    ReportDefinition, ReportOutput, Table, TenantDb,
 };
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
@@ -996,10 +996,6 @@ impl ReportDefinition for GlReconciliationReport {
         "Inventory"
     }
 
-    fn default_format(&self) -> ReportFormat {
-        ReportFormat::Compact
-    }
-
     fn outputs(&self) -> &'static [ReportOutput] {
         &[ReportOutput::Pdf, ReportOutput::Excel, ReportOutput::Table]
     }
@@ -1023,7 +1019,6 @@ impl ReportDefinition for GlReconciliationReport {
             ReportColumn::number("GL balance"),
             ReportColumn::number("Gap"),
         ])
-        .title("Stock / GL Reconciliation")
         .row([
             "Inventory value".to_string(),
             money(view.stock_value),
