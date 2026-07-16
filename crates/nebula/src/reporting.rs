@@ -2137,6 +2137,11 @@ mod typst_backend {
         /// Padding inside a table cell. Documents are dense on purpose: the
         /// reader wants the whole order on one page.
         cell_inset: &'static str,
+        /// Padding inside a boxed block — the party and reference panels a
+        /// document opens with. Their own value, not the table's: a table is
+        /// read as a column of figures and wants to stay tight, while the
+        /// blocks above it are read as facts and want room around them.
+        block_inset: &'static str,
     }
 
     fn theme(format: ReportFormat) -> Theme {
@@ -2162,6 +2167,7 @@ mod typst_backend {
                 grid: false,
                 head_fill: "f1f5f9",
                 cell_inset: "5pt",
+                block_inset: "6pt",
             },
             // Dense, near-monochrome, thin rules — an RDLC-style list look.
             ReportFormat::Compact => Theme {
@@ -2182,34 +2188,38 @@ mod typst_backend {
                 grid: true,
                 head_fill: "f3f4f6",
                 cell_inset: "3pt",
+                block_inset: "6pt",
             },
             // Classic, restrained, serif-heavy corporate stationery.
             // The house look: ruled, dense, and squarely aligned — a trade
             // document, not a page of prose.
             ReportFormat::Corporate => Theme {
-                body: "10pt",
-                h1: "16pt",
-                h2: "12.5pt",
-                h3: "10.5pt",
+                body: "11pt",
+                h1: "17pt",
+                h2: "13.5pt",
+                h3: "11.5pt",
                 // The letterhead's contacts and every table's labels are set
                 // at this size, so it has to stay comfortably readable in
                 // print — not merely legible.
-                small: "8.5pt",
+                small: "9.5pt",
                 accent: "1f2937",
                 muted: "4b5563",
                 rule: "6b7280",
                 header_fill: "f3f4f6",
-                contact: "9.5pt",
+                contact: "10.5pt",
                 // The letterhead's own height plus its ascent, and a little
                 // over: too little and the logo is clipped by the paper edge,
                 // too much and the document starts halfway down the page.
-                top_margin: "4.9cm",
+                // Sized against the letterhead — raising the type or its
+                // padding grows it, and this has to follow.
+                top_margin: "5.4cm",
                 header_ascent: "0.5cm",
                 leading: "0.6em",
                 zebra: false,
                 grid: true,
                 head_fill: "eef2f7",
                 cell_inset: "4pt",
+                block_inset: "9pt",
             },
         }
     }
@@ -2504,7 +2514,7 @@ mod typst_backend {
         let mut inner = String::new();
         let mark = brand_mark(c, assets, LOGO_HEIGHT);
         if !mark.is_empty() {
-            inner.push_str(&format!("#align(center)[{mark}]\n#v(3pt)\n"));
+            inner.push_str(&format!("#align(center)[{mark}]\n#v(5pt)\n"));
         }
         if !c.name.is_empty() {
             inner.push_str(&format!(
@@ -2539,7 +2549,7 @@ mod typst_backend {
         for line in [address_line, detail_line] {
             if !line.is_empty() {
                 inner.push_str(&format!(
-                    "#v(2.5pt)\n#align(center, text(size: {}, fill: {})[{}])\n",
+                    "#v(4pt)\n#align(center, text(size: {}, fill: {})[{}])\n",
                     t.contact,
                     color(t.muted),
                     line.join("  ·  ")
@@ -2548,7 +2558,7 @@ mod typst_backend {
         }
 
         format!(
-            "#block(width: 100%, inset: (bottom: 4pt))[{inner}#v(4pt)\
+            "#block(width: 100%, inset: (bottom: 6pt))[{inner}#v(6pt)\
              #line(length: 100%, stroke: 0.8pt + {rule})]",
             rule = color(t.rule)
         )
@@ -2900,7 +2910,9 @@ mod typst_backend {
                     inner
                 };
                 if group.boxed {
-                    s.push_str("#block(width: 100%, inset: 6pt, radius: 2pt, stroke: 0.5pt + ");
+                    s.push_str("#block(width: 100%, inset: ");
+                    s.push_str(t.block_inset);
+                    s.push_str(", radius: 2pt, stroke: 0.5pt + ");
                     s.push_str(&color(t.rule));
                     s.push_str(", above: 0.4em, below: 0.4em)[");
                     s.push_str(&body);
