@@ -52,6 +52,10 @@ impl ReportDefinition for GoodsReceiptDocument {
     fn permission(&self) -> Option<&'static str> {
         Some(names::RECEIPTS_VIEW)
     }
+    /// Drawn for one record: without `?id=` there is nothing to draw.
+    fn requires_record(&self) -> bool {
+        true
+    }
     fn data_sources(&self) -> Vec<Arc<dyn ReportDataSource>> {
         vec![Arc::new(ReceiptDataSource)]
     }
@@ -139,6 +143,7 @@ impl ReportDefinition for GoodsReceiptDocument {
                 Signature::new("Received by").dated(),
                 Signature::new("Checked by").dated(),
             ],
+            footer_notes: Vec::new(),
         }
         .into_report())
     }

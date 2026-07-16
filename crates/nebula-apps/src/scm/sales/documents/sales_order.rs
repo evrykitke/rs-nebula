@@ -46,6 +46,10 @@ impl ReportDefinition for SalesOrderDocument {
     fn permission(&self) -> Option<&'static str> {
         Some(names::ORDERS_VIEW)
     }
+    /// Drawn for one record: without `?id=` there is nothing to draw.
+    fn requires_record(&self) -> bool {
+        true
+    }
     fn data_sources(&self) -> Vec<Arc<dyn ReportDataSource>> {
         vec![Arc::new(OrderDataSource)]
     }
@@ -144,6 +148,7 @@ impl ReportDefinition for SalesOrderDocument {
             terms: o.terms_and_conditions.clone(),
             memo: o.memo.clone(),
             signatures: Vec::new(),
+            footer_notes: Vec::new(),
         }
         .into_report())
     }

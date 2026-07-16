@@ -837,6 +837,17 @@ pub trait ReportDefinition: Send + Sync {
     fn permission(&self) -> Option<&'static str> {
         None
     }
+    /// Whether this report draws one record and is meaningless without it —
+    /// a purchase order, an invoice, a statement.
+    ///
+    /// Such a report answers `?id=` and errors without it, so it cannot be run
+    /// from the catalogue the way a trial balance can: it is reached from the
+    /// record it belongs to. Declared rather than guessed, because the shape
+    /// gives nothing away — a document is PDF-only, but so is a workspace
+    /// overview that needs no record at all.
+    fn requires_record(&self) -> bool {
+        false
+    }
     /// The datasources to resolve before building. The company datasource
     /// is always added by the engine, so reports list only their own.
     fn data_sources(&self) -> Vec<Arc<dyn ReportDataSource>> {
@@ -918,6 +929,10 @@ pub struct ReportInfo {
     pub default_format: ReportFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_permission: Option<String>,
+    /// True when the report draws one record and answers `?id=`. The catalogue
+    /// cannot run these, and says so instead of offering a link that 400s.
+    #[serde(default)]
+    pub requires_record: bool,
 }
 
 /// The interactive list-report payload: every table in a report, flattened
@@ -1240,6 +1255,7 @@ impl Reporting {
                 outputs: d.outputs().to_vec(),
                 default_format: d.default_format(),
                 requires_permission: d.permission().map(str::to_string),
+                requires_record: d.requires_record(),
             })
             .collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));

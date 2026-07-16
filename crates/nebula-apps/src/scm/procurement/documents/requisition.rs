@@ -46,6 +46,10 @@ impl ReportDefinition for RequisitionDocument {
     fn permission(&self) -> Option<&'static str> {
         Some(names::REQUISITIONS_VIEW)
     }
+    /// Drawn for one record: without `?id=` there is nothing to draw.
+    fn requires_record(&self) -> bool {
+        true
+    }
     fn data_sources(&self) -> Vec<Arc<dyn ReportDataSource>> {
         vec![Arc::new(RequisitionDataSource)]
     }
@@ -105,6 +109,7 @@ impl ReportDefinition for RequisitionDocument {
                 Signature::new("Requested by").dated(),
                 Signature::new("Approved by").dated(),
             ],
+            footer_notes: Vec::new(),
         }
         .into_report())
     }

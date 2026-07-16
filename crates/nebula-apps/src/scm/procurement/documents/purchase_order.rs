@@ -49,6 +49,10 @@ impl ReportDefinition for PurchaseOrderDocument {
     fn permission(&self) -> Option<&'static str> {
         Some(names::ORDERS_VIEW)
     }
+    /// Drawn for one record: without `?id=` there is nothing to draw.
+    fn requires_record(&self) -> bool {
+        true
+    }
     fn data_sources(&self) -> Vec<Arc<dyn ReportDataSource>> {
         vec![Arc::new(PurchaseOrderDataSource)]
     }
@@ -169,6 +173,7 @@ impl ReportDefinition for PurchaseOrderDocument {
                 Signature::new("Prepared by").dated(),
                 Signature::new("Approved by").dated(),
             ],
+            footer_notes: Vec::new(),
         }
         .into_report())
     }

@@ -73,6 +73,16 @@ pub struct Document {
     pub memo: Option<String>,
     /// The sign-off band. Empty for documents nobody signs.
     pub signatures: Vec<Signature>,
+    /// The small print at the foot: bank details to remit to, a delivery
+    /// disclaimer, "E&OE".
+    ///
+    /// Its own field rather than more `memo`, because it reads differently and
+    /// belongs somewhere else. A memo is about *this* record — why the price
+    /// was agreed, what to do with the pallet. A footer note is standing text
+    /// the business puts on every copy of the document, and it sits under the
+    /// signatures where small print goes, not above them where it would
+    /// interrupt.
+    pub footer_notes: Vec<String>,
 }
 
 impl Document {
@@ -196,6 +206,20 @@ impl Document {
             report = report.with(Widget::Signatures {
                 items: self.signatures,
             });
+        }
+
+        // Last on the page, under the signatures: small print is read when it
+        // is looked for, and a bank account someone has to key in is worth its
+        // own line rather than a run-on paragraph.
+        let notes: Vec<String> = self
+            .footer_notes
+            .into_iter()
+            .filter(|n| !n.trim().is_empty())
+            .collect();
+        if !notes.is_empty() {
+            report = report.with(Widget::spacer(SpaceSize::Small));
+            report = report.with(Widget::Divider);
+            report = report.with(Widget::styled(notes.join("\n"), TextStyle::Small));
         }
 
         report
