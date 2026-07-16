@@ -1,12 +1,7 @@
-//! Procurement documents: the pages you send to a supplier or file away.
-//!
-//! These differ from the reports in [`super::reports`] in what they are for.
-//! A report summarises many records for someone inside the company; a
-//! document *is* one record, addressed outward — a purchase order commits
-//! the company to a supplier. So each is parameterised by `?id=`, reads the
-//! same view the detail screen reads, and lays out through
-//! [`crate::scm::document`] so every SCM document is a sibling of the rest.
+//! The purchase order as sent to a supplier — the document that commits the
+//! company to buy.
 
+use super::status_line;
 use crate::scm::document::{Document, amount, date, quantity, total_line};
 use crate::scm::procurement::order::{OrderService, OrderView};
 use crate::scm::procurement::permissions::names;
@@ -16,7 +11,7 @@ use nebula::{
 };
 use std::sync::Arc;
 
-const PURCHASE_ORDER_KEY: &str = "scm_purchase_order_doc";
+const KEY: &str = "scm_purchase_order_doc";
 
 /// Loads the one order the caller asked for.
 pub struct PurchaseOrderDataSource;
@@ -24,7 +19,7 @@ pub struct PurchaseOrderDataSource;
 #[async_trait::async_trait]
 impl ReportDataSource for PurchaseOrderDataSource {
     fn key(&self) -> &'static str {
-        PURCHASE_ORDER_KEY
+        KEY
     }
 
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
@@ -34,7 +29,6 @@ impl ReportDataSource for PurchaseOrderDataSource {
     }
 }
 
-/// The purchase order as sent to a supplier.
 pub struct PurchaseOrderDocument;
 
 impl ReportDefinition for PurchaseOrderDocument {
@@ -60,7 +54,7 @@ impl ReportDefinition for PurchaseOrderDocument {
     }
 
     fn build(&self, data: &ReportData) -> Result<Report> {
-        let o: OrderView = data.get(PURCHASE_ORDER_KEY)?;
+        let o: OrderView = data.get(KEY)?;
 
         let mut meta = vec![
             KeyValue::new("Order date", date(o.order_date)),
@@ -145,18 +139,10 @@ impl ReportDefinition for PurchaseOrderDocument {
         }
         totals.push(total_line(&format!("Total ({})", o.currency), o.total));
 
-        let status = match o.status.as_str() {
-            "cancelled" => match o.cancel_reason.as_deref().filter(|s| !s.trim().is_empty()) {
-                Some(why) => format!("Cancelled — {why}"),
-                None => "Cancelled".to_string(),
-            },
-            other => other.replace('_', " "),
-        };
-
         Ok(Document {
             title: "Purchase Order".to_string(),
             number: o.number.clone(),
-            status,
+            status: status_line(o.status.as_str(), o.cancel_reason.as_deref()),
             party_label: "Supplier",
             party,
             second_label: Some("Deliver to"),

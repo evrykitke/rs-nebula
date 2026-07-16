@@ -201,7 +201,11 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(inventory::reports::StockLedgerReport));
         ctx.declare_report(Arc::new(inventory::reports::ValuationSummaryReport));
         ctx.declare_report(Arc::new(inventory::reports::ReorderReport));
+        ctx.declare_report(Arc::new(procurement::documents::RequisitionDocument));
         ctx.declare_report(Arc::new(procurement::documents::PurchaseOrderDocument));
+        ctx.declare_report(Arc::new(procurement::documents::GoodsReceiptDocument));
+        ctx.declare_report(Arc::new(procurement::documents::SupplierInvoiceDocument));
+        ctx.declare_report(Arc::new(procurement::documents::PurchaseReturnDocument));
         ctx.declare_report(Arc::new(procurement::reports::GrniReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierBalancesReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierScorecardReport));
