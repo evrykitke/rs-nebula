@@ -34,7 +34,9 @@ use nebula::error::{Error, Result};
 use nebula::{Numbering, TenantDb, sea_orm};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseConnection, QueryOrder, QuerySelect, Set, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, QueryOrder, QuerySelect, Set, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
@@ -296,9 +298,7 @@ impl OrderService {
             currency: Set(currency),
             exchange_rate: Set(Decimal::ONE),
             price_list_id: Set(buyer.price_list_id),
-            payment_terms_days: Set(new
-                .payment_terms_days
-                .unwrap_or(buyer.payment_terms_days)),
+            payment_terms_days: Set(new.payment_terms_days.unwrap_or(buyer.payment_terms_days)),
             tax_inclusive: Set(new.tax_inclusive),
             discount_pct: Set(new.discount_pct),
             discount_amount: Set(new.discount_amount),
@@ -327,7 +327,12 @@ impl OrderService {
     }
 
     /// Replace a draft's header and lines wholesale (lines re-price).
-    pub async fn update_draft(&self, id: Uuid, new: NewOrder, by: Option<Uuid>) -> Result<OrderView> {
+    pub async fn update_draft(
+        &self,
+        id: Uuid,
+        new: NewOrder,
+        by: Option<Uuid>,
+    ) -> Result<OrderView> {
         let buyer = load_customer_for_new_order(&self.db, new.customer_id).await?;
         let currency = match &new.currency {
             Some(c) => validate_currency(c)?,
@@ -360,9 +365,7 @@ impl OrderService {
         active.salesperson_id = Set(buyer.salesperson_id);
         active.currency = Set(currency);
         active.price_list_id = Set(buyer.price_list_id);
-        active.payment_terms_days = Set(new
-            .payment_terms_days
-            .unwrap_or(buyer.payment_terms_days));
+        active.payment_terms_days = Set(new.payment_terms_days.unwrap_or(buyer.payment_terms_days));
         active.tax_inclusive = Set(new.tax_inclusive);
         active.discount_pct = Set(new.discount_pct);
         active.discount_amount = Set(new.discount_amount);
@@ -382,7 +385,9 @@ impl OrderService {
         let txn = self.db.begin().await?;
         let existing = load_order_locked(&txn, id).await?;
         if OrderStatus::parse(&existing.status)? != OrderStatus::Draft {
-            return Err(Error::Validation("only a draft order can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft order can be deleted".into(),
+            ));
         }
         order::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -1473,9 +1478,16 @@ async fn update_order(
     let service = OrderService::new(db);
     let before = service.view(id).await?;
     let after = service
-        .update_draft(id, new_order(req, None, allow_override), Some(authz.user.id))
+        .update_draft(
+            id,
+            new_order(req, None, allow_override),
+            Some(authz.user.id),
+        )
         .await?;
-    audit.0.updated("scm.sales_order", id, &before, &after).await;
+    audit
+        .0
+        .updated("scm.sales_order", id, &before, &after)
+        .await;
     Ok(Json(after))
 }
 

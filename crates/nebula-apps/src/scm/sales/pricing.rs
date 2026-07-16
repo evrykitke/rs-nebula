@@ -530,7 +530,9 @@ impl Store {
     ) -> Result<(String, String)> {
         let name = body.name.trim().to_string();
         if name.is_empty() {
-            return Err(Error::Validation("price list name must not be empty".into()));
+            return Err(Error::Validation(
+                "price list name must not be empty".into(),
+            ));
         }
         let currency = body.currency.trim().to_uppercase();
         if currency.len() != 3 || !currency.chars().all(|c| c.is_ascii_alphabetic()) {
@@ -612,15 +614,19 @@ impl PricingService {
         // The candidate lists, most specific first.
         let mut candidates: Vec<price_list::Model> = Vec::new();
         if let Some(list_id) = buyer.price_list_id {
-            if let Some(list) = price_list::Entity::find_by_id(list_id).one(&self.db).await? {
+            if let Some(list) = price_list::Entity::find_by_id(list_id)
+                .one(&self.db)
+                .await?
+            {
                 candidates.push(list);
             }
         }
         if let Some(group_id) = buyer.group_id {
             if let Some(g) = group::Entity::find_by_id(group_id).one(&self.db).await? {
                 if let Some(list_id) = g.price_list_id {
-                    if let Some(list) =
-                        price_list::Entity::find_by_id(list_id).one(&self.db).await?
+                    if let Some(list) = price_list::Entity::find_by_id(list_id)
+                        .one(&self.db)
+                        .await?
                     {
                         candidates.push(list);
                     }
@@ -679,8 +685,7 @@ impl PricingService {
             Some(price) => {
                 if !allow_override {
                     return Err(Error::Validation(
-                        "setting a line price by hand needs the price-override permission"
-                            .into(),
+                        "setting a line price by hand needs the price-override permission".into(),
                     ));
                 }
                 if price < Decimal::ZERO {
@@ -747,9 +752,7 @@ impl PricingService {
                     // price prices nothing; fall through to other lists.
                     return Ok(None);
                 };
-                Ok(Some(
-                    base - (base * pct / Decimal::ONE_HUNDRED).round_dp(6),
-                ))
+                Ok(Some(base - (base * pct / Decimal::ONE_HUNDRED).round_dp(6)))
             }
             (None, None) => Ok(None),
         }
@@ -803,10 +806,7 @@ struct ApiDoc;
 
 #[utoipa::path(get, path = "/sales/price-lists", tag = "sales",
     responses((status = 200, body = Vec<price_list::Model>)))]
-async fn list_lists(
-    authz: Authz,
-    TenantDb(db): TenantDb,
-) -> Result<Json<Vec<price_list::Model>>> {
+async fn list_lists(authz: Authz, TenantDb(db): TenantDb) -> Result<Json<Vec<price_list::Model>>> {
     authz.require(names::PRICING_VIEW).await?;
     Store::new(db).find_all().await.map(Json)
 }

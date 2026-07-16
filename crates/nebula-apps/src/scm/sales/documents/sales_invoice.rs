@@ -21,7 +21,9 @@ impl ReportDataSource for InvoiceDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let record = InvoiceService::new(db.clone()).view(cx.params.id()?).await?;
+        let record = InvoiceService::new(db.clone())
+            .view(cx.params.id()?)
+            .await?;
         let party = party_of(cx, record.customer_id, &record.customer_name).await?;
         serde_json::to_value(Addressed { record, party })
             .map_err(|e| Error::internal(e.to_string()))
@@ -135,7 +137,7 @@ impl ReportDefinition for SalesInvoiceDocument {
 
         Ok(Document {
             title: "Invoice".to_string(),
-            number: i.number.clone(),
+            number: i.number.clone().into(),
             status: status_line(i.status.as_str(), i.cancel_reason.as_deref()),
             party_label: "Bill to",
             party: party_block(&party, &party.billing),

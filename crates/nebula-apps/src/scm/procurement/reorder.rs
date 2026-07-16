@@ -172,7 +172,10 @@ pub async fn run(db: &DatabaseConnection) -> Result<ReorderRunView> {
             });
             continue;
         }
-        if !warehouses.get(&row.warehouse_id).is_some_and(|w| w.is_active) {
+        if !warehouses
+            .get(&row.warehouse_id)
+            .is_some_and(|w| w.is_active)
+        {
             skipped.push(ReorderSkipView {
                 item_id: it.id,
                 sku: it.sku.clone(),
@@ -244,7 +247,12 @@ pub async fn run(db: &DatabaseConnection) -> Result<ReorderRunView> {
         let it = &items[&s.item_id];
         let mut candidates: Vec<Uuid> = Vec::new();
         let entries = catalog.get(&s.item_id).map(|v| v.as_slice()).unwrap_or(&[]);
-        candidates.extend(entries.iter().filter(|c| c.is_preferred).map(|c| c.supplier_id));
+        candidates.extend(
+            entries
+                .iter()
+                .filter(|c| c.is_preferred)
+                .map(|c| c.supplier_id),
+        );
         candidates.extend(it.preferred_supplier_id);
         let mut by_recency: Vec<&item_supplier::Model> = entries.iter().collect();
         by_recency.sort_by(|a, b| b.last_purchased_on.cmp(&a.last_purchased_on));

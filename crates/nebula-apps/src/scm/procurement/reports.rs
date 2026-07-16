@@ -32,11 +32,12 @@ use axum::{Json, Router};
 use nebula::auth::Authz;
 use nebula::error::Error;
 use nebula::{
-    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportOutput, Result, Table, TenantDb, sea_orm,
+    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
+    ReportOutput, Result, Table, TenantDb, sea_orm,
 };
 use rust_decimal::Decimal;
-use sea_orm::entity::prelude::*;
 use sea_orm::DatabaseConnection;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -277,8 +278,13 @@ impl ProcurementQueries {
         let mut per_supplier: HashMap<Uuid, (i64, Decimal, Decimal)> = HashMap::new();
         for inv in &invoices {
             let mut subtotal = Decimal::ZERO;
-            for l in lines_by_invoice.get(&inv.id).map(|v| v.as_slice()).unwrap_or(&[]) {
-                subtotal += stock::round_money(l.qty * effective_price(l.unit_price, l.discount_pct));
+            for l in lines_by_invoice
+                .get(&inv.id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
+                subtotal +=
+                    stock::round_money(l.qty * effective_price(l.unit_price, l.discount_pct));
             }
             let mut total = subtotal;
             if let Some(pct) = inv.discount_pct {
@@ -326,9 +332,8 @@ impl ProcurementQueries {
         from: Option<chrono::NaiveDate>,
         to: Option<chrono::NaiveDate>,
     ) -> Result<SupplierScorecardView> {
-        let in_window = |d: chrono::NaiveDate| {
-            from.is_none_or(|f| d >= f) && to.is_none_or(|t| d <= t)
-        };
+        let in_window =
+            |d: chrono::NaiveDate| from.is_none_or(|f| d >= f) && to.is_none_or(|t| d <= t);
 
         // The full order map: receipts and invoices in the window may
         // reference orders placed before it.
@@ -665,7 +670,9 @@ impl ReportDataSource for SupplierBalancesDataSource {
 
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let view = ProcurementQueries::new(db.clone()).supplier_balances().await?;
+        let view = ProcurementQueries::new(db.clone())
+            .supplier_balances()
+            .await?;
         serde_json::to_value(view).map_err(|e| Error::internal(e.to_string()))
     }
 }

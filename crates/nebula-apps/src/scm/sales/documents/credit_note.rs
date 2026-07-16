@@ -21,7 +21,9 @@ impl ReportDataSource for CreditNoteDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let record = CreditNoteService::new(db.clone()).view(cx.params.id()?).await?;
+        let record = CreditNoteService::new(db.clone())
+            .view(cx.params.id()?)
+            .await?;
         let party = party_of(cx, record.customer_id, &record.customer_name).await?;
         serde_json::to_value(Addressed { record, party })
             .map_err(|e| Error::internal(e.to_string()))
@@ -106,7 +108,7 @@ impl ReportDefinition for CreditNoteDocument {
 
         Ok(Document {
             title: "Credit Note".to_string(),
-            number: c.number.clone(),
+            number: c.number.clone().into(),
             status: status_line(c.status.as_str(), c.cancel_reason.as_deref()),
             party_label: "Credit to",
             party: party_block(&party, &party.billing),

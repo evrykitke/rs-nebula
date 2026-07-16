@@ -83,7 +83,9 @@ impl ExpenseService {
         }];
         let mut total = new.amount;
         if let Some(tax_code_id) = new.tax_code_id {
-            let code = tax::Store::new(self.db.clone()).find_by_id(tax_code_id).await?;
+            let code = tax::Store::new(self.db.clone())
+                .find_by_id(tax_code_id)
+                .await?;
             if !code.is_active {
                 return Err(Error::Validation(format!(
                     "tax code {} is inactive",

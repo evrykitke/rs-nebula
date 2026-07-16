@@ -262,12 +262,7 @@ pub(crate) fn api() -> utoipa::openapi::OpenApi {
 }
 
 #[derive(utoipa::OpenApi)]
-#[openapi(paths(
-    list_warehouses,
-    get_warehouse,
-    create_warehouse,
-    update_warehouse
-))]
+#[openapi(paths(list_warehouses, get_warehouse, create_warehouse, update_warehouse))]
 struct ApiDoc;
 
 #[utoipa::path(get, path = "/inventory/warehouses", tag = "inventory",

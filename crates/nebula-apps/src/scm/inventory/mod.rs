@@ -66,7 +66,10 @@ pub mod permissions {
             .child(
                 PermissionDef::new(MOVEMENTS, "Stock movements")
                     .child(PermissionDef::new(MOVEMENTS_VIEW, "View stock movements"))
-                    .child(PermissionDef::new(MOVEMENTS_CREATE, "Create stock movements"))
+                    .child(PermissionDef::new(
+                        MOVEMENTS_CREATE,
+                        "Create stock movements",
+                    ))
                     .child(PermissionDef::new(MOVEMENTS_POST, "Post stock movements"))
                     .child(PermissionDef::new(
                         MOVEMENTS_REVERSE,
@@ -75,12 +78,18 @@ pub mod permissions {
             )
             .child(
                 PermissionDef::new(ADJUSTMENTS, "Stock adjustments")
-                    .child(PermissionDef::new(ADJUSTMENTS_VIEW, "View stock adjustments"))
+                    .child(PermissionDef::new(
+                        ADJUSTMENTS_VIEW,
+                        "View stock adjustments",
+                    ))
                     .child(PermissionDef::new(
                         ADJUSTMENTS_CREATE,
                         "Create stock adjustments",
                     ))
-                    .child(PermissionDef::new(ADJUSTMENTS_POST, "Post stock adjustments")),
+                    .child(PermissionDef::new(
+                        ADJUSTMENTS_POST,
+                        "Post stock adjustments",
+                    )),
             )
             .child(
                 PermissionDef::new(REPORTS, "Inventory reports")

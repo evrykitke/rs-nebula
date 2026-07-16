@@ -222,7 +222,9 @@ impl Ledger {
         let txn = self.db.begin().await?;
         let entry = load_entry_locked(&txn, id).await?;
         if EntryStatus::parse(&entry.status)? != EntryStatus::Draft {
-            return Err(Error::Validation("only a draft entry can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft entry can be deleted".into(),
+            ));
         }
         entry::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -437,10 +439,7 @@ impl Ledger {
 
     /// Build register rows (header + amount) for a set of entries, with
     /// the debit totals summed per entry in one pass.
-    pub(crate) async fn headers(
-        &self,
-        rows: Vec<entry::Model>,
-    ) -> Result<Vec<JournalEntryHeader>> {
+    pub(crate) async fn headers(&self, rows: Vec<entry::Model>) -> Result<Vec<JournalEntryHeader>> {
         let totals = self.debit_totals(&rows).await?;
         rows.into_iter()
             .map(|r| {
@@ -647,10 +646,7 @@ async fn load_entry<C: ConnectionTrait>(conn: &C, id: Uuid) -> Result<entry::Mod
 /// Load an entry holding its row lock, so concurrent state transitions
 /// (post, reverse, edit, delete) on the same entry serialize instead of
 /// both acting on the same stale status.
-async fn load_entry_locked(
-    txn: &sea_orm::DatabaseTransaction,
-    id: Uuid,
-) -> Result<entry::Model> {
+async fn load_entry_locked(txn: &sea_orm::DatabaseTransaction, id: Uuid) -> Result<entry::Model> {
     entry::Entity::find_by_id(id)
         .lock_exclusive()
         .one(txn)
@@ -974,7 +970,13 @@ async fn reverse_entry(
 ) -> Result<Json<JournalEntryView>> {
     authz.require(names::JOURNAL_REVERSE).await?;
     let view = Ledger::new(db)
-        .reverse(id, &req.reason, req.entry_date, &numbering, Some(authz.user.id))
+        .reverse(
+            id,
+            &req.reason,
+            req.entry_date,
+            &numbering,
+            Some(authz.user.id),
+        )
         .await?;
     audit
         .0

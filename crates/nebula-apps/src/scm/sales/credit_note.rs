@@ -383,7 +383,10 @@ impl CreditNoteService {
             lines.iter().filter(|l| l.restock).collect();
         let mut move_id: Option<Uuid> = None;
         if !restock_lines.is_empty() {
-            move_id = Some(self.post_restock(&txn, &note, &inv, &restock_lines, &inv_lines).await?);
+            move_id = Some(
+                self.post_restock(&txn, &note, &inv, &restock_lines, &inv_lines)
+                    .await?,
+            );
         }
 
         // The AR mirror.
@@ -394,7 +397,9 @@ impl CreditNoteService {
         let tax_base = round_money(totals.tax * rate);
         let gross_base = round_money(totals.total * rate);
 
-        let number = numbering.next(&txn, crate::scm::SALES_CREDIT_NOTE_SERIES).await?;
+        let number = numbering
+            .next(&txn, crate::scm::SALES_CREDIT_NOTE_SERIES)
+            .await?;
         let now = chrono::Utc::now();
         let ar_request = gl::ar_invoice_request(
             format!("sales.credit_note:{id}:post"),
@@ -461,9 +466,9 @@ impl CreditNoteService {
         restock_lines: &[&credit_note_line::Model],
         inv_lines: &HashMap<Uuid, invoice_line::Model>,
     ) -> Result<Uuid> {
-        let order_id = inv
-            .order_id
-            .ok_or_else(|| Error::Validation("cannot restock a credit note on a direct invoice".into()))?;
+        let order_id = inv.order_id.ok_or_else(|| {
+            Error::Validation("cannot restock a credit note on a direct invoice".into())
+        })?;
         let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(txn, order_id)
             .await?
             .into_iter()
@@ -555,9 +560,16 @@ impl CreditNoteService {
             }
             let batch_id = match (&line.batch_no, item.track_batches) {
                 (Some(no), _) => Some(
-                    batch::find_or_create_batch(txn, item, no, note.credit_date, None, note.created_by)
-                        .await?
-                        .id,
+                    batch::find_or_create_batch(
+                        txn,
+                        item,
+                        no,
+                        note.credit_date,
+                        None,
+                        note.created_by,
+                    )
+                    .await?
+                    .id,
                 ),
                 (None, true) => {
                     return Err(Error::Validation(format!(
@@ -695,7 +707,9 @@ impl CreditNoteService {
         // they came in at, and book Dr COGS / Cr Inventory.
         let cogs_request = match note.move_id {
             Some(original_move_id) => {
-                let mid = self.reverse_restock(&txn, &note, original_move_id, by).await?;
+                let mid = self
+                    .reverse_restock(&txn, &note, original_move_id, by)
+                    .await?;
                 let req = gl::cogs_move_request(
                     &txn,
                     format!("sales.credit_note:{id}:restock_cancel"),
@@ -918,8 +932,13 @@ impl CreditNoteService {
         for r in &rows {
             let lines = load_note_lines(&self.db, r.id).await?;
             let cust = customers.get(&r.customer_id);
-            let totals =
-                totals_for(&self.db, r, &lines, cust.map(|c| c.tax_exempt).unwrap_or(false)).await?;
+            let totals = totals_for(
+                &self.db,
+                r,
+                &lines,
+                cust.map(|c| c.tax_exempt).unwrap_or(false),
+            )
+            .await?;
             headers.push(CreditNoteHeader {
                 id: r.id,
                 number: r.number.clone(),
@@ -957,14 +976,19 @@ impl CreditNoteService {
                 let rate = if tax_exempt {
                     Decimal::ZERO
                 } else {
-                    l.tax_code_id.and_then(|id| rates.get(&id).copied()).unwrap_or(Decimal::ZERO)
+                    l.tax_code_id
+                        .and_then(|id| rates.get(&id).copied())
+                        .unwrap_or(Decimal::ZERO)
                 };
                 let line_amt = round_money(l.qty * effective_price(l.unit_price, l.discount_pct));
                 let (net, tax) = if row.tax_inclusive {
                     let n = round_money(line_amt / (Decimal::ONE + rate / Decimal::ONE_HUNDRED));
                     (n, line_amt - n)
                 } else {
-                    (line_amt, round_money(line_amt * rate / Decimal::ONE_HUNDRED))
+                    (
+                        line_amt,
+                        round_money(line_amt * rate / Decimal::ONE_HUNDRED),
+                    )
                 };
                 subtotal += net;
                 tax_total += tax;
@@ -1097,7 +1121,10 @@ async fn validate_note<C: ConnectionTrait>(
         }
         let taken = crediting.entry(l.invoice_line_id).or_default();
         *taken += l.qty;
-        let prior = already.get(&l.invoice_line_id).copied().unwrap_or(Decimal::ZERO);
+        let prior = already
+            .get(&l.invoice_line_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
         if prior + *taken > il.qty {
             return Err(Error::Validation(format!(
                 "line {line_no}: crediting {} exceeds the {} still creditable",
@@ -1125,7 +1152,9 @@ async fn insert_lines(
         let il = inv_lines.get(&l.invoice_line_id);
         let description = match l.description.clone().filter(|d| !d.trim().is_empty()) {
             Some(d) => d,
-            None => il.map(|il| il.description.clone()).unwrap_or_else(|| "Line".to_string()),
+            None => il
+                .map(|il| il.description.clone())
+                .unwrap_or_else(|| "Line".to_string()),
         };
         let unit_price = l
             .unit_price
@@ -1211,9 +1240,16 @@ async fn totals_for<C: ConnectionTrait>(
 pub(crate) async fn credit_note_total<C: ConnectionTrait>(conn: &C, id: Uuid) -> Result<Decimal> {
     let note = load_note(conn, id).await?;
     let lines = load_note_lines(conn, id).await?;
-    let customer = customer::Entity::find_by_id(note.customer_id).one(conn).await?;
-    let totals = totals_for(conn, &note, &lines, customer.map(|c| c.tax_exempt).unwrap_or(false))
+    let customer = customer::Entity::find_by_id(note.customer_id)
+        .one(conn)
         .await?;
+    let totals = totals_for(
+        conn,
+        &note,
+        &lines,
+        customer.map(|c| c.tax_exempt).unwrap_or(false),
+    )
+    .await?;
     Ok(totals.total)
 }
 
@@ -1428,10 +1464,7 @@ fn new_note(req: CreateCreditNoteRequest, created_by: Option<Uuid>) -> NewCredit
 
 pub(crate) fn routes() -> Router {
     Router::new()
-        .route(
-            "/sales/credit-notes",
-            get(list_notes).post(create_note),
-        )
+        .route("/sales/credit-notes", get(list_notes).post(create_note))
         .route(
             "/sales/credit-notes/{id}",
             get(get_note).put(update_note).delete(delete_note),
@@ -1500,7 +1533,10 @@ async fn create_note(
     let view = CreditNoteService::new(db)
         .create_draft(new_note(req, Some(authz.user.id)))
         .await?;
-    audit.0.created("scm.sales_credit_note", view.id, &view).await;
+    audit
+        .0
+        .created("scm.sales_credit_note", view.id, &view)
+        .await;
     Ok(Json(view))
 }
 
@@ -1537,7 +1573,10 @@ async fn delete_note(
 ) -> Result<Json<CreditNoteView>> {
     authz.require(names::CREDIT_NOTES_CREATE).await?;
     let view = CreditNoteService::new(db).delete_draft(id).await?;
-    audit.0.deleted("scm.sales_credit_note", view.id, &view).await;
+    audit
+        .0
+        .deleted("scm.sales_credit_note", view.id, &view)
+        .await;
     Ok(Json(view))
 }
 

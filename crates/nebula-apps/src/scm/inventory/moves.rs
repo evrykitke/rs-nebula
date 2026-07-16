@@ -256,7 +256,9 @@ impl MoveService {
         let txn = self.db.begin().await?;
         let existing = load_move_locked(&txn, id).await?;
         if MoveStatus::parse(&existing.status)? != MoveStatus::Draft {
-            return Err(Error::Validation("only a draft movement can be edited".into()));
+            return Err(Error::Validation(
+                "only a draft movement can be edited".into(),
+            ));
         }
         if MoveType::parse(&existing.move_type)? != new.move_type {
             return Err(Error::Validation(
@@ -288,7 +290,9 @@ impl MoveService {
         let txn = self.db.begin().await?;
         let existing = load_move_locked(&txn, id).await?;
         if MoveStatus::parse(&existing.status)? != MoveStatus::Draft {
-            return Err(Error::Validation("only a draft movement can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft movement can be deleted".into(),
+            ));
         }
         doc::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -305,12 +309,16 @@ impl MoveService {
         let txn = self.db.begin().await?;
         let doc_row = load_move_locked(&txn, id).await?;
         if MoveStatus::parse(&doc_row.status)? != MoveStatus::Draft {
-            return Err(Error::Validation("only a draft movement can be posted".into()));
+            return Err(Error::Validation(
+                "only a draft movement can be posted".into(),
+            ));
         }
         let move_type = MoveType::parse(&doc_row.move_type)?;
         let lines = load_lines(&txn, id).await?;
         if lines.is_empty() {
-            return Err(Error::Validation("a movement needs at least one line".into()));
+            return Err(Error::Validation(
+                "a movement needs at least one line".into(),
+            ));
         }
         let (items, uoms) = load_items(&txn, &lines).await?;
         for item in items.values() {
@@ -1066,7 +1074,9 @@ async fn validate_move<C: ConnectionTrait>(conn: &C, new: &NewMove) -> Result<()
         return Err(Error::Validation("a movement needs a memo".into()));
     }
     if new.lines.is_empty() {
-        return Err(Error::Validation("a movement needs at least one line".into()));
+        return Err(Error::Validation(
+            "a movement needs at least one line".into(),
+        ));
     }
 
     match new.move_type {
@@ -1597,7 +1607,9 @@ async fn update_move(
     Json(req): Json<CreateMoveRequest>,
 ) -> Result<Json<MoveView>> {
     let service = MoveService::new(db);
-    authz.require(perm_create(service.move_type_of(id).await?)).await?;
+    authz
+        .require(perm_create(service.move_type_of(id).await?))
+        .await?;
     let before = service.view(id).await?;
     let after = service.update_draft(id, new_move(req, None)).await?;
     audit.0.updated("scm.move", id, &before, &after).await;
@@ -1614,7 +1626,9 @@ async fn delete_move(
     Path(id): Path<Uuid>,
 ) -> Result<Json<MoveView>> {
     let service = MoveService::new(db);
-    authz.require(perm_create(service.move_type_of(id).await?)).await?;
+    authz
+        .require(perm_create(service.move_type_of(id).await?))
+        .await?;
     let view = service.delete_draft(id).await?;
     audit.0.deleted("scm.move", view.id, &view).await;
     Ok(Json(view))
@@ -1633,7 +1647,9 @@ async fn post_move(
     Path(id): Path<Uuid>,
 ) -> Result<Json<MoveView>> {
     let service = MoveService::new(db);
-    authz.require(perm_post(service.move_type_of(id).await?)).await?;
+    authz
+        .require(perm_post(service.move_type_of(id).await?))
+        .await?;
     let gl = gl::Gl::new(events, tenant.map(|t| t.id));
     let view = service.post(id, &numbering, &gl).await?;
     audit

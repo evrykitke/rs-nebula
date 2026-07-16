@@ -12,8 +12,8 @@ use crate::scm::inventory::levels::{
 };
 use crate::scm::inventory::permissions::names;
 use nebula::{
-    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
-    ReportOutput, Result, Table,
+    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportOutput, Result,
+    Table,
 };
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -205,7 +205,9 @@ impl ReportDefinition for StockLedgerReport {
         }
 
         Ok(Report::new("Stock Ledger")
-            .subtitle(format!("Oldest {LEDGER_REPORT_ROWS} entries at most, in posting order"))
+            .subtitle(format!(
+                "Oldest {LEDGER_REPORT_ROWS} entries at most, in posting order"
+            ))
             .with(table.into_widget()))
     }
 }

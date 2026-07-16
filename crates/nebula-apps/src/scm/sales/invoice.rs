@@ -267,7 +267,10 @@ pub(crate) fn compute_totals(
             let net = round_money(line_amt / (Decimal::ONE + rate / Decimal::ONE_HUNDRED));
             (net, line_amt - net)
         } else {
-            (line_amt, round_money(line_amt * rate / Decimal::ONE_HUNDRED))
+            (
+                line_amt,
+                round_money(line_amt * rate / Decimal::ONE_HUNDRED),
+            )
         };
         subtotal += line_net;
         tax += line_tax;
@@ -344,7 +347,9 @@ impl InvoiceService {
             order_id: Set(Some(new.order_id)),
             invoice_date: Set(new.invoice_date),
             due_date: Set(new.due_date),
-            payment_terms_days: Set(new.payment_terms_days.or(Some(order_row.payment_terms_days))),
+            payment_terms_days: Set(new
+                .payment_terms_days
+                .or(Some(order_row.payment_terms_days))),
             currency: Set(order_row.currency.clone()),
             exchange_rate: Set(new.exchange_rate.unwrap_or(order_row.exchange_rate)),
             tax_inclusive: Set(new.tax_inclusive),
@@ -378,7 +383,9 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let existing = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&existing.status)? != InvoiceStatus::Draft {
-            return Err(Error::Validation("only a draft invoice can be edited".into()));
+            return Err(Error::Validation(
+                "only a draft invoice can be edited".into(),
+            ));
         }
         if existing.order_id != Some(new.order_id) {
             return Err(Error::Validation(
@@ -394,7 +401,9 @@ impl InvoiceService {
         let mut active: invoice::ActiveModel = existing.into();
         active.invoice_date = Set(new.invoice_date);
         active.due_date = Set(new.due_date);
-        active.payment_terms_days = Set(new.payment_terms_days.or(Some(order_row.payment_terms_days)));
+        active.payment_terms_days = Set(new
+            .payment_terms_days
+            .or(Some(order_row.payment_terms_days)));
         active.exchange_rate = Set(new.exchange_rate.unwrap_or(order_row.exchange_rate));
         active.tax_inclusive = Set(new.tax_inclusive);
         active.discount_pct = Set(new.discount_pct);
@@ -414,7 +423,9 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let existing = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&existing.status)? != InvoiceStatus::Draft {
-            return Err(Error::Validation("only a draft invoice can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft invoice can be deleted".into(),
+            ));
         }
         invoice::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -435,7 +446,9 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let invoice_row = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&invoice_row.status)? != InvoiceStatus::Draft {
-            return Err(Error::Validation("only a draft invoice can be posted".into()));
+            return Err(Error::Validation(
+                "only a draft invoice can be posted".into(),
+            ));
         }
         let order_id = invoice_row
             .order_id
@@ -444,7 +457,9 @@ impl InvoiceService {
 
         let lines = load_invoice_lines(&txn, id).await?;
         if lines.is_empty() {
-            return Err(Error::Validation("an invoice needs at least one line".into()));
+            return Err(Error::Validation(
+                "an invoice needs at least one line".into(),
+            ));
         }
         let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(&txn, order_id)
             .await?
@@ -501,7 +516,9 @@ impl InvoiceService {
         let tax_base = round_money(totals.tax * rate);
         let gross_base = round_money(totals.total * rate);
 
-        let number = numbering.next(&txn, crate::scm::SALES_INVOICE_SERIES).await?;
+        let number = numbering
+            .next(&txn, crate::scm::SALES_INVOICE_SERIES)
+            .await?;
         let now = chrono::Utc::now();
         let due_date = invoice_row.due_date.or_else(|| {
             invoice_row
@@ -554,7 +571,9 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let existing = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&existing.status)? != InvoiceStatus::Posted {
-            return Err(Error::Validation("only a posted invoice can be cancelled".into()));
+            return Err(Error::Validation(
+                "only a posted invoice can be cancelled".into(),
+            ));
         }
         let paid = super::payment::paid_amounts(&txn, &[id])
             .await?
@@ -672,8 +691,13 @@ impl InvoiceService {
             let status = InvoiceStatus::parse(&r.status)?;
             let cust = customers.get(&r.customer_id);
             let lines = load_invoice_lines(&self.db, r.id).await?;
-            let totals = totals_for(&self.db, &r, &lines, cust.map(|c| c.tax_exempt).unwrap_or(false))
-                .await?;
+            let totals = totals_for(
+                &self.db,
+                &r,
+                &lines,
+                cust.map(|c| c.tax_exempt).unwrap_or(false),
+            )
+            .await?;
             let paid_amt = paid.get(&r.id).copied().unwrap_or(Decimal::ZERO);
             let outstanding = if status == InvoiceStatus::Posted {
                 (totals.total - paid_amt).max(Decimal::ZERO)
@@ -745,14 +769,19 @@ impl InvoiceService {
                 let rate = if tax_exempt {
                     Decimal::ZERO
                 } else {
-                    l.tax_code_id.and_then(|id| rates.get(&id).copied()).unwrap_or(Decimal::ZERO)
+                    l.tax_code_id
+                        .and_then(|id| rates.get(&id).copied())
+                        .unwrap_or(Decimal::ZERO)
                 };
                 let line_amt = round_money(l.qty * effective_price(l.unit_price, l.discount_pct));
                 let (net, tax) = if row.tax_inclusive {
                     let n = round_money(line_amt / (Decimal::ONE + rate / Decimal::ONE_HUNDRED));
                     (n, line_amt - n)
                 } else {
-                    (line_amt, round_money(line_amt * rate / Decimal::ONE_HUNDRED))
+                    (
+                        line_amt,
+                        round_money(line_amt * rate / Decimal::ONE_HUNDRED),
+                    )
                 };
                 subtotal += net;
                 tax_total += tax;
@@ -843,13 +872,17 @@ async fn validate_invoice<C: ConnectionTrait>(
     new: &NewInvoice,
 ) -> Result<order::order::Model> {
     if new.lines.is_empty() {
-        return Err(Error::Validation("an invoice needs at least one line".into()));
+        return Err(Error::Validation(
+            "an invoice needs at least one line".into(),
+        ));
     }
     if new.exchange_rate.is_some_and(|r| r <= Decimal::ZERO) {
         return Err(Error::Validation("exchange rate must be positive".into()));
     }
     if new.payment_terms_days.is_some_and(|d| d < 0) {
-        return Err(Error::Validation("payment terms must not be negative".into()));
+        return Err(Error::Validation(
+            "payment terms must not be negative".into(),
+        ));
     }
     let order_row = load_order(conn, new.order_id).await?;
     let status = OrderStatus::parse(&order_row.status)?;
@@ -1027,9 +1060,16 @@ pub(crate) async fn totals_for<C: ConnectionTrait>(
 pub(crate) async fn invoice_total<C: ConnectionTrait>(conn: &C, id: Uuid) -> Result<Decimal> {
     let row = load_invoice(conn, id).await?;
     let lines = load_invoice_lines(conn, id).await?;
-    let customer = customer::Entity::find_by_id(row.customer_id).one(conn).await?;
-    let totals = totals_for(conn, &row, &lines, customer.map(|c| c.tax_exempt).unwrap_or(false))
+    let customer = customer::Entity::find_by_id(row.customer_id)
+        .one(conn)
         .await?;
+    let totals = totals_for(
+        conn,
+        &row,
+        &lines,
+        customer.map(|c| c.tax_exempt).unwrap_or(false),
+    )
+    .await?;
     Ok(totals.total)
 }
 

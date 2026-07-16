@@ -21,7 +21,9 @@ impl ReportDataSource for QuotationDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let record = QuotationService::new(db.clone()).view(cx.params.id()?).await?;
+        let record = QuotationService::new(db.clone())
+            .view(cx.params.id()?)
+            .await?;
         let party = party_of(cx, record.customer_id, &record.customer_name).await?;
         serde_json::to_value(Addressed { record, party })
             .map_err(|e| Error::internal(e.to_string()))
@@ -109,7 +111,7 @@ impl ReportDefinition for QuotationDocument {
 
         Ok(Document {
             title: "Quotation".to_string(),
-            number: q.number.clone(),
+            number: q.number.clone().into(),
             status: status_line(q.status.as_str(), None),
             party_label: "Quoted to",
             party: party_block(&party, &party.billing),

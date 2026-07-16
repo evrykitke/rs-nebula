@@ -16,13 +16,17 @@ pub mod goods_receipt;
 pub mod purchase_order;
 pub mod purchase_return;
 pub mod requisition;
+pub mod rfq;
 pub mod supplier_invoice;
+pub mod supplier_payment;
 
 pub use goods_receipt::GoodsReceiptDocument;
 pub use purchase_order::PurchaseOrderDocument;
 pub use purchase_return::PurchaseReturnDocument;
 pub use requisition::RequisitionDocument;
+pub use rfq::RfqDocument;
 pub use supplier_invoice::SupplierInvoiceDocument;
+pub use supplier_payment::SupplierPaymentDocument;
 
 use crate::scm::procurement::order::OrderService;
 use nebula::{DataCx, Result};

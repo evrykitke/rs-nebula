@@ -334,10 +334,7 @@ pub async fn redenominate(db: &DatabaseConnection, currency: &str) -> Result<boo
     }
 
     let accounts = account::Entity::update_many()
-        .col_expr(
-            account::Column::Currency,
-            Expr::value(currency.to_string()),
-        )
+        .col_expr(account::Column::Currency, Expr::value(currency.to_string()))
         .filter(account::Column::Currency.ne(currency))
         .exec(&txn)
         .await?;

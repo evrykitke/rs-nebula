@@ -23,7 +23,9 @@ use nebula::error::{Error, Result};
 use nebula::{Numbering, TenantDb, sea_orm};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseConnection, QueryOrder, QuerySelect, Set, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, QueryOrder, QuerySelect, Set, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -306,7 +308,12 @@ impl QuotationService {
 
     /// Send a draft to the customer: allocate the QUO number and freeze
     /// the offer.
-    pub async fn send(&self, id: Uuid, numbering: &Numbering, by: Option<Uuid>) -> Result<QuotationView> {
+    pub async fn send(
+        &self,
+        id: Uuid,
+        numbering: &Numbering,
+        by: Option<Uuid>,
+    ) -> Result<QuotationView> {
         let txn = self.db.begin().await?;
         let existing = load_quotation_locked(&txn, id).await?;
         if QuotationStatus::parse(&existing.status)? != QuotationStatus::Draft {
@@ -1111,7 +1118,11 @@ async fn update_quotation(
     let service = QuotationService::new(db);
     let before = service.view(id).await?;
     let after = service
-        .update_draft(id, new_quotation(req, None, allow_override), Some(authz.user.id))
+        .update_draft(
+            id,
+            new_quotation(req, None, allow_override),
+            Some(authz.user.id),
+        )
         .await?;
     audit.0.updated("scm.quotation", id, &before, &after).await;
     Ok(Json(after))

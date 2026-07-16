@@ -129,14 +129,22 @@ impl Module for ScmApp {
             (INVOICE_SERIES, "Purchase Invoice", "PINV-{YYYY}-{SEQ:5}"),
             (PAYMENT_SERIES, "Supplier Payment", "PAY-{YYYY}-{SEQ:5}"),
             (RETURN_SERIES, "Purchase Return", "RTS-{YYYY}-{SEQ:5}"),
-            (REQUISITION_SERIES, "Purchase Requisition", "REQ-{YYYY}-{SEQ:5}"),
+            (
+                REQUISITION_SERIES,
+                "Purchase Requisition",
+                "REQ-{YYYY}-{SEQ:5}",
+            ),
             (RFQ_SERIES, "Request for Quotation", "RFQ-{YYYY}-{SEQ:5}"),
             (SALES_QUOTATION_SERIES, "Quotation", "QUO-{YYYY}-{SEQ:5}"),
             (SALES_ORDER_SERIES, "Sales Order", "SO-{YYYY}-{SEQ:5}"),
             (SALES_DELIVERY_SERIES, "Delivery Note", "DN-{YYYY}-{SEQ:5}"),
             (SALES_INVOICE_SERIES, "Sales Invoice", "SINV-{YYYY}-{SEQ:5}"),
             (SALES_CREDIT_NOTE_SERIES, "Credit Note", "CN-{YYYY}-{SEQ:5}"),
-            (SALES_PAYMENT_SERIES, "Customer Payment", "RCT-{YYYY}-{SEQ:5}"),
+            (
+                SALES_PAYMENT_SERIES,
+                "Customer Payment",
+                "RCT-{YYYY}-{SEQ:5}",
+            ),
         ] {
             ctx.declare_series(
                 SeriesDef::new(key, name, template, Reset::Yearly)
@@ -206,6 +214,8 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(procurement::documents::GoodsReceiptDocument));
         ctx.declare_report(Arc::new(procurement::documents::SupplierInvoiceDocument));
         ctx.declare_report(Arc::new(procurement::documents::PurchaseReturnDocument));
+        ctx.declare_report(Arc::new(procurement::documents::RfqDocument));
+        ctx.declare_report(Arc::new(procurement::documents::SupplierPaymentDocument));
         ctx.declare_report(Arc::new(procurement::reports::GrniReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierBalancesReport));
         ctx.declare_report(Arc::new(procurement::reports::SupplierScorecardReport));
@@ -214,6 +224,8 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(sales::documents::DeliveryNoteDocument));
         ctx.declare_report(Arc::new(sales::documents::SalesInvoiceDocument));
         ctx.declare_report(Arc::new(sales::documents::CreditNoteDocument));
+        ctx.declare_report(Arc::new(sales::documents::CustomerReceiptDocument));
+        ctx.declare_report(Arc::new(sales::documents::CustomerStatementDocument));
         ctx.declare_report(Arc::new(sales::reports::ArAgingReport));
         ctx.declare_report(Arc::new(sales::reports::DeliveredNotBilledReport));
         ctx.declare_report(Arc::new(sales::reports::SalesRegisterReport));

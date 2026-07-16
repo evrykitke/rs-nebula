@@ -75,7 +75,11 @@ impl ReportDefinition for SalesOrderDocument {
 
         // The order's own shipping address wins over the customer's default:
         // this order may be going somewhere else.
-        let ship_to = match o.shipping_address.as_deref().filter(|s| !s.trim().is_empty()) {
+        let ship_to = match o
+            .shipping_address
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             Some(a) => a.lines().map(|l| l.trim().to_string()).collect(),
             None if !party.shipping.is_empty() => party.shipping.clone(),
             None => vec![format!("Warehouse {}", o.warehouse_code)],
@@ -127,7 +131,7 @@ impl ReportDefinition for SalesOrderDocument {
 
         Ok(Document {
             title: "Sales Order".to_string(),
-            number: o.number.clone(),
+            number: o.number.clone().into(),
             status: status_line(o.status.as_str(), o.cancel_reason.as_deref()),
             party_label: "Customer",
             party: party_block(&party, &party.billing),

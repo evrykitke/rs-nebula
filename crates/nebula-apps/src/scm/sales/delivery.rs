@@ -69,7 +69,9 @@ impl DeliveryStatus {
             "draft" => Ok(DeliveryStatus::Draft),
             "posted" => Ok(DeliveryStatus::Posted),
             "reversed" => Ok(DeliveryStatus::Reversed),
-            other => Err(Error::internal(format!("unknown delivery status {other:?}"))),
+            other => Err(Error::internal(format!(
+                "unknown delivery status {other:?}"
+            ))),
         }
     }
 }
@@ -222,7 +224,9 @@ impl DeliveryService {
         let txn = self.db.begin().await?;
         let existing = load_delivery_locked(&txn, id).await?;
         if DeliveryStatus::parse(&existing.status)? != DeliveryStatus::Draft {
-            return Err(Error::Validation("only a draft delivery can be edited".into()));
+            return Err(Error::Validation(
+                "only a draft delivery can be edited".into(),
+            ));
         }
         if existing.order_id != new.order_id {
             return Err(Error::Validation(
@@ -256,7 +260,9 @@ impl DeliveryService {
         let txn = self.db.begin().await?;
         let existing = load_delivery_locked(&txn, id).await?;
         if DeliveryStatus::parse(&existing.status)? != DeliveryStatus::Draft {
-            return Err(Error::Validation("only a draft delivery can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft delivery can be deleted".into(),
+            ));
         }
         delivery::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -271,7 +277,9 @@ impl DeliveryService {
         let txn = self.db.begin().await?;
         let delivery_row = load_delivery_locked(&txn, id).await?;
         if DeliveryStatus::parse(&delivery_row.status)? != DeliveryStatus::Draft {
-            return Err(Error::Validation("only a draft delivery can be posted".into()));
+            return Err(Error::Validation(
+                "only a draft delivery can be posted".into(),
+            ));
         }
         let order_row = load_order_locked(&txn, delivery_row.order_id).await?;
         let order_status = OrderStatus::parse(&order_row.status)?;
@@ -285,7 +293,9 @@ impl DeliveryService {
 
         let lines = load_delivery_lines(&txn, id).await?;
         if lines.is_empty() {
-            return Err(Error::Validation("a delivery needs at least one line".into()));
+            return Err(Error::Validation(
+                "a delivery needs at least one line".into(),
+            ));
         }
         let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(&txn, order_row.id)
             .await?
@@ -348,7 +358,12 @@ impl DeliveryService {
         let mut gates: Vec<(Uuid, Uuid)> = lines
             .iter()
             .filter_map(|l| order_lines.get(&l.order_line_id))
-            .map(|ol| (ol.item_id, ol.warehouse_id.unwrap_or(order_row.warehouse_id)))
+            .map(|ol| {
+                (
+                    ol.item_id,
+                    ol.warehouse_id.unwrap_or(order_row.warehouse_id),
+                )
+            })
             .collect();
         gates.sort();
         gates.dedup();
@@ -485,7 +500,9 @@ impl DeliveryService {
         recompute_status(&txn, load_order_locked(&txn, order_row.id).await?).await?;
 
         // 4. Number both papers from the DN series, freeze the delivery.
-        let number = numbering.next(&txn, crate::scm::SALES_DELIVERY_SERIES).await?;
+        let number = numbering
+            .next(&txn, crate::scm::SALES_DELIVERY_SERIES)
+            .await?;
         let mut mv: move_doc::ActiveModel = move_doc::Entity::find_by_id(move_id)
             .one(&txn)
             .await?
@@ -764,8 +781,7 @@ impl DeliveryService {
         // The counters walk back: delivered down, and what returns to a
         // still-open order re-reserves so it stays committed.
         let order_status = OrderStatus::parse(&order_row.status)?;
-        let reopen = order_status.deliverable()
-            || matches!(order_status, OrderStatus::Delivered);
+        let reopen = order_status.deliverable() || matches!(order_status, OrderStatus::Delivered);
         for (ol_id, qty) in &delivering {
             let ol = order_lines[ol_id].clone();
             let item_id = ol.item_id;
@@ -784,7 +800,9 @@ impl DeliveryService {
         recompute_status(&txn, load_order_locked(&txn, order_row.id).await?).await?;
 
         // Number and link everything.
-        let number = numbering.next(&txn, crate::scm::SALES_DELIVERY_SERIES).await?;
+        let number = numbering
+            .next(&txn, crate::scm::SALES_DELIVERY_SERIES)
+            .await?;
         let mut mv: move_doc::ActiveModel = move_doc::Entity::find_by_id(reversal_move_id)
             .one(&txn)
             .await?
@@ -974,7 +992,9 @@ fn clean(v: Option<String>) -> Option<String> {
 /// at post under the order lock).
 async fn validate_delivery<C: ConnectionTrait>(conn: &C, new: &NewDelivery) -> Result<()> {
     if new.lines.is_empty() {
-        return Err(Error::Validation("a delivery needs at least one line".into()));
+        return Err(Error::Validation(
+            "a delivery needs at least one line".into(),
+        ));
     }
     let order_row = load_order(conn, new.order_id).await?;
     let status = OrderStatus::parse(&order_row.status)?;

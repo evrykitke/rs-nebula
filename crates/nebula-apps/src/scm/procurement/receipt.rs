@@ -233,7 +233,9 @@ impl ReceiptService {
         let txn = self.db.begin().await?;
         let existing = load_receipt_locked(&txn, id).await?;
         if ReceiptStatus::parse(&existing.status)? != ReceiptStatus::Draft {
-            return Err(Error::Validation("only a draft receipt can be edited".into()));
+            return Err(Error::Validation(
+                "only a draft receipt can be edited".into(),
+            ));
         }
         if existing.order_id != new.order_id {
             return Err(Error::Validation(
@@ -267,7 +269,9 @@ impl ReceiptService {
         let txn = self.db.begin().await?;
         let existing = load_receipt_locked(&txn, id).await?;
         if ReceiptStatus::parse(&existing.status)? != ReceiptStatus::Draft {
-            return Err(Error::Validation("only a draft receipt can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft receipt can be deleted".into(),
+            ));
         }
         receipt::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -281,7 +285,9 @@ impl ReceiptService {
         let txn = self.db.begin().await?;
         let receipt_row = load_receipt_locked(&txn, id).await?;
         if ReceiptStatus::parse(&receipt_row.status)? != ReceiptStatus::Draft {
-            return Err(Error::Validation("only a draft receipt can be posted".into()));
+            return Err(Error::Validation(
+                "only a draft receipt can be posted".into(),
+            ));
         }
         let order_row = load_order_locked(&txn, receipt_row.order_id).await?;
         let order_status = OrderStatus::parse(&order_row.status)?;
@@ -295,14 +301,15 @@ impl ReceiptService {
 
         let lines = load_receipt_lines(&txn, id).await?;
         if lines.is_empty() {
-            return Err(Error::Validation("a receipt needs at least one line".into()));
+            return Err(Error::Validation(
+                "a receipt needs at least one line".into(),
+            ));
         }
-        let order_lines: HashMap<Uuid, order_line::Model> =
-            load_order_lines(&txn, order_row.id)
-                .await?
-                .into_iter()
-                .map(|l| (l.id, l))
-                .collect();
+        let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(&txn, order_row.id)
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l))
+            .collect();
 
         // 1. Validate quantities against the PO's remaining balance,
         //    accumulating per order line so two receipt lines against the
@@ -428,9 +435,8 @@ impl ReceiptService {
                 Vec::new()
             };
 
-            let unit_cost = stock::round_cost(
-                effective_price(ol.unit_price, ol.discount_pct) * rate,
-            );
+            let unit_cost =
+                stock::round_cost(effective_price(ol.unit_price, ol.discount_pct) * rate);
             let ml = move_line::ActiveModel {
                 id: Set(Uuid::new_v4()),
                 move_id: Set(move_id),
@@ -496,7 +502,15 @@ impl ReceiptService {
 
         // 4. Last-price memory: the catalog row and the item master learn
         //    what we actually paid.
-        maintain_price_memory(&txn, &order_row, &order_lines, &receiving, rate, receipt_row.receipt_date).await?;
+        maintain_price_memory(
+            &txn,
+            &order_row,
+            &order_lines,
+            &receiving,
+            rate,
+            receipt_row.receipt_date,
+        )
+        .await?;
 
         // 5. Freeze the receipt with the shared GRN number.
         let number = numbering.next(&txn, crate::scm::RECEIPT_SERIES).await?;
@@ -563,12 +577,11 @@ impl ReceiptService {
         }
         let order_row = load_order_locked(&txn, original.order_id).await?;
         let lines = load_receipt_lines(&txn, id).await?;
-        let order_lines: HashMap<Uuid, order_line::Model> =
-            load_order_lines(&txn, order_row.id)
-                .await?
-                .into_iter()
-                .map(|l| (l.id, l))
-                .collect();
+        let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(&txn, order_row.id)
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l))
+            .collect();
 
         // Billing is an outer commitment: what has been billed cannot be
         // silently un-received.
@@ -577,9 +590,9 @@ impl ReceiptService {
             *reversing.entry(line.order_line_id).or_default() += line.qty;
         }
         for (ol_id, qty) in &reversing {
-            let ol = order_lines.get(ol_id).ok_or_else(|| {
-                Error::internal("receipt line lost its order line")
-            })?;
+            let ol = order_lines
+                .get(ol_id)
+                .ok_or_else(|| Error::internal("receipt line lost its order line"))?;
             if ol.billed_qty > ol.received_qty - qty {
                 return Err(Error::Validation(format!(
                     "order line {} has been billed for {}; cancel the invoice before reversing",
@@ -1034,7 +1047,9 @@ fn clean(v: Option<String>) -> Option<String> {
 /// at one of its lines, quantities are sane.
 async fn validate_receipt<C: ConnectionTrait>(conn: &C, new: &NewReceipt) -> Result<()> {
     if new.lines.is_empty() {
-        return Err(Error::Validation("a receipt needs at least one line".into()));
+        return Err(Error::Validation(
+            "a receipt needs at least one line".into(),
+        ));
     }
     if new.exchange_rate.is_some_and(|r| r <= Decimal::ZERO) {
         return Err(Error::Validation("exchange rate must be positive".into()));

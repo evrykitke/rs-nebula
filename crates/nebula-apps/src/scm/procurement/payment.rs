@@ -256,7 +256,9 @@ impl PaymentService {
         let txn = self.db.begin().await?;
         let existing = load_payment_locked(&txn, id).await?;
         if PaymentStatus::parse(&existing.status)? != PaymentStatus::Draft {
-            return Err(Error::Validation("only a draft payment can be edited".into()));
+            return Err(Error::Validation(
+                "only a draft payment can be edited".into(),
+            ));
         }
         payment_allocation::Entity::delete_many()
             .filter(payment_allocation::Column::PaymentId.eq(id))
@@ -283,7 +285,9 @@ impl PaymentService {
         let txn = self.db.begin().await?;
         let existing = load_payment_locked(&txn, id).await?;
         if PaymentStatus::parse(&existing.status)? != PaymentStatus::Draft {
-            return Err(Error::Validation("only a draft payment can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft payment can be deleted".into(),
+            ));
         }
         payment::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -304,7 +308,9 @@ impl PaymentService {
         let txn = self.db.begin().await?;
         let payment_row = load_payment_locked(&txn, id).await?;
         if PaymentStatus::parse(&payment_row.status)? != PaymentStatus::Draft {
-            return Err(Error::Validation("only a draft payment can be posted".into()));
+            return Err(Error::Validation(
+                "only a draft payment can be posted".into(),
+            ));
         }
         let allocations = load_allocations(&txn, id).await?;
         if allocations.is_empty() {
@@ -347,7 +353,10 @@ impl PaymentService {
                 )));
             }
             let (_, total) = invoice::invoice_totals(&txn, *invoice_id).await?;
-            let paid = already_paid.get(invoice_id).copied().unwrap_or(Decimal::ZERO);
+            let paid = already_paid
+                .get(invoice_id)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
             if round_money(paid + *allocated) > total {
                 return Err(Error::Validation(format!(
                     "invoice {} has {} outstanding; cannot allocate {}",
@@ -397,7 +406,9 @@ impl PaymentService {
         let txn = self.db.begin().await?;
         let existing = load_payment_locked(&txn, id).await?;
         if PaymentStatus::parse(&existing.status)? != PaymentStatus::Posted {
-            return Err(Error::Validation("only a posted payment can be reversed".into()));
+            return Err(Error::Validation(
+                "only a posted payment can be reversed".into(),
+            ));
         }
         let now = chrono::Utc::now();
         let request = gl::purchase_payment_request(
@@ -497,7 +508,9 @@ impl PaymentService {
                 id: a.id,
                 invoice_id: a.invoice_id,
                 invoice_number: inv.and_then(|i| i.number.clone()),
-                supplier_invoice_no: inv.map(|i| i.supplier_invoice_no.clone()).unwrap_or_default(),
+                supplier_invoice_no: inv
+                    .map(|i| i.supplier_invoice_no.clone())
+                    .unwrap_or_default(),
                 invoice_total: total,
                 amount: a.amount,
             });
@@ -545,7 +558,9 @@ async fn validate_payment<C: ConnectionTrait>(conn: &C, new: &NewPayment) -> Res
         return Err(Error::Validation("a payment currency is required".into()));
     }
     if new.amount <= Decimal::ZERO {
-        return Err(Error::Validation("the payment amount must be positive".into()));
+        return Err(Error::Validation(
+            "the payment amount must be positive".into(),
+        ));
     }
     if new.exchange_rate.is_some_and(|r| r <= Decimal::ZERO) {
         return Err(Error::Validation("exchange rate must be positive".into()));
@@ -603,7 +618,10 @@ async fn validate_payment<C: ConnectionTrait>(conn: &C, new: &NewPayment) -> Res
             )));
         }
         let (_, total) = invoice::invoice_totals(conn, a.invoice_id).await?;
-        let paid = already_paid.get(&a.invoice_id).copied().unwrap_or(Decimal::ZERO);
+        let paid = already_paid
+            .get(&a.invoice_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
         if round_money(paid + a.amount) > total {
             return Err(Error::Validation(format!(
                 "allocation {line_no}: invoice {} has only {} outstanding",

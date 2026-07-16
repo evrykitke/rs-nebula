@@ -11,8 +11,8 @@ use crate::accounting::ledger::{
 };
 use crate::accounting::permissions::names;
 use nebula::{
-    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
-    ReportOutput, Result, Table,
+    Column, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportOutput, Result,
+    Table,
 };
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -256,7 +256,10 @@ fn section_rows(mut table: Table, section: &StatementSection) -> Table {
     for line in &section.lines {
         table = table.row([format!("  {} {}", line.code, line.name), money(line.amount)]);
     }
-    table.row([format!("Total {}", section.title.to_lowercase()), money(section.total)])
+    table.row([
+        format!("Total {}", section.title.to_lowercase()),
+        money(section.total),
+    ])
 }
 
 /// Blank for zero, otherwise the amount to two decimals — the accounting

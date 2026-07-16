@@ -712,7 +712,9 @@ async fn create_group(
     Json(body): Json<GroupBody>,
 ) -> Result<Json<group::Model>> {
     authz.require(names::CUSTOMERS_CREATE).await?;
-    let row = Store::new(db).create_group(body, Some(authz.user.id)).await?;
+    let row = Store::new(db)
+        .create_group(body, Some(authz.user.id))
+        .await?;
     audit.0.created("scm.customer_group", row.id, &row).await;
     Ok(Json(row))
 }

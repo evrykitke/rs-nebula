@@ -22,7 +22,9 @@ impl ReportDataSource for DeliveryDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let record = DeliveryService::new(db.clone()).view(cx.params.id()?).await?;
+        let record = DeliveryService::new(db.clone())
+            .view(cx.params.id()?)
+            .await?;
         let party = party_of(cx, record.customer_id, &record.customer_name).await?;
         serde_json::to_value(Addressed { record, party })
             .map_err(|e| Error::internal(e.to_string()))
@@ -69,7 +71,11 @@ impl ReportDefinition for DeliveryNoteDocument {
             }
         }
 
-        let ship_to = match d.shipping_address.as_deref().filter(|s| !s.trim().is_empty()) {
+        let ship_to = match d
+            .shipping_address
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             Some(a) => a.lines().map(|l| l.trim().to_string()).collect(),
             None => party.shipping.clone(),
         };
@@ -117,7 +123,7 @@ impl ReportDefinition for DeliveryNoteDocument {
 
         Ok(Document {
             title: "Delivery Note".to_string(),
-            number: d.number.clone(),
+            number: d.number.clone().into(),
             status: status_line(d.status.as_str(), None),
             party_label: "Customer",
             party: party_block(&party, &party.billing),
@@ -133,7 +139,11 @@ impl ReportDefinition for DeliveryNoteDocument {
                 Signature::new("Delivered by").dated(),
                 // Printing the expected recipient's name where it is known
                 // gives the driver someone to ask for.
-                match d.received_by_name.as_deref().filter(|s| !s.trim().is_empty()) {
+                match d
+                    .received_by_name
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                {
                     Some(name) => Signature::new("Received by").name(name).dated(),
                     None => Signature::new("Received by").dated(),
                 },

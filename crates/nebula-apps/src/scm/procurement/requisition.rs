@@ -288,7 +288,12 @@ impl RequisitionService {
     }
 
     /// Reject a submitted requisition, keeping the reason.
-    pub async fn reject(&self, id: Uuid, reason: &str, by: Option<Uuid>) -> Result<RequisitionView> {
+    pub async fn reject(
+        &self,
+        id: Uuid,
+        reason: &str,
+        by: Option<Uuid>,
+    ) -> Result<RequisitionView> {
         let txn = self.db.begin().await?;
         let existing = load_requisition_locked(&txn, id).await?;
         if RequisitionStatus::parse(&existing.status)? != RequisitionStatus::Submitted {
@@ -353,11 +358,14 @@ impl RequisitionService {
                 "a requisition needs at least one line".into(),
             ));
         }
-        let order_lines =
-            price_lines(&self.db, supplier_id, lines.iter().map(|l| {
-                (l.item_id, l.qty, l.needed_by, l.memo.clone())
-            }))
-            .await?;
+        let order_lines = price_lines(
+            &self.db,
+            supplier_id,
+            lines
+                .iter()
+                .map(|l| (l.item_id, l.qty, l.needed_by, l.memo.clone())),
+        )
+        .await?;
 
         let order_service = OrderService::new(self.db.clone());
         let order = order_service
@@ -376,7 +384,10 @@ impl RequisitionService {
                 discount_pct: None,
                 discount_amount: None,
                 other_charges: None,
-                memo: existing.number.as_deref().map(|n| format!("From requisition {n}")),
+                memo: existing
+                    .number
+                    .as_deref()
+                    .map(|n| format!("From requisition {n}")),
                 reference: existing.number.clone(),
                 terms_and_conditions: None,
                 lines: order_lines,
@@ -468,12 +479,10 @@ impl RequisitionService {
             .map(|u| (u.id, u))
             .collect();
         let order_number = match row.order_id {
-            Some(order_id) => {
-                crate::scm::procurement::order::order::Entity::find_by_id(order_id)
-                    .one(&self.db)
-                    .await?
-                    .and_then(|o| o.number)
-            }
+            Some(order_id) => crate::scm::procurement::order::order::Entity::find_by_id(order_id)
+                .one(&self.db)
+                .await?
+                .and_then(|o| o.number),
             None => None,
         };
 
@@ -585,7 +594,9 @@ async fn validate_requisition<C: ConnectionTrait>(conn: &C, new: &NewRequisition
             "a requisition needs at least one line".into(),
         ));
     }
-    let wh = warehouse::Entity::find_by_id(new.warehouse_id).one(conn).await?;
+    let wh = warehouse::Entity::find_by_id(new.warehouse_id)
+        .one(conn)
+        .await?;
     match wh {
         Some(w) if w.is_active => {}
         Some(w) => {
@@ -926,7 +937,10 @@ async fn update_requisition(
     let service = RequisitionService::new(db);
     let before = service.view(id).await?;
     let after = service.update_draft(id, new_requisition(req, None)).await?;
-    audit.0.updated("scm.requisition", id, &before, &after).await;
+    audit
+        .0
+        .updated("scm.requisition", id, &before, &after)
+        .await;
     Ok(Json(after))
 }
 

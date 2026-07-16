@@ -361,7 +361,11 @@ impl RfqService {
                 "the supplier was not invited to this RFQ".into(),
             ));
         }
-        let line_ids: HashSet<Uuid> = load_lines(&txn, id).await?.into_iter().map(|l| l.id).collect();
+        let line_ids: HashSet<Uuid> = load_lines(&txn, id)
+            .await?
+            .into_iter()
+            .map(|l| l.id)
+            .collect();
         let now = chrono::Utc::now();
         for q in &quotes {
             if !line_ids.contains(&q.rfq_line_id) {
@@ -371,7 +375,9 @@ impl RfqService {
                 )));
             }
             if q.unit_price < Decimal::ZERO {
-                return Err(Error::Validation("a quoted price must not be negative".into()));
+                return Err(Error::Validation(
+                    "a quoted price must not be negative".into(),
+                ));
             }
             let existing_quote = rfq_quote::Entity::find()
                 .filter(rfq_quote::Column::RfqLineId.eq(q.rfq_line_id))
@@ -430,7 +436,10 @@ impl RfqService {
         let txn = self.db.begin().await?;
         let existing = load_rfq_locked(&txn, id).await?;
         let status = RfqStatus::parse(&existing.status)?;
-        if !matches!(status, RfqStatus::Draft | RfqStatus::Sent | RfqStatus::Closed) {
+        if !matches!(
+            status,
+            RfqStatus::Draft | RfqStatus::Sent | RfqStatus::Closed
+        ) {
             return Err(Error::Validation(format!(
                 "a {} RFQ cannot be cancelled",
                 status.as_str()
@@ -486,7 +495,11 @@ impl RfqService {
             .collect();
 
         let linked_requisition = match existing.requisition_id {
-            Some(rid) => requisition_entity::Entity::find_by_id(rid).one(&self.db).await?,
+            Some(rid) => {
+                requisition_entity::Entity::find_by_id(rid)
+                    .one(&self.db)
+                    .await?
+            }
             None => None,
         };
         let deliver_to = warehouse_id
@@ -537,7 +550,10 @@ impl RfqService {
                 discount_pct: None,
                 discount_amount: None,
                 other_charges: None,
-                memo: existing.number.as_deref().map(|n| format!("Awarded from {n}")),
+                memo: existing
+                    .number
+                    .as_deref()
+                    .map(|n| format!("Awarded from {n}")),
                 reference: existing.number.clone(),
                 terms_and_conditions: None,
                 lines: order_lines,
@@ -649,12 +665,10 @@ impl RfqService {
             None => None,
         };
         let order_number = match row.order_id {
-            Some(order_id) => {
-                crate::scm::procurement::order::order::Entity::find_by_id(order_id)
-                    .one(&self.db)
-                    .await?
-                    .and_then(|o| o.number)
-            }
+            Some(order_id) => crate::scm::procurement::order::order::Entity::find_by_id(order_id)
+                .one(&self.db)
+                .await?
+                .and_then(|o| o.number),
             None => None,
         };
 
@@ -1164,10 +1178,7 @@ async fn send_rfq(
         .await?;
     audit
         .0
-        .event(format!(
-            "sent RFQ {}",
-            view.number.as_deref().unwrap_or("")
-        ))
+        .event(format!("sent RFQ {}", view.number.as_deref().unwrap_or("")))
         .await;
     Ok(Json(view))
 }

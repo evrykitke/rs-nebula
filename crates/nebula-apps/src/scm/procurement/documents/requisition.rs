@@ -21,7 +21,9 @@ impl ReportDataSource for RequisitionDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let view = RequisitionService::new(db.clone()).view(cx.params.id()?).await?;
+        let view = RequisitionService::new(db.clone())
+            .view(cx.params.id()?)
+            .await?;
         serde_json::to_value(view).map_err(|e| Error::internal(e.to_string()))
     }
 }
@@ -80,7 +82,7 @@ impl ReportDefinition for RequisitionDocument {
 
         Ok(Document {
             title: "Purchase Requisition".to_string(),
-            number: r.number.clone(),
+            number: r.number.clone().into(),
             status: status_line(r.status.as_str(), r.reject_reason.as_deref()),
             party_label: "For",
             party: vec![format!("Warehouse {}", r.warehouse_code)],

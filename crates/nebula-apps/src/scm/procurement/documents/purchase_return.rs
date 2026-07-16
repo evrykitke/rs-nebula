@@ -23,8 +23,11 @@ impl ReportDataSource for ReturnDataSource {
         let db = cx.require_db()?;
         let record = ReturnService::new(db.clone()).view(cx.params.id()?).await?;
         let supplier_name = supplier_of(cx, record.order_id).await?;
-        serde_json::to_value(WithSupplier { record, supplier_name })
-            .map_err(|e| Error::internal(e.to_string()))
+        serde_json::to_value(WithSupplier {
+            record,
+            supplier_name,
+        })
+        .map_err(|e| Error::internal(e.to_string()))
     }
 }
 
@@ -51,7 +54,10 @@ impl ReportDefinition for PurchaseReturnDocument {
     }
 
     fn build(&self, data: &ReportData) -> Result<Report> {
-        let WithSupplier { record: r, supplier_name } = data.get::<WithSupplier<ReturnView>>(KEY)?;
+        let WithSupplier {
+            record: r,
+            supplier_name,
+        } = data.get::<WithSupplier<ReturnView>>(KEY)?;
 
         let mut meta = vec![KeyValue::new("Return date", date(r.return_date))];
         if let Some(o) = r.order_number.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -104,7 +110,7 @@ impl ReportDefinition for PurchaseReturnDocument {
 
         Ok(Document {
             title: "Purchase Return".to_string(),
-            number: r.number.clone(),
+            number: r.number.clone().into(),
             status: r.status.as_str().replace('_', " "),
             party_label: "Return to",
             party: vec![supplier_name],

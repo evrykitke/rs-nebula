@@ -207,7 +207,9 @@ impl ReturnService {
         let txn = self.db.begin().await?;
         let existing = load_return_locked(&txn, id).await?;
         if ReturnStatus::parse(&existing.status)? != ReturnStatus::Draft {
-            return Err(Error::Validation("only a draft return can be edited".into()));
+            return Err(Error::Validation(
+                "only a draft return can be edited".into(),
+            ));
         }
         if existing.order_id != new.order_id {
             return Err(Error::Validation(
@@ -238,7 +240,9 @@ impl ReturnService {
         let txn = self.db.begin().await?;
         let existing = load_return_locked(&txn, id).await?;
         if ReturnStatus::parse(&existing.status)? != ReturnStatus::Draft {
-            return Err(Error::Validation("only a draft return can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft return can be deleted".into(),
+            ));
         }
         preturn::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -252,7 +256,9 @@ impl ReturnService {
         let txn = self.db.begin().await?;
         let return_row = load_return_locked(&txn, id).await?;
         if ReturnStatus::parse(&return_row.status)? != ReturnStatus::Draft {
-            return Err(Error::Validation("only a draft return can be posted".into()));
+            return Err(Error::Validation(
+                "only a draft return can be posted".into(),
+            ));
         }
         let order_row = load_order_locked(&txn, return_row.order_id).await?;
         let order_status = OrderStatus::parse(&order_row.status)?;
@@ -271,12 +277,11 @@ impl ReturnService {
         if lines.is_empty() {
             return Err(Error::Validation("a return needs at least one line".into()));
         }
-        let order_lines: HashMap<Uuid, order_line::Model> =
-            load_order_lines(&txn, order_row.id)
-                .await?
-                .into_iter()
-                .map(|l| (l.id, l))
-                .collect();
+        let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(&txn, order_row.id)
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l))
+            .collect();
 
         // Only the unbilled received balance can go back, accumulated per
         // order line so two return lines cannot slip past together.
@@ -368,8 +373,7 @@ impl ReturnService {
             let batch_id = match (&line.batch_no, item.track_batches) {
                 (Some(no), _) => {
                     let b = batch::find_batch(&txn, item, no).await?;
-                    let in_lot =
-                        batch::batch_on_hand(&txn, item.id, warehouse_id, b.id).await?;
+                    let in_lot = batch::batch_on_hand(&txn, item.id, warehouse_id, b.id).await?;
                     if in_lot < line.qty {
                         return Err(Error::Validation(format!(
                             "line {}: batch {} of {} holds {} here, cannot return {}",
@@ -445,7 +449,8 @@ impl ReturnService {
             }
 
             grni_relief += stock::round_money(
-                line.qty * stock::round_cost(effective_price(ol.unit_price, ol.discount_pct) * rate),
+                line.qty
+                    * stock::round_cost(effective_price(ol.unit_price, ol.discount_pct) * rate),
             );
         }
 
@@ -530,12 +535,11 @@ impl ReturnService {
         }
         let order_row = load_order_locked(&txn, original.order_id).await?;
         let lines = load_return_lines(&txn, id).await?;
-        let order_lines: HashMap<Uuid, order_line::Model> =
-            load_order_lines(&txn, order_row.id)
-                .await?
-                .into_iter()
-                .map(|l| (l.id, l))
-                .collect();
+        let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(&txn, order_row.id)
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l))
+            .collect();
         let mut returning: HashMap<Uuid, Decimal> = HashMap::new();
         for line in &lines {
             *returning.entry(line.order_line_id).or_default() += line.qty;

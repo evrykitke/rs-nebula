@@ -22,7 +22,9 @@ impl ReportDataSource for SupplierInvoiceDataSource {
     }
     async fn load(&self, cx: &DataCx<'_>) -> Result<serde_json::Value> {
         let db = cx.require_db()?;
-        let view = InvoiceService::new(db.clone()).view(cx.params.id()?).await?;
+        let view = InvoiceService::new(db.clone())
+            .view(cx.params.id()?)
+            .await?;
         serde_json::to_value(view).map_err(|e| Error::internal(e.to_string()))
     }
 }
@@ -120,7 +122,7 @@ impl ReportDefinition for SupplierInvoiceDocument {
 
         Ok(Document {
             title: "Supplier Invoice".to_string(),
-            number: i.number.clone(),
+            number: i.number.clone().into(),
             status: status_line(i.status.as_str(), i.cancel_reason.as_deref()),
             party_label: "Supplier",
             party: vec![i.supplier_name.clone()],

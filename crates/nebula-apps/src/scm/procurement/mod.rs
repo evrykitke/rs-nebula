@@ -92,8 +92,14 @@ pub mod permissions {
             .child(
                 PermissionDef::new(REQUISITIONS, "Purchase requisitions")
                     .child(PermissionDef::new(REQUISITIONS_VIEW, "View requisitions"))
-                    .child(PermissionDef::new(REQUISITIONS_CREATE, "Create requisitions"))
-                    .child(PermissionDef::new(REQUISITIONS_SUBMIT, "Submit requisitions"))
+                    .child(PermissionDef::new(
+                        REQUISITIONS_CREATE,
+                        "Create requisitions",
+                    ))
+                    .child(PermissionDef::new(
+                        REQUISITIONS_SUBMIT,
+                        "Submit requisitions",
+                    ))
                     .child(PermissionDef::new(
                         REQUISITIONS_APPROVE,
                         "Approve requisitions",
@@ -116,7 +122,10 @@ pub mod permissions {
                     .child(PermissionDef::new(ORDERS_VIEW, "View purchase orders"))
                     .child(PermissionDef::new(ORDERS_CREATE, "Create purchase orders"))
                     .child(PermissionDef::new(ORDERS_SUBMIT, "Submit purchase orders"))
-                    .child(PermissionDef::new(ORDERS_APPROVE, "Approve purchase orders"))
+                    .child(PermissionDef::new(
+                        ORDERS_APPROVE,
+                        "Approve purchase orders",
+                    ))
                     .child(PermissionDef::new(ORDERS_CANCEL, "Cancel purchase orders")),
             )
             .child(
@@ -124,12 +133,18 @@ pub mod permissions {
                     .child(PermissionDef::new(RECEIPTS_VIEW, "View goods receipts"))
                     .child(PermissionDef::new(RECEIPTS_CREATE, "Create goods receipts"))
                     .child(PermissionDef::new(RECEIPTS_POST, "Post goods receipts"))
-                    .child(PermissionDef::new(RECEIPTS_REVERSE, "Reverse goods receipts")),
+                    .child(PermissionDef::new(
+                        RECEIPTS_REVERSE,
+                        "Reverse goods receipts",
+                    )),
             )
             .child(
                 PermissionDef::new(RETURNS, "Purchase returns")
                     .child(PermissionDef::new(RETURNS_VIEW, "View purchase returns"))
-                    .child(PermissionDef::new(RETURNS_CREATE, "Create purchase returns"))
+                    .child(PermissionDef::new(
+                        RETURNS_CREATE,
+                        "Create purchase returns",
+                    ))
                     .child(PermissionDef::new(RETURNS_POST, "Post purchase returns"))
                     .child(PermissionDef::new(
                         RETURNS_REVERSE,
@@ -139,7 +154,10 @@ pub mod permissions {
             .child(
                 PermissionDef::new(INVOICES, "Purchase invoices")
                     .child(PermissionDef::new(INVOICES_VIEW, "View purchase invoices"))
-                    .child(PermissionDef::new(INVOICES_CREATE, "Create purchase invoices"))
+                    .child(PermissionDef::new(
+                        INVOICES_CREATE,
+                        "Create purchase invoices",
+                    ))
                     .child(PermissionDef::new(INVOICES_POST, "Post purchase invoices"))
                     .child(PermissionDef::new(
                         INVOICES_CANCEL,
@@ -149,7 +167,10 @@ pub mod permissions {
             .child(
                 PermissionDef::new(PAYMENTS, "Supplier payments")
                     .child(PermissionDef::new(PAYMENTS_VIEW, "View supplier payments"))
-                    .child(PermissionDef::new(PAYMENTS_CREATE, "Create supplier payments"))
+                    .child(PermissionDef::new(
+                        PAYMENTS_CREATE,
+                        "Create supplier payments",
+                    ))
                     .child(PermissionDef::new(PAYMENTS_POST, "Post supplier payments"))
                     .child(PermissionDef::new(
                         PAYMENTS_REVERSE,

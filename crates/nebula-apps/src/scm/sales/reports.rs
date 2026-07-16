@@ -24,8 +24,8 @@ use crate::scm::sales::invoice::{
     self, InvoiceStatus, invoice as sinvoice, invoice_line, load_invoice_lines,
 };
 use crate::scm::sales::order::{effective_price, order_line};
-use crate::scm::sales::payment::{self, PaymentStatus};
 use crate::scm::sales::payment::payment as spayment;
+use crate::scm::sales::payment::{self, PaymentStatus};
 use crate::scm::sales::permissions::names;
 use axum::extract::{Path, Query};
 use axum::routing::get;
@@ -33,7 +33,8 @@ use axum::{Json, Router};
 use nebula::auth::Authz;
 use nebula::error::Error;
 use nebula::{
-    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition, ReportOutput, Result, Table, TenantDb, sea_orm,
+    Column as ReportColumn, DataCx, Report, ReportData, ReportDataSource, ReportDefinition,
+    ReportOutput, Result, Table, TenantDb, sea_orm,
 };
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
@@ -283,7 +284,9 @@ impl SalesQueries {
             .await?;
         let ids: Vec<Uuid> = invoices.iter().map(|i| i.id).collect();
         let settled = payment::paid_amounts(&self.db, &ids).await?;
-        let customers = self.customers_by_id(invoices.iter().map(|i| i.customer_id)).await?;
+        let customers = self
+            .customers_by_id(invoices.iter().map(|i| i.customer_id))
+            .await?;
 
         let mut per_customer: HashMap<Uuid, ArAgingRow> = HashMap::new();
         let mut grand = Decimal::ZERO;
@@ -296,18 +299,20 @@ impl SalesQueries {
             let due = inv.due_date.unwrap_or(inv.invoice_date);
             let overdue = (as_of - due).num_days();
             let c = customers.get(&inv.customer_id);
-            let row = per_customer.entry(inv.customer_id).or_insert_with(|| ArAgingRow {
-                customer_id: inv.customer_id,
-                code: c.map(|c| c.code.clone()).unwrap_or_default(),
-                name: c.map(|c| c.name.clone()).unwrap_or_default(),
-                currency: inv.currency.clone(),
-                current: Decimal::ZERO,
-                d1_30: Decimal::ZERO,
-                d31_60: Decimal::ZERO,
-                d61_90: Decimal::ZERO,
-                d90_plus: Decimal::ZERO,
-                total: Decimal::ZERO,
-            });
+            let row = per_customer
+                .entry(inv.customer_id)
+                .or_insert_with(|| ArAgingRow {
+                    customer_id: inv.customer_id,
+                    code: c.map(|c| c.code.clone()).unwrap_or_default(),
+                    name: c.map(|c| c.name.clone()).unwrap_or_default(),
+                    currency: inv.currency.clone(),
+                    current: Decimal::ZERO,
+                    d1_30: Decimal::ZERO,
+                    d31_60: Decimal::ZERO,
+                    d61_90: Decimal::ZERO,
+                    d90_plus: Decimal::ZERO,
+                    total: Decimal::ZERO,
+                });
             match overdue {
                 i64::MIN..=0 => row.current += open,
                 1..=30 => row.d1_30 += open,
@@ -320,7 +325,11 @@ impl SalesQueries {
         }
         let mut rows: Vec<ArAgingRow> = per_customer.into_values().collect();
         rows.sort_by(|a, b| a.code.cmp(&b.code));
-        Ok(ArAgingView { as_of, rows, total: grand })
+        Ok(ArAgingView {
+            as_of,
+            rows,
+            total: grand,
+        })
     }
 
     /// Order lines delivered beyond what has been billed, valued at the
@@ -401,7 +410,9 @@ impl SalesQueries {
             .order_by_asc(sinvoice::Column::InvoiceDate)
             .all(&self.db)
             .await?;
-        let customers = self.customers_by_id(invoices.iter().map(|i| i.customer_id)).await?;
+        let customers = self
+            .customers_by_id(invoices.iter().map(|i| i.customer_id))
+            .await?;
 
         let mut rows = Vec::new();
         let (mut net_t, mut tax_t, mut total_t) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
@@ -462,7 +473,9 @@ impl SalesQueries {
             .map(|i| (i.id, i))
             .collect();
         let inv_lines = invoice_line::Entity::find()
-            .filter(invoice_line::Column::InvoiceId.is_in(invoices.keys().copied().collect::<Vec<_>>()))
+            .filter(
+                invoice_line::Column::InvoiceId.is_in(invoices.keys().copied().collect::<Vec<_>>()),
+            )
             .all(&self.db)
             .await?;
         let order_line_ids: Vec<Uuid> = inv_lines.iter().filter_map(|l| l.order_line_id).collect();
@@ -532,7 +545,8 @@ impl SalesQueries {
                 revenue: rev,
                 cogs: cost,
                 margin,
-                margin_pct: (!rev.is_zero()).then(|| (margin / rev * Decimal::ONE_HUNDRED).round_dp(2)),
+                margin_pct: (!rev.is_zero())
+                    .then(|| (margin / rev * Decimal::ONE_HUNDRED).round_dp(2)),
             });
         }
         rows.sort_by(|a, b| a.sku.cmp(&b.sku));
@@ -664,7 +678,9 @@ impl SalesQueries {
             }
         }
 
-        let pending_outbox = crate::scm::gl::outbox::Entity::find().count(&self.db).await? as i64;
+        let pending_outbox = crate::scm::gl::outbox::Entity::find()
+            .count(&self.db)
+            .await? as i64;
 
         let has_accounting = self
             .db
@@ -1012,7 +1028,10 @@ impl ReportDefinition for SalesRegisterReport {
             money(view.total),
         ]);
         Ok(Report::new("Sales Register")
-            .subtitle(format!("Posted sales invoices{}", window(view.from, view.to)))
+            .subtitle(format!(
+                "Posted sales invoices{}",
+                window(view.from, view.to)
+            ))
             .with(table.into_widget()))
     }
 }
@@ -1054,7 +1073,9 @@ impl ReportDefinition for SalesMarginsReport {
                 money(r.revenue),
                 money(r.cogs),
                 money(r.margin),
-                r.margin_pct.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                r.margin_pct
+                    .map(|v| format!("{:.2}", v))
+                    .unwrap_or_default(),
             ]);
         }
         table = table.totals([
@@ -1225,10 +1246,7 @@ async fn margins_json(
 
 #[utoipa::path(get, path = "/sales/reports/ar-reconciliation", tag = "sales",
     responses((status = 200, body = ArReconciliationView)))]
-async fn ar_recon_json(
-    authz: Authz,
-    TenantDb(db): TenantDb,
-) -> Result<Json<ArReconciliationView>> {
+async fn ar_recon_json(authz: Authz, TenantDb(db): TenantDb) -> Result<Json<ArReconciliationView>> {
     authz.require(names::REPORTS_VIEW).await?;
     SalesQueries::new(db).ar_reconciliation().await.map(Json)
 }

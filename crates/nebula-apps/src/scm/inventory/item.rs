@@ -503,7 +503,11 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("item {id}")))
     }
 
-    pub async fn create_item(&self, body: ItemBody, created_by: Option<Uuid>) -> Result<item::Model> {
+    pub async fn create_item(
+        &self,
+        body: ItemBody,
+        created_by: Option<Uuid>,
+    ) -> Result<item::Model> {
         let (sku, name) = self.validate_item(&body, None).await?;
         let now = chrono::Utc::now();
         let mut active = item_active_model(body, now);
@@ -582,7 +586,12 @@ impl Store {
         if taken.is_some_and(|t| existing.is_none_or(|e| e.id != t.id)) {
             return Err(Error::Conflict(format!("item sku {sku:?} already exists")));
         }
-        if let Some(barcode) = body.barcode.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        if let Some(barcode) = body
+            .barcode
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
             let taken = item::Entity::find()
                 .filter(item::Column::Barcode.eq(barcode))
                 .one(&self.db)
@@ -615,9 +624,10 @@ impl Store {
             }
         }
         if let Some(supplier_id) = body.preferred_supplier_id {
-            let found = crate::scm::procurement::supplier::supplier::Entity::find_by_id(supplier_id)
-                .one(&self.db)
-                .await?;
+            let found =
+                crate::scm::procurement::supplier::supplier::Entity::find_by_id(supplier_id)
+                    .one(&self.db)
+                    .await?;
             if found.is_none() {
                 return Err(Error::Validation(format!(
                     "preferred supplier {supplier_id} does not exist"
@@ -681,11 +691,16 @@ impl Store {
         let now = chrono::Utc::now();
         category::ActiveModel {
             id: Set(Uuid::new_v4()),
-            code: Set(body.code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty())),
+            code: Set(body
+                .code
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())),
             name: Set(name),
             description: Set(body.description.filter(|d| !d.trim().is_empty())),
             parent_id: Set(body.parent_id),
-            default_costing_method: Set(body.default_costing_method.map(|m| m.as_str().to_string())),
+            default_costing_method: Set(body
+                .default_costing_method
+                .map(|m| m.as_str().to_string())),
             default_uom_id: Set(body.default_uom_id),
             inventory_account_role: Set(body.inventory_account_role),
             cogs_account_role: Set(body.cogs_account_role),
@@ -713,7 +728,10 @@ impl Store {
             self.ensure_no_category_cycle(id, parent_id).await?;
         }
         let mut active: category::ActiveModel = existing.into();
-        active.code = Set(body.code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()));
+        active.code = Set(body
+            .code
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty()));
         active.name = Set(name);
         active.description = Set(body.description.filter(|d| !d.trim().is_empty()));
         active.parent_id = Set(body.parent_id);
@@ -773,7 +791,9 @@ impl Store {
         }
         if let Some(parent_id) = body.parent_id {
             if existing.is_some_and(|e| e.id == parent_id) {
-                return Err(Error::Validation("a category cannot be its own parent".into()));
+                return Err(Error::Validation(
+                    "a category cannot be its own parent".into(),
+                ));
             }
             self.find_category(parent_id).await?;
         }
@@ -851,7 +871,10 @@ fn item_active_model(body: ItemBody, now: chrono::DateTime<chrono::Utc>) -> item
         manufacturer: Set(body.manufacturer.filter(|v| !v.trim().is_empty())),
         manufacturer_part_no: Set(body.manufacturer_part_no.filter(|v| !v.trim().is_empty())),
         model: Set(body.model.filter(|v| !v.trim().is_empty())),
-        barcode: Set(body.barcode.map(|b| b.trim().to_string()).filter(|b| !b.is_empty())),
+        barcode: Set(body
+            .barcode
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())),
         image_file_id: Set(body.image_file_id),
         country_of_origin: Set(body.country_of_origin.filter(|v| !v.trim().is_empty())),
         hs_code: Set(body.hs_code.filter(|v| !v.trim().is_empty())),
@@ -1015,7 +1038,9 @@ async fn create_item(
     Json(body): Json<ItemBody>,
 ) -> Result<Json<item::Model>> {
     authz.require(names::ITEMS_CREATE).await?;
-    let row = Store::new(db).create_item(body, Some(authz.user.id)).await?;
+    let row = Store::new(db)
+        .create_item(body, Some(authz.user.id))
+        .await?;
     audit.0.created("scm.item", row.id, &row).await;
     Ok(Json(row))
 }
@@ -1095,9 +1120,7 @@ async fn update_category(
     authz.require(names::ITEMS_EDIT).await?;
     let store = Store::new(db);
     let before = store.find_category(id).await?;
-    let after = store
-        .update_category(id, body, Some(authz.user.id))
-        .await?;
+    let after = store.update_category(id, body, Some(authz.user.id)).await?;
     audit
         .0
         .updated("scm.category", after.id, &before, &after)

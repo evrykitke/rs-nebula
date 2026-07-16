@@ -47,8 +47,7 @@ use nebula::{
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, QueryOrder, Set,
-    Statement,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, QueryOrder, Set, Statement,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -312,7 +311,9 @@ pub(crate) async fn stock_move_request(
         tenant_id,
         source: format!("scm.move:{move_id}:post"),
         entry_date: doc.entry_date,
-        memo: format!("{label} {}", doc.number.as_deref().unwrap_or("")).trim().to_string(),
+        memo: format!("{label} {}", doc.number.as_deref().unwrap_or(""))
+            .trim()
+            .to_string(),
         currency: None,
         lines,
     }))
@@ -585,7 +586,12 @@ pub(crate) async fn purchase_return_request(
     }
     // Moving average rarely equals the PO price exactly; the difference
     // is a price variance, not inventory value.
-    let gap = stock_net + if stock_net <= Decimal::ZERO { grni_value } else { -grni_value };
+    let gap = stock_net
+        + if stock_net <= Decimal::ZERO {
+            grni_value
+        } else {
+            -grni_value
+        };
     entry.credit(PPV_ROLE, gap, Some("Return price variance"));
 
     let lines = entry.lines();
@@ -942,11 +948,7 @@ pub async fn reconciliation(db: &DatabaseConnection) -> Result<GlReconciliationV
 }
 
 /// One numeric scalar out of a raw query.
-async fn scalar<I>(
-    db: &DatabaseConnection,
-    sql: &str,
-    values: I,
-) -> Result<Option<Decimal>>
+async fn scalar<I>(db: &DatabaseConnection, sql: &str, values: I) -> Result<Option<Decimal>>
 where
     I: IntoIterator<Item = sea_orm::Value>,
 {
@@ -1045,7 +1047,10 @@ impl ReportDefinition for GlReconciliationReport {
 }
 
 pub(crate) fn routes() -> Router {
-    Router::new().route("/inventory/reports/gl-reconciliation", get(reconciliation_json))
+    Router::new().route(
+        "/inventory/reports/gl-reconciliation",
+        get(reconciliation_json),
+    )
 }
 
 pub(crate) fn api() -> utoipa::openapi::OpenApi {

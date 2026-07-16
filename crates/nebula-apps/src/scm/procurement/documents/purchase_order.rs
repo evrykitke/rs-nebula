@@ -75,18 +75,30 @@ impl ReportDefinition for PurchaseOrderDocument {
         if let Some(i) = o.incoterms.as_deref().filter(|s| !s.trim().is_empty()) {
             meta.push(KeyValue::new("Incoterms", i));
         }
-        if let Some(s) = o.shipping_method.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(s) = o
+            .shipping_method
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             meta.push(KeyValue::new("Ship via", s));
         }
 
         let mut party = vec![o.supplier_name.clone()];
-        if let Some(c) = o.supplier_contact.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(c) = o
+            .supplier_contact
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             party.push(format!("Attn: {c}"));
         }
 
         // Where the goods go: the explicit delivery address, else the
         // receiving warehouse.
-        let deliver_to = match o.delivery_address.as_deref().filter(|s| !s.trim().is_empty()) {
+        let deliver_to = match o
+            .delivery_address
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             Some(addr) => addr.lines().map(|l| l.trim().to_string()).collect(),
             None => vec![format!("Warehouse {}", o.warehouse_code)],
         };
@@ -141,7 +153,7 @@ impl ReportDefinition for PurchaseOrderDocument {
 
         Ok(Document {
             title: "Purchase Order".to_string(),
-            number: o.number.clone(),
+            number: o.number.clone().into(),
             status: status_line(o.status.as_str(), o.cancel_reason.as_deref()),
             party_label: "Supplier",
             party,

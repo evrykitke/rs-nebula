@@ -168,9 +168,7 @@ impl StockQueries {
         for row in rows {
             let item = items.get(&row.item_id);
             let wh = warehouses.get(&row.warehouse_id);
-            let reorder_level = row
-                .reorder_level
-                .or(item.and_then(|i| i.reorder_level));
+            let reorder_level = row.reorder_level.or(item.and_then(|i| i.reorder_level));
             let reorder_qty = row.reorder_qty.or(item.and_then(|i| i.reorder_qty));
             let below = reorder_level.is_some_and(|r| row.on_hand <= r);
             if filter.below_reorder && !below {
@@ -246,7 +244,10 @@ impl StockQueries {
                     number: mv.and_then(|m| m.number.clone()),
                     move_type: mv.map(|m| m.move_type.clone()),
                     item_id: r.item_id,
-                    sku: items.get(&r.item_id).map(|i| i.sku.clone()).unwrap_or_default(),
+                    sku: items
+                        .get(&r.item_id)
+                        .map(|i| i.sku.clone())
+                        .unwrap_or_default(),
                     warehouse_id: r.warehouse_id,
                     warehouse_code: warehouses
                         .get(&r.warehouse_id)
@@ -434,5 +435,8 @@ async fn get_valuation(
     Query(q): Query<ValuationQuery>,
 ) -> Result<Json<ValuationSummary>> {
     authz.require(names::REPORTS_VIEW).await?;
-    StockQueries::new(db).valuation(q.warehouse_id).await.map(Json)
+    StockQueries::new(db)
+        .valuation(q.warehouse_id)
+        .await
+        .map(Json)
 }

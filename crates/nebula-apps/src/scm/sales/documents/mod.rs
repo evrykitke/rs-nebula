@@ -11,12 +11,16 @@
 //! one payload.
 
 pub mod credit_note;
+pub mod customer_receipt;
+pub mod customer_statement;
 pub mod delivery_note;
 pub mod quotation;
 pub mod sales_invoice;
 pub mod sales_order;
 
 pub use credit_note::CreditNoteDocument;
+pub use customer_receipt::CustomerReceiptDocument;
+pub use customer_statement::CustomerStatementDocument;
 pub use delivery_note::DeliveryNoteDocument;
 pub use quotation::QuotationDocument;
 pub use sales_invoice::SalesInvoiceDocument;
@@ -52,7 +56,10 @@ pub struct Addressed<T> {
 pub async fn party_of(cx: &DataCx<'_>, customer_id: Uuid, fallback_name: &str) -> Result<Party> {
     let db = cx.require_db()?;
     let Some(c) = customer::Entity::find_by_id(customer_id).one(db).await? else {
-        return Ok(Party { name: fallback_name.to_string(), ..Default::default() });
+        return Ok(Party {
+            name: fallback_name.to_string(),
+            ..Default::default()
+        });
     };
 
     Ok(Party {

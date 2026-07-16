@@ -403,9 +403,7 @@ async fn in_stock_at(
         .filter(serial::Column::SerialNo.eq(name))
         .one(txn)
         .await?
-        .ok_or_else(|| {
-            Error::Validation(format!("item {} has no serial {name:?}", item.sku))
-        })?;
+        .ok_or_else(|| Error::Validation(format!("item {} has no serial {name:?}", item.sku)))?;
     if SerialStatus::parse(&row.status)? != SerialStatus::InStock
         || row.warehouse_id != Some(warehouse_id)
     {

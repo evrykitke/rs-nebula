@@ -1,4 +1,3 @@
-
 //! The order-to-cash cycle: customers, pricing, quotations, sales orders
 //! with reservation and credit control, deliveries that drive the stock
 //! engine, sales invoices, credit notes and customer payments.
@@ -94,10 +93,7 @@ pub mod permissions {
                 PermissionDef::new(PRICING, "Pricing")
                     .child(PermissionDef::new(PRICING_VIEW, "View price lists"))
                     .child(PermissionDef::new(PRICING_MANAGE, "Manage price lists"))
-                    .child(PermissionDef::new(
-                        PRICING_OVERRIDE,
-                        "Override line prices",
-                    )),
+                    .child(PermissionDef::new(PRICING_OVERRIDE, "Override line prices")),
             )
             .child(
                 PermissionDef::new(QUOTATIONS, "Quotations")
@@ -138,14 +134,23 @@ pub mod permissions {
             .child(
                 PermissionDef::new(CREDIT_NOTES, "Credit notes")
                     .child(PermissionDef::new(CREDIT_NOTES_VIEW, "View credit notes"))
-                    .child(PermissionDef::new(CREDIT_NOTES_CREATE, "Create credit notes"))
+                    .child(PermissionDef::new(
+                        CREDIT_NOTES_CREATE,
+                        "Create credit notes",
+                    ))
                     .child(PermissionDef::new(CREDIT_NOTES_POST, "Post credit notes"))
-                    .child(PermissionDef::new(CREDIT_NOTES_CANCEL, "Cancel credit notes")),
+                    .child(PermissionDef::new(
+                        CREDIT_NOTES_CANCEL,
+                        "Cancel credit notes",
+                    )),
             )
             .child(
                 PermissionDef::new(PAYMENTS, "Customer payments")
                     .child(PermissionDef::new(PAYMENTS_VIEW, "View customer payments"))
-                    .child(PermissionDef::new(PAYMENTS_CREATE, "Create customer payments"))
+                    .child(PermissionDef::new(
+                        PAYMENTS_CREATE,
+                        "Create customer payments",
+                    ))
                     .child(PermissionDef::new(PAYMENTS_POST, "Post customer payments"))
                     .child(PermissionDef::new(
                         PAYMENTS_REVERSE,

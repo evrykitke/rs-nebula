@@ -272,8 +272,9 @@ impl OrderService {
         active.incoterms = Set(clean(new.incoterms));
         active.supplier_contact = Set(clean(new.supplier_contact));
         active.currency = Set(currency);
-        active.payment_terms_days =
-            Set(new.payment_terms_days.unwrap_or(supplier.payment_terms_days));
+        active.payment_terms_days = Set(new
+            .payment_terms_days
+            .unwrap_or(supplier.payment_terms_days));
         active.tax_inclusive = Set(new.tax_inclusive);
         active.discount_pct = Set(new.discount_pct);
         active.discount_amount = Set(new.discount_amount);
@@ -293,7 +294,9 @@ impl OrderService {
         let txn = self.db.begin().await?;
         let existing = load_order_locked(&txn, id).await?;
         if OrderStatus::parse(&existing.status)? != OrderStatus::Draft {
-            return Err(Error::Validation("only a draft order can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft order can be deleted".into(),
+            ));
         }
         order::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -303,11 +306,18 @@ impl OrderService {
     /// Submit a draft: the moment it becomes a real commitment. Re-checks
     /// the supplier hold, snapshots terms the draft left unset, allocates
     /// the PO number — the document is frozen from here.
-    pub async fn submit(&self, id: Uuid, numbering: &Numbering, by: Option<Uuid>) -> Result<OrderView> {
+    pub async fn submit(
+        &self,
+        id: Uuid,
+        numbering: &Numbering,
+        by: Option<Uuid>,
+    ) -> Result<OrderView> {
         let txn = self.db.begin().await?;
         let existing = load_order_locked(&txn, id).await?;
         if OrderStatus::parse(&existing.status)? != OrderStatus::Draft {
-            return Err(Error::Validation("only a draft order can be submitted".into()));
+            return Err(Error::Validation(
+                "only a draft order can be submitted".into(),
+            ));
         }
         let supplier = load_supplier_for_new_order(&txn, existing.supplier_id).await?;
         let lines = load_lines(&txn, id).await?;
@@ -625,7 +635,9 @@ pub(crate) async fn create_draft_in(
         buyer_id: Set(new.created_by),
         currency: Set(currency),
         exchange_rate: Set(Decimal::ONE),
-        payment_terms_days: Set(new.payment_terms_days.unwrap_or(supplier.payment_terms_days)),
+        payment_terms_days: Set(new
+            .payment_terms_days
+            .unwrap_or(supplier.payment_terms_days)),
         tax_inclusive: Set(new.tax_inclusive),
         discount_pct: Set(new.discount_pct),
         discount_amount: Set(new.discount_amount),
@@ -656,10 +668,7 @@ pub(crate) async fn create_draft_in(
 
 /// Release whatever `on_order` demand the order still holds — the ordered
 /// remainder of every line, floored at zero by the engine.
-async fn release_on_order(
-    txn: &sea_orm::DatabaseTransaction,
-    row: &order::Model,
-) -> Result<()> {
+async fn release_on_order(txn: &sea_orm::DatabaseTransaction, row: &order::Model) -> Result<()> {
     let lines = load_lines(txn, row.id).await?;
     let mut by_item: HashMap<Uuid, Decimal> = HashMap::new();
     for l in &lines {
@@ -753,7 +762,9 @@ async fn validate_order<C: ConnectionTrait>(conn: &C, new: &NewOrder) -> Result<
         }
     }
     if new.payment_terms_days.is_some_and(|d| d < 0) {
-        return Err(Error::Validation("payment terms must not be negative".into()));
+        return Err(Error::Validation(
+            "payment terms must not be negative".into(),
+        ));
     }
 
     let item_ids: Vec<Uuid> = new.lines.iter().map(|l| l.item_id).collect();

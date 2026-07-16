@@ -52,10 +52,11 @@ impl GlPort {
             events: ctx.events(),
             numbering: ctx.numbering(),
         });
-        ctx.events().subscribe::<GlPostingRequested, _, _>(move |ev| {
-            let port = port.clone();
-            async move { port.handle(ev).await }
-        });
+        ctx.events()
+            .subscribe::<GlPostingRequested, _, _>(move |ev| {
+                let port = port.clone();
+                async move { port.handle(ev).await }
+            });
     }
 
     async fn handle(&self, req: GlPostingRequested) -> Result<()> {
@@ -81,9 +82,10 @@ impl GlPort {
                     .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
                 tenants.connection_for(&tenant).await
             }
-            (None, _) => self.main_db.clone().ok_or_else(|| {
-                Error::internal("a tenantless GL posting needs a main database")
-            }),
+            (None, _) => self
+                .main_db
+                .clone()
+                .ok_or_else(|| Error::internal("a tenantless GL posting needs a main database")),
             (Some(id), None) => Err(Error::internal(format!(
                 "GL posting names tenant {id} but multitenancy is disabled"
             ))),

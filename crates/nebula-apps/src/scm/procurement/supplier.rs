@@ -272,7 +272,11 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("supplier {id}")))
     }
 
-    pub async fn create(&self, body: SupplierBody, created_by: Option<Uuid>) -> Result<supplier::Model> {
+    pub async fn create(
+        &self,
+        body: SupplierBody,
+        created_by: Option<Uuid>,
+    ) -> Result<supplier::Model> {
         let (code, name, currency) = self.validate(&body, None).await?;
         let now = chrono::Utc::now();
         supplier::ActiveModel {
@@ -484,7 +488,11 @@ impl Store {
         }
     }
 
-    pub async fn remove_catalog(&self, supplier_id: Uuid, item_id: Uuid) -> Result<item_supplier::Model> {
+    pub async fn remove_catalog(
+        &self,
+        supplier_id: Uuid,
+        item_id: Uuid,
+    ) -> Result<item_supplier::Model> {
         let row = item_supplier::Entity::find()
             .filter(item_supplier::Column::SupplierId.eq(supplier_id))
             .filter(item_supplier::Column::ItemId.eq(item_id))
@@ -526,7 +534,9 @@ impl Store {
             )));
         }
         if body.payment_terms_days < 0 {
-            return Err(Error::Validation("payment terms must not be negative".into()));
+            return Err(Error::Validation(
+                "payment terms must not be negative".into(),
+            ));
         }
         if let Some(pct) = body.default_discount_pct {
             if pct < Decimal::ZERO || pct > Decimal::ONE_HUNDRED {

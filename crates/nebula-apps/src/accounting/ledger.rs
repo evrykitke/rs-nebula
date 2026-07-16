@@ -589,7 +589,10 @@ async fn balance_sheet(
     Query(q): Query<TrialBalanceQuery>,
 ) -> Result<Json<BalanceSheet>> {
     authz.require(names::REPORTS_VIEW).await?;
-    LedgerQueries::new(db).balance_sheet(q.as_of).await.map(Json)
+    LedgerQueries::new(db)
+        .balance_sheet(q.as_of)
+        .await
+        .map(Json)
 }
 
 #[utoipa::path(get, path = "/accounting/income-statement", tag = "accounting",

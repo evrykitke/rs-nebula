@@ -254,11 +254,11 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let existing = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&existing.status)? != InvoiceStatus::Draft {
-            return Err(Error::Validation("only a draft invoice can be edited".into()));
+            return Err(Error::Validation(
+                "only a draft invoice can be edited".into(),
+            ));
         }
-        if existing.supplier_id != new.supplier_id
-            || existing.order_id != Some(new.order_id)
-        {
+        if existing.supplier_id != new.supplier_id || existing.order_id != Some(new.order_id) {
             return Err(Error::Validation(
                 "an invoice's supplier and order cannot change; delete the draft and create a new one"
                     .into(),
@@ -293,7 +293,9 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let existing = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&existing.status)? != InvoiceStatus::Draft {
-            return Err(Error::Validation("only a draft invoice can be deleted".into()));
+            return Err(Error::Validation(
+                "only a draft invoice can be deleted".into(),
+            ));
         }
         invoice::Entity::delete_by_id(id).exec(&txn).await?;
         txn.commit().await?;
@@ -314,7 +316,9 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let invoice_row = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&invoice_row.status)? != InvoiceStatus::Draft {
-            return Err(Error::Validation("only a draft invoice can be posted".into()));
+            return Err(Error::Validation(
+                "only a draft invoice can be posted".into(),
+            ));
         }
         let order_id = invoice_row
             .order_id
@@ -334,7 +338,9 @@ impl InvoiceService {
 
         let lines = load_invoice_lines(&txn, id).await?;
         if lines.is_empty() {
-            return Err(Error::Validation("an invoice needs at least one line".into()));
+            return Err(Error::Validation(
+                "an invoice needs at least one line".into(),
+            ));
         }
         let order_lines: HashMap<Uuid, order_line::Model> = load_order_lines(&txn, order_id)
             .await?
@@ -420,7 +426,9 @@ impl InvoiceService {
         let txn = self.db.begin().await?;
         let existing = load_invoice_locked(&txn, id).await?;
         if InvoiceStatus::parse(&existing.status)? != InvoiceStatus::Posted {
-            return Err(Error::Validation("only a posted invoice can be cancelled".into()));
+            return Err(Error::Validation(
+                "only a posted invoice can be cancelled".into(),
+            ));
         }
         let paid = super::payment::paid_amounts(&txn, &[id])
             .await?
@@ -521,7 +529,8 @@ impl InvoiceService {
         rows.into_iter()
             .map(|r| {
                 let status = InvoiceStatus::parse(&r.status)?;
-                let total = apply_header(&r, subtotals.get(&r.id).copied().unwrap_or(Decimal::ZERO));
+                let total =
+                    apply_header(&r, subtotals.get(&r.id).copied().unwrap_or(Decimal::ZERO));
                 let paid_amt = paid.get(&r.id).copied().unwrap_or(Decimal::ZERO);
                 let outstanding = if status == InvoiceStatus::Posted {
                     (total - paid_amt).max(Decimal::ZERO)
@@ -683,13 +692,17 @@ async fn validate_invoice<C: ConnectionTrait>(
         ));
     }
     if new.lines.is_empty() {
-        return Err(Error::Validation("an invoice needs at least one line".into()));
+        return Err(Error::Validation(
+            "an invoice needs at least one line".into(),
+        ));
     }
     if new.exchange_rate.is_some_and(|r| r <= Decimal::ZERO) {
         return Err(Error::Validation("exchange rate must be positive".into()));
     }
     if new.payment_terms_days.is_some_and(|d| d < 0) {
-        return Err(Error::Validation("payment terms must not be negative".into()));
+        return Err(Error::Validation(
+            "payment terms must not be negative".into(),
+        ));
     }
     let supplier_row = supplier::Entity::find_by_id(new.supplier_id)
         .one(conn)

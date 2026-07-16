@@ -208,18 +208,21 @@ impl FiscalService {
 
     /// Transition a period to `Closed` (from `Open`).
     pub async fn close_period(&self, id: Uuid) -> Result<FiscalYearView> {
-        self.transition(id, PeriodStatus::Open, PeriodStatus::Closed).await
+        self.transition(id, PeriodStatus::Open, PeriodStatus::Closed)
+            .await
     }
 
     /// Transition a period back to `Open` (from `Closed`; a `Locked` period
     /// cannot be reopened).
     pub async fn reopen_period(&self, id: Uuid) -> Result<FiscalYearView> {
-        self.transition(id, PeriodStatus::Closed, PeriodStatus::Open).await
+        self.transition(id, PeriodStatus::Closed, PeriodStatus::Open)
+            .await
     }
 
     /// Permanently lock a period (from `Closed`).
     pub async fn lock_period(&self, id: Uuid) -> Result<FiscalYearView> {
-        self.transition(id, PeriodStatus::Closed, PeriodStatus::Locked).await
+        self.transition(id, PeriodStatus::Closed, PeriodStatus::Locked)
+            .await
     }
 
     async fn transition(
@@ -449,7 +452,9 @@ async fn create_fiscal_year(
     Json(req): Json<CreateFiscalYearRequest>,
 ) -> Result<Json<FiscalYearView>> {
     authz.require(names::FISCAL_YEARS_MANAGE).await?;
-    let year = FiscalService::new(db).create_year(req.start_date, req.name).await?;
+    let year = FiscalService::new(db)
+        .create_year(req.start_date, req.name)
+        .await?;
     audit
         .0
         .created("accounting.fiscal_year", year.id, &year)
@@ -468,7 +473,10 @@ async fn close_period(
 ) -> Result<Json<FiscalYearView>> {
     authz.require(names::FISCAL_YEARS_MANAGE).await?;
     let year = FiscalService::new(db).close_period(id).await?;
-    audit.0.event(format!("closed accounting period {id}")).await;
+    audit
+        .0
+        .event(format!("closed accounting period {id}"))
+        .await;
     Ok(Json(year))
 }
 
@@ -483,7 +491,10 @@ async fn reopen_period(
 ) -> Result<Json<FiscalYearView>> {
     authz.require(names::FISCAL_YEARS_MANAGE).await?;
     let year = FiscalService::new(db).reopen_period(id).await?;
-    audit.0.event(format!("reopened accounting period {id}")).await;
+    audit
+        .0
+        .event(format!("reopened accounting period {id}"))
+        .await;
     Ok(Json(year))
 }
 
@@ -498,6 +509,9 @@ async fn lock_period(
 ) -> Result<Json<FiscalYearView>> {
     authz.require(names::FISCAL_YEARS_MANAGE).await?;
     let year = FiscalService::new(db).lock_period(id).await?;
-    audit.0.event(format!("locked accounting period {id}")).await;
+    audit
+        .0
+        .event(format!("locked accounting period {id}"))
+        .await;
     Ok(Json(year))
 }

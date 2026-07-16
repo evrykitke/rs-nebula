@@ -21,11 +21,34 @@ use rust_decimal::Decimal;
 /// One document, in the terms the layout needs. Anything optional that is
 /// empty simply does not appear — a document should not print an empty
 /// "Incoterms:" label because the field exists in the schema.
+/// Whether a document has a number, and why not when it hasn't.
+///
+/// Not an `Option`: "no number yet" and "never has one" print differently, and
+/// conflating them puts `(unissued)` on a statement of account, which is not a
+/// thing that gets issued.
+pub enum DocumentNumber {
+    Issued(String),
+    /// A draft of something that will be numbered when it is issued.
+    Unissued,
+    /// A document that never carries a number — a statement is a view of an
+    /// account, not an instrument.
+    Unnumbered,
+}
+
+impl From<Option<String>> for DocumentNumber {
+    fn from(value: Option<String>) -> Self {
+        match value {
+            Some(number) => Self::Issued(number),
+            None => Self::Unissued,
+        }
+    }
+}
+
 pub struct Document {
     /// What the document is, e.g. "Purchase Order".
     pub title: String,
-    /// The document's own number. `None` before it is issued.
-    pub number: Option<String>,
+    /// The document's own number.
+    pub number: DocumentNumber,
     /// The lifecycle state, shown next to the number. Drafts and cancelled
     /// documents must say so on the page: a printed draft that looks issued
     /// is how a supplier ends up shipping against nothing.
@@ -64,14 +87,14 @@ impl Document {
 
         // An unissued document must not look like it has an identity.
         let heading = match &self.number {
-            Some(_) => self.title.clone(),
-            None => format!("{} (unissued)", self.title),
+            DocumentNumber::Unissued => format!("{} (unissued)", self.title),
+            _ => self.title.clone(),
         };
 
         let mut report = Report::new(heading)
             .subtitle(self.status)
             .orientation(orientation);
-        if let Some(number) = &self.number {
+        if let DocumentNumber::Issued(number) = &self.number {
             report = report.number(number.clone());
         }
 
@@ -79,7 +102,7 @@ impl Document {
         // filing three invoices needs three distinct files, and the number is
         // what they will look for. An unissued document has no number to be
         // filed under, so it falls back to the report's name.
-        if let Some(number) = &self.number {
+        if let DocumentNumber::Issued(number) = &self.number {
             report = report.file_name(number.clone());
         }
 
@@ -99,17 +122,22 @@ impl Document {
         let right: Vec<Widget> = if self.meta.is_empty() {
             Vec::new()
         } else {
-            vec![Group::new(vec![Widget::KeyValues {
-                title: None,
-                items: self.meta,
-                columns: 1,
-            }])
-            .boxed()
-            .into_widget()]
+            vec![
+                Group::new(vec![Widget::KeyValues {
+                    title: None,
+                    items: self.meta,
+                    columns: 1,
+                }])
+                .boxed()
+                .into_widget(),
+            ]
         };
 
         if !left.is_empty() || !right.is_empty() {
-            report = report.with(Widget::Columns { columns: vec![left, right], widths: vec![3, 2] });
+            report = report.with(Widget::Columns {
+                columns: vec![left, right],
+                widths: vec![3, 2],
+            });
             report = report.with(Widget::spacer(SpaceSize::Small));
         }
 
@@ -165,7 +193,9 @@ impl Document {
 
         if !self.signatures.is_empty() {
             report = report.with(Widget::spacer(SpaceSize::Medium));
-            report = report.with(Widget::Signatures { items: self.signatures });
+            report = report.with(Widget::Signatures {
+                items: self.signatures,
+            });
         }
 
         report

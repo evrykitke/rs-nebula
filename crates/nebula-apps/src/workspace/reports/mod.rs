@@ -87,8 +87,14 @@ impl ReportDefinition for WorkspaceOverview {
             title: Some("Actual vs target".into()),
             labels: months(),
             series: vec![
-                Series { name: "Actual".into(), values: vec![320.0, 410.0, 380.0, 505.0, 590.0] },
-                Series { name: "Target".into(), values: vec![350.0, 400.0, 450.0, 480.0, 520.0] },
+                Series {
+                    name: "Actual".into(),
+                    values: vec![320.0, 410.0, 380.0, 505.0, 590.0],
+                },
+                Series {
+                    name: "Target".into(),
+                    values: vec![350.0, 400.0, 450.0, 480.0, 520.0],
+                },
             ],
         };
         // Pie.
@@ -163,7 +169,11 @@ impl ReportDefinition for WorkspaceOverview {
                     .into_widget(),
             )
             .with(Widget::spacer(SpaceSize::Small))
-            .with(Progress::new("Quarterly target", 0.68).caption("68% of KES 20M").into_widget())
+            .with(
+                Progress::new("Quarterly target", 0.68)
+                    .caption("68% of KES 20M")
+                    .into_widget(),
+            )
             .with(
                 Callout::new(
                     CalloutStyle::Warning,
@@ -228,10 +238,34 @@ impl ReportDefinition for SampleRegister {
             Column::center("Status"),
         ])
         .title("Invoice register — July 2026")
-        .row(["01 Jul", "INV-2026-00039", "Acme Trading Ltd", "30,000.00", "Paid"])
-        .row(["04 Jul", "INV-2026-00040", "Blue Ridge Co.", "12,500.00", "Paid"])
-        .row(["09 Jul", "INV-2026-00041", "Cedar Holdings", "48,200.00", "Overdue"])
-        .row(["12 Jul", "INV-2026-00042", "Acme Trading Ltd", "59,000.00", "Sent"])
+        .row([
+            "01 Jul",
+            "INV-2026-00039",
+            "Acme Trading Ltd",
+            "30,000.00",
+            "Paid",
+        ])
+        .row([
+            "04 Jul",
+            "INV-2026-00040",
+            "Blue Ridge Co.",
+            "12,500.00",
+            "Paid",
+        ])
+        .row([
+            "09 Jul",
+            "INV-2026-00041",
+            "Cedar Holdings",
+            "48,200.00",
+            "Overdue",
+        ])
+        .row([
+            "12 Jul",
+            "INV-2026-00042",
+            "Acme Trading Ltd",
+            "59,000.00",
+            "Sent",
+        ])
         .totals(["", "", "Total", "149,700.00", ""]);
 
         Ok(Report::new("Sample Register")
