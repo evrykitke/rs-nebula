@@ -73,10 +73,12 @@ pub struct Config {
     pub rabbitmq: RabbitMqConfig,
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
+    pub security: SecurityConfig,
     pub audit: AuditConfig,
     pub jobs: JobsConfig,
     pub events: EventsConfig,
     pub files: FilesConfig,
+    pub mail: MailConfig,
     pub migrations: MigrationsConfig,
     pub reporting: ReportingConfig,
     pub currencies: Vec<CurrencyConfig>,
@@ -94,10 +96,12 @@ impl Default for Config {
             rabbitmq: RabbitMqConfig::default(),
             logging: LoggingConfig::default(),
             auth: AuthConfig::default(),
+            security: SecurityConfig::default(),
             audit: AuditConfig::default(),
             jobs: JobsConfig::default(),
             events: EventsConfig::default(),
             files: FilesConfig::default(),
+            mail: MailConfig::default(),
             migrations: MigrationsConfig::default(),
             reporting: ReportingConfig::default(),
             currencies: Vec::new(),
@@ -260,9 +264,21 @@ pub struct AuthConfig {
     /// Lifetime of the short-lived token that bridges password login and
     /// the two-factor step.
     pub two_factor_token_ttl_secs: u64,
-    pub password_min_length: usize,
     /// Issuer shown in authenticator apps.
     pub totp_issuer: String,
+
+    // The deployment's password policy. A tenant admin may tighten any of
+    // these from company settings; a tenant that has not chosen inherits
+    // the value here. See [`crate::auth::policy::PasswordPolicy`].
+    pub password_min_length: usize,
+    pub password_require_uppercase: bool,
+    pub password_require_lowercase: bool,
+    pub password_require_digit: bool,
+    pub password_require_symbol: bool,
+    /// Force a change this many days after the last one. `0` never expires.
+    pub password_expiry_days: u32,
+    /// Refuse a password matching any of the last N. `0` allows reuse.
+    pub password_history_count: u32,
     pub lockout_max_failed: i32,
     pub lockout_secs: u64,
 }
@@ -274,11 +290,46 @@ impl Default for AuthConfig {
             access_token_ttl_secs: 3600,
             refresh_token_ttl_secs: 30 * 24 * 3600,
             two_factor_token_ttl_secs: 300,
-            password_min_length: 8,
             totp_issuer: "Nebula".into(),
+            password_min_length: 8,
+            password_require_uppercase: false,
+            password_require_lowercase: false,
+            password_require_digit: false,
+            password_require_symbol: false,
+            password_expiry_days: 0,
+            password_history_count: 0,
             lockout_max_failed: 5,
             lockout_secs: 300,
         }
+    }
+}
+
+/// Secrets the deployment holds for itself, as opposed to the ones it
+/// checks (passwords) or issues (JWTs).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Encrypts secrets the system must read back — currently tenant SMTP
+    /// passwords. Required only once a tenant configures mail. Changing it
+    /// strands anything already encrypted: the setting reads as unset and
+    /// an admin re-enters it.
+    pub encryption_key: Secret,
+}
+
+/// Outbound mail. Credentials are *not* here: each tenant configures its
+/// own SMTP server in company settings, so one deployment can send as many
+/// different companies. This section is the machinery around that.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MailConfig {
+    /// How long to wait on the SMTP server before giving up. A hung relay
+    /// must not hang the request that triggered the send.
+    pub timeout_secs: u64,
+}
+
+impl Default for MailConfig {
+    fn default() -> Self {
+        Self { timeout_secs: 10 }
     }
 }
 

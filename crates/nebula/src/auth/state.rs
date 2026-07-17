@@ -5,9 +5,11 @@
 
 use super::authz::Authz;
 use super::manager::UserManager;
+use super::policy::PasswordPolicy;
 use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use crate::events::Events;
+use crate::mail::Mailer;
 use crate::module::ModuleContext;
 use crate::storage::Storage;
 use crate::tenancy::{TenantManager, TenantRef};
@@ -22,6 +24,7 @@ pub(crate) struct AuthState {
     pub(crate) main_db: DatabaseConnection,
     pub(crate) tenants: Option<Arc<TenantManager>>,
     pub(crate) events: Events,
+    pub(crate) mail: Mailer,
 }
 
 impl AuthState {
@@ -32,6 +35,7 @@ impl AuthState {
             main_db: ctx.require_db(),
             tenants: ctx.tenants(),
             events: ctx.events(),
+            mail: Mailer::new(ctx.require_db(), ctx.config()),
         }
     }
 
@@ -47,6 +51,29 @@ impl AuthState {
             Some(_) => users.with_directory(self.main_db.clone()),
             None => users,
         }
+    }
+
+    /// The user store for the current request, held to the company's
+    /// password policy rather than the deployment default. Costs a tenant
+    /// lookup, so it is for the handlers that actually weigh a password.
+    pub(crate) async fn users_with_policy(
+        &self,
+        tenant_id: Option<uuid::Uuid>,
+        db: Option<DatabaseConnection>,
+    ) -> Result<UserManager> {
+        let policy = self.policy_for(tenant_id).await?;
+        Ok(self.users(db).with_policy(policy))
+    }
+
+    /// The password policy in force for a tenant: the deployment's, with
+    /// the company's overrides laid over it. No tenant — a host user, or
+    /// single-tenant mode — means the deployment's policy stands.
+    pub(crate) async fn policy_for(&self, tenant_id: Option<uuid::Uuid>) -> Result<PasswordPolicy> {
+        let (Some(manager), Some(id)) = (&self.tenants, tenant_id) else {
+            return Ok(PasswordPolicy::from_config(&self.config));
+        };
+        let tenant = manager.find_by_id(id).await?;
+        Ok(PasswordPolicy::resolve(&self.config, tenant.as_ref()))
     }
 
     pub(crate) async fn tenant_requires_2fa(&self, tenant: Option<&TenantRef>) -> Result<bool> {

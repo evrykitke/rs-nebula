@@ -7,6 +7,9 @@
 //! - [`roles`] — role CRUD with permission grants
 //! - [`company`] — the tenant's own settings: company profile, logo,
 //!   two-factor mandate, database migration
+//! - [`password_policy`] — the company password policy: length, character
+//!   classes, expiry, reuse, lockout
+//! - [`mail`] — the company's SMTP server
 //! - [`currencies`] — the deployment-wide currency table
 //! - [`audit`] — the audit trail with what-changed diffs and retention
 //!
@@ -17,6 +20,8 @@
 pub mod audit;
 pub mod company;
 pub mod currencies;
+pub mod mail;
+pub mod password_policy;
 pub mod roles;
 pub mod users;
 
@@ -42,12 +47,16 @@ impl Module for AdministrationModule {
         ctx.add_api(users::api());
         ctx.add_api(roles::api());
         ctx.add_api(company::api());
+        ctx.add_api(password_policy::api());
+        ctx.add_api(mail::api());
         ctx.add_api(currencies::api());
         ctx.add_api(audit::api());
         ctx.add_routes(
             users::routes(state.clone())
                 .merge(roles::routes())
-                .merge(company::routes(state))
+                .merge(company::routes(state.clone()))
+                .merge(password_policy::routes(state.clone()))
+                .merge(mail::routes(state))
                 .merge(currencies::routes(ctx.require_db()))
                 .merge(audit::routes(
                     ctx.config().audit.clone(),

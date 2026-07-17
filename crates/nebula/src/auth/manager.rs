@@ -9,12 +9,14 @@
 //!   outstanding tokens;
 //! - soft-deleted users are invisible to every lookup.
 
-use super::{password, refresh_token, totp, user};
+use super::policy::PasswordPolicy;
+use super::{password, password_history, refresh_token, totp, user};
 use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use chrono::{Duration, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -44,14 +46,20 @@ pub struct UserManager {
     db: DatabaseConnection,
     config: AuthConfig,
     directory: Option<super::directory::Directory>,
+    policy: PasswordPolicy,
 }
 
 impl UserManager {
+    /// Without a tenant policy attached, the deployment's own `auth.*`
+    /// settings are the policy — which is exactly right for host users
+    /// and single-tenant mode, where there is no company to tighten them.
     pub fn new(db: DatabaseConnection, config: AuthConfig) -> Self {
+        let policy = PasswordPolicy::from_config(&config);
         Self {
             db,
             config,
             directory: None,
+            policy,
         }
     }
 
@@ -63,12 +71,23 @@ impl UserManager {
         self
     }
 
+    /// Hold this store to a company's password policy instead of the
+    /// deployment default.
+    pub fn with_policy(mut self, policy: PasswordPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn policy(&self) -> &PasswordPolicy {
+        &self.policy
+    }
+
     pub fn db(&self) -> &DatabaseConnection {
         &self.db
     }
 
     pub async fn create(&self, new: NewUser) -> Result<user::Model> {
-        validate_new_user(&new, &self.config)?;
+        validate_new_user(&new, &self.policy)?;
 
         let normalized_user_name = normalize(&new.user_name);
         let normalized_email = normalize(&new.email);
@@ -181,9 +200,9 @@ impl UserManager {
             let failed = user.access_failed_count + 1;
             let mut active: user::ActiveModel = user.clone().into();
             active.access_failed_count = Set(failed);
-            if user.lockout_enabled && failed >= self.config.lockout_max_failed {
+            if user.lockout_enabled && failed >= self.policy.lockout_max_failed {
                 active.lockout_end_at = Set(Some(
-                    Utc::now() + Duration::seconds(self.config.lockout_secs as i64),
+                    Utc::now() + Duration::seconds(self.policy.lockout_secs as i64),
                 ));
                 active.access_failed_count = Set(0);
             }
@@ -209,21 +228,103 @@ impl UserManager {
         if !password::verify(current, &user.password_hash) {
             return Err(Error::Unauthorized);
         }
-        if new_password.chars().count() < self.config.password_min_length {
-            return Err(Error::Validation(format!(
-                "password must be at least {} characters",
-                self.config.password_min_length
-            )));
-        }
+        self.replace_password(user, new_password).await
+    }
+
+    /// Set a password without re-checking the current one, for flows that
+    /// have already proved the caller holds it — the forced change after
+    /// an expiry, where the password being replaced is the one just used
+    /// to sign in.
+    pub async fn replace_password(
+        &self,
+        user: user::Model,
+        new_password: &str,
+    ) -> Result<user::Model> {
+        self.policy.check(new_password)?;
+        self.refuse_reused_password(&user, new_password).await?;
+
         let user_id = user.id;
+        let retired = user.password_hash.clone();
         let mut active: user::ActiveModel = user.into();
         active.password_hash = Set(password::hash(new_password)?);
         active.password_changed_at = Set(Some(Utc::now()));
         active.security_stamp = Set(random_token());
         active.updated_at = Set(Utc::now());
         let user = active.update(&self.db).await?;
+
+        self.retire_password(user_id, retired).await?;
         self.revoke_all_refresh_tokens(user_id).await?;
         Ok(user)
+    }
+
+    /// Refuse a password the user is still supposed to be moving away
+    /// from. The current password counts as the most recent of "your last
+    /// N" — a policy that let you re-set the password you already have
+    /// would defeat the expiry it exists to serve.
+    ///
+    /// Each candidate costs a full Argon2 verification, which is
+    /// deliberately slow. That is affordable here only because N is small
+    /// and password changes are rare; this is not a loop to widen.
+    async fn refuse_reused_password(&self, user: &user::Model, candidate: &str) -> Result<()> {
+        let keep = self.policy.history_count;
+        if keep == 0 {
+            return Ok(());
+        }
+        if password::verify(candidate, &user.password_hash) {
+            return Err(reuse_error(keep));
+        }
+        let previous = password_history::Entity::find()
+            .filter(password_history::Column::UserId.eq(user.id))
+            .order_by_desc(password_history::Column::CreatedAt)
+            .limit((keep - 1) as u64)
+            .all(&self.db)
+            .await?;
+        if previous
+            .iter()
+            .any(|h| password::verify(candidate, &h.password_hash))
+        {
+            return Err(reuse_error(keep));
+        }
+        Ok(())
+    }
+
+    /// File the hash of a password the user has just left behind, and drop
+    /// whatever has aged out of the policy's window so the table stays
+    /// bounded. A tenant that does not check history keeps no history.
+    async fn retire_password(&self, user_id: Uuid, hash: String) -> Result<()> {
+        if self.policy.history_count == 0 {
+            return Ok(());
+        }
+        password_history::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            user_id: Set(user_id),
+            password_hash: Set(hash),
+            created_at: Set(Utc::now()),
+        }
+        .insert(&self.db)
+        .await?;
+
+        let keep = password_history::Entity::find()
+            .filter(password_history::Column::UserId.eq(user_id))
+            .order_by_desc(password_history::Column::CreatedAt)
+            .limit(self.policy.history_count as u64)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|h| h.id)
+            .collect::<Vec<_>>();
+        password_history::Entity::delete_many()
+            .filter(password_history::Column::UserId.eq(user_id))
+            .filter(password_history::Column::Id.is_not_in(keep))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Whether this user's password has aged past the company's policy and
+    /// must be changed before a session is issued.
+    pub fn password_expired(&self, user: &user::Model) -> bool {
+        self.policy.expired(user.password_changed_at)
     }
 
     pub async fn confirm_email(&self, user: user::Model, token: &str) -> Result<user::Model> {
@@ -460,18 +561,20 @@ impl UserManager {
     }
 }
 
+fn reuse_error(keep: u32) -> Error {
+    Error::Validation(match keep {
+        1 => "the new password must differ from the current one".into(),
+        n => format!("the new password must differ from your last {n} passwords"),
+    })
+}
+
 /// The pure field checks of [`UserManager::create`], usable before any
 /// row exists. Registration runs this ahead of provisioning a tenant, so
-/// a bad email or short password fails before a database is cut for it.
-pub(crate) fn validate_new_user(new: &NewUser, config: &AuthConfig) -> Result<()> {
+/// a bad email or weak password fails before a database is cut for it.
+pub(crate) fn validate_new_user(new: &NewUser, policy: &PasswordPolicy) -> Result<()> {
     validate_user_name(&new.user_name)?;
     validate_email(&new.email)?;
-    if new.password.chars().count() < config.password_min_length {
-        return Err(Error::Validation(format!(
-            "password must be at least {} characters",
-            config.password_min_length
-        )));
-    }
+    policy.check(&new.password)?;
     if !new.first_name.trim().is_empty() && new.first_name.len() > 64
         || !new.last_name.trim().is_empty() && new.last_name.len() > 64
     {

@@ -1,8 +1,10 @@
 //! Signed tokens (HS256) and the request extractor.
 //!
-//! Two purposes: `access` grants API access; `two_factor` only bridges a
-//! successful password check to the TOTP step (or setup, when the
-//! company mandates 2FA) and is rejected everywhere else. Tokens embed
+//! Three purposes: `access` grants API access; `two_factor` only bridges
+//! a successful password check to the TOTP step (or setup, when the
+//! company mandates 2FA); `password_change` only bridges a fully proved
+//! sign-in to the forced change an expired password demands. The bridge
+//! purposes are rejected everywhere else. Tokens embed
 //! the user's security stamp, and [`CurrentUser`] re-checks it against
 //! the database — changing a password or disabling a user kills every
 //! outstanding token immediately.
@@ -28,6 +30,7 @@ use serde::{Deserialize, Serialize};
 pub enum TokenPurpose {
     Access,
     TwoFactor,
+    PasswordChange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +48,9 @@ pub struct Claims {
 pub fn issue(config: &AuthConfig, user: &user::Model, purpose: TokenPurpose) -> Result<String> {
     let ttl = match purpose {
         TokenPurpose::Access => config.access_token_ttl_secs,
-        TokenPurpose::TwoFactor => config.two_factor_token_ttl_secs,
+        // Both bridges are the same kind of thing — a few minutes to
+        // finish signing in — so they share the one lifetime.
+        TokenPurpose::TwoFactor | TokenPurpose::PasswordChange => config.two_factor_token_ttl_secs,
     };
     let now = Utc::now().timestamp();
     let claims = Claims {
@@ -106,6 +111,24 @@ impl<S: Send + Sync> FromRequestParts<S> for TwoFactorUser {
         }
         let user = load_stamped_user(parts, &claims).await?;
         Ok(TwoFactorUser(user))
+    }
+}
+
+/// Extractor for the forced password change: accepts only
+/// `password_change`-purpose tokens, which login issues in place of a
+/// session when the password has aged out.
+pub struct PasswordChangeUser(pub user::Model);
+
+impl<S: Send + Sync> FromRequestParts<S> for PasswordChangeUser {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let claims = claims_from_parts(parts)?;
+        if claims.purpose != TokenPurpose::PasswordChange {
+            return Err(Error::Unauthorized.into_response());
+        }
+        let user = load_stamped_user(parts, &claims).await?;
+        Ok(PasswordChangeUser(user))
     }
 }
 

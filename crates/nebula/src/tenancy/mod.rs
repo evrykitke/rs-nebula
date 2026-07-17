@@ -74,6 +74,22 @@ pub struct NewTenant {
     pub default_currency: Option<String>,
 }
 
+/// A company's password-policy overrides (see
+/// `PUT /auth/tenant/password-policy`). `None` in any field means the rule
+/// follows the deployment's `auth.*` default rather than being pinned.
+#[derive(Debug, Clone, Default)]
+pub struct PasswordPolicyOverrides {
+    pub min_length: Option<i32>,
+    pub require_uppercase: Option<bool>,
+    pub require_lowercase: Option<bool>,
+    pub require_digit: Option<bool>,
+    pub require_symbol: Option<bool>,
+    pub expiry_days: Option<i32>,
+    pub history_count: Option<i32>,
+    pub lockout_max_failed: Option<i32>,
+    pub lockout_secs: Option<i32>,
+}
+
 /// Editable company-profile fields (see `PUT /auth/tenant/profile`).
 pub struct CompanyProfile {
     pub display_name: String,
@@ -233,6 +249,34 @@ impl TenantManager {
             .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
         let mut active: tenant::ActiveModel = tenant.into();
         active.require_two_factor = Set(required);
+        self.saved(active.update(&self.main).await?).await
+    }
+
+    /// Company-wide password policy. Every field is an override: `None`
+    /// reverts that rule to the deployment default, so a company can hand
+    /// a decision back rather than being stuck with a copy of whatever the
+    /// default was the day they first opened the settings page. The
+    /// deployment's floor is enforced by the caller, which holds the
+    /// config to compare against.
+    pub async fn set_password_policy(
+        &self,
+        id: Uuid,
+        overrides: PasswordPolicyOverrides,
+    ) -> Result<tenant::Model> {
+        let tenant = self
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("tenant {id}")))?;
+        let mut active: tenant::ActiveModel = tenant.into();
+        active.password_min_length = Set(overrides.min_length);
+        active.password_require_uppercase = Set(overrides.require_uppercase);
+        active.password_require_lowercase = Set(overrides.require_lowercase);
+        active.password_require_digit = Set(overrides.require_digit);
+        active.password_require_symbol = Set(overrides.require_symbol);
+        active.password_expiry_days = Set(overrides.expiry_days);
+        active.password_history_count = Set(overrides.history_count);
+        active.lockout_max_failed = Set(overrides.lockout_max_failed);
+        active.lockout_secs = Set(overrides.lockout_secs);
         self.saved(active.update(&self.main).await?).await
     }
 

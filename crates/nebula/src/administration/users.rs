@@ -74,7 +74,12 @@ async fn create_user(
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<Profile>> {
     authz.require(permission::names::USERS_CREATE).await?;
-    let users = state.users(db.map(|Extension(d)| d));
+    // An admin onboarding a teammate is held to the company's password
+    // policy too — a rule that only applied to people changing their own
+    // password would be trivial to sidestep.
+    let users = state
+        .users_with_policy(authz.user.tenant_id, db.map(|Extension(d)| d))
+        .await?;
     let user = users
         .create(NewUser {
             tenant_id: authz.user.tenant_id,

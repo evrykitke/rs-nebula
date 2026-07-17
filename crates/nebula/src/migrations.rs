@@ -28,6 +28,9 @@ impl MigratorTrait for Migrator {
             Box::new(CreateReportJobs),
             Box::new(AddTenantCompanyContact),
             Box::new(AddReportJobParams),
+            Box::new(AddTenantPasswordPolicy),
+            Box::new(CreatePasswordHistory),
+            Box::new(CreateTenantMailSettings),
         ]
     }
 
@@ -109,6 +112,15 @@ enum Tenants {
     Email,
     Website,
     Phone,
+    PasswordMinLength,
+    PasswordRequireUppercase,
+    PasswordRequireLowercase,
+    PasswordRequireDigit,
+    PasswordRequireSymbol,
+    PasswordExpiryDays,
+    PasswordHistoryCount,
+    LockoutMaxFailed,
+    LockoutSecs,
     CreatedAt,
 }
 
@@ -1368,6 +1380,257 @@ impl MigrationTrait for AddTenantCompanyContact {
             )
             .await
     }
+}
+
+/// The company's password policy. Every column is nullable and null means
+/// "use the deployment default from `auth.*`" — the same override shape as
+/// `audit_retention_days`, so a tenant that never opens the settings page
+/// keeps whatever the deployment chose, and a policy tightened in config
+/// reaches those tenants without a data migration.
+///
+/// These live on the tenant row because the login path already loads it;
+/// a policy in the tenant's own database would be unreadable at exactly
+/// the moment it is needed, before a session exists.
+struct AddTenantPasswordPolicy;
+
+impl MigrationName for AddTenantPasswordPolicy {
+    fn name(&self) -> &str {
+        "m20260717_000017_add_tenant_password_policy"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddTenantPasswordPolicy {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::PasswordMinLength).integer().null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::PasswordRequireUppercase)
+                            .boolean()
+                            .null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::PasswordRequireLowercase)
+                            .boolean()
+                            .null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::PasswordRequireDigit).boolean().null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::PasswordRequireSymbol)
+                            .boolean()
+                            .null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::PasswordExpiryDays).integer().null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::PasswordHistoryCount).integer().null(),
+                    )
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Tenants::LockoutMaxFailed).integer().null(),
+                    )
+                    .add_column_if_not_exists(ColumnDef::new(Tenants::LockoutSecs).integer().null())
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Tenants::Table)
+                    .drop_column(Tenants::PasswordMinLength)
+                    .drop_column(Tenants::PasswordRequireUppercase)
+                    .drop_column(Tenants::PasswordRequireLowercase)
+                    .drop_column(Tenants::PasswordRequireDigit)
+                    .drop_column(Tenants::PasswordRequireSymbol)
+                    .drop_column(Tenants::PasswordExpiryDays)
+                    .drop_column(Tenants::PasswordHistoryCount)
+                    .drop_column(Tenants::LockoutMaxFailed)
+                    .drop_column(Tenants::LockoutSecs)
+                    .to_owned(),
+            )
+            .await
+    }
+}
+
+/// Hashes of passwords a user has retired, so a reuse policy can refuse
+/// them. Only hashes are kept — this table can no more reveal an old
+/// password than the user table can reveal the current one. Rows past the
+/// policy's window are deleted on each change, so the table stays bounded.
+struct CreatePasswordHistory;
+
+impl MigrationName for CreatePasswordHistory {
+    fn name(&self) -> &str {
+        "m20260717_000018_create_password_history"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreatePasswordHistory {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(PasswordHistory::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(PasswordHistory::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(PasswordHistory::UserId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(PasswordHistory::PasswordHash)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PasswordHistory::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_password_history_user")
+                    .if_not_exists()
+                    .table(PasswordHistory::Table)
+                    .col(PasswordHistory::UserId)
+                    .col(PasswordHistory::CreatedAt)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(PasswordHistory::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum PasswordHistory {
+    Table,
+    Id,
+    UserId,
+    PasswordHash,
+    CreatedAt,
+}
+
+/// A tenant's own SMTP server, so one deployment can send as many
+/// different companies. Its own table rather than more columns on
+/// `tenants`: mail is read only when something is sent, whereas the tenant
+/// row is read on every login, and a live credential should not ride along
+/// with it.
+///
+/// `password_encrypted` holds AES-GCM ciphertext (see [`crate::crypto`]),
+/// never the password. It is write-only across the API — the settings
+/// endpoint reports whether one is set, never what it is.
+struct CreateTenantMailSettings;
+
+impl MigrationName for CreateTenantMailSettings {
+    fn name(&self) -> &str {
+        "m20260717_000019_create_tenant_mail_settings"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateTenantMailSettings {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(TenantMailSettings::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TenantMailSettings::TenantId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(TenantMailSettings::Host)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TenantMailSettings::Port).integer().not_null())
+                    .col(
+                        ColumnDef::new(TenantMailSettings::Username)
+                            .string_len(255)
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(TenantMailSettings::PasswordEncrypted)
+                            .text()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(TenantMailSettings::Encryption)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TenantMailSettings::FromAddress)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TenantMailSettings::FromName)
+                            .string_len(255)
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(TenantMailSettings::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(TenantMailSettings::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(TenantMailSettings::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum TenantMailSettings {
+    Table,
+    TenantId,
+    Host,
+    Port,
+    Username,
+    PasswordEncrypted,
+    Encryption,
+    FromAddress,
+    FromName,
+    Enabled,
+    UpdatedAt,
 }
 
 struct AddAuditLogMessage;

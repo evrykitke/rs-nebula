@@ -34,6 +34,20 @@ pub struct Model {
     pub website: Option<String>,
     /// Contact phone number, shown on report chrome and the profile.
     pub phone: Option<String>,
+
+    // The company's password policy. Null means "use the deployment
+    // default" from `auth.*`; see `crate::auth::policy::PasswordPolicy`,
+    // which resolves the two into the rules actually enforced.
+    pub password_min_length: Option<i32>,
+    pub password_require_uppercase: Option<bool>,
+    pub password_require_lowercase: Option<bool>,
+    pub password_require_digit: Option<bool>,
+    pub password_require_symbol: Option<bool>,
+    pub password_expiry_days: Option<i32>,
+    pub password_history_count: Option<i32>,
+    pub lockout_max_failed: Option<i32>,
+    pub lockout_secs: Option<i32>,
+
     pub created_at: DateTimeUtc,
 }
 

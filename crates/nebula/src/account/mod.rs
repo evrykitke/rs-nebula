@@ -9,10 +9,11 @@
 //!   tenant is resolved from the credentials via the login directory
 //!   (`tenant_selection` answers an ambiguous login; retry with the
 //!   header). Answers `success` with an access token,
-//!   `two_factor_required` (user has an authenticator) or
+//!   `two_factor_required` (user has an authenticator),
 //!   `two_factor_setup_required` (company mandates 2FA but the user has
-//!   not set it up), the latter two with a short-lived bridge token;
-//!   every answer names the resolved tenant for subsequent headers
+//!   not set it up) or `password_expired` (the password is older than the
+//!   company's policy allows), the latter three with a short-lived bridge
+//!   token; every answer names the resolved tenant for subsequent headers
 //! - `POST /auth/login/two-factor` — completes login with an
 //!   authenticator or recovery code
 //! - `POST /auth/two-factor/setup` + `/confirm` — enable an authenticator
@@ -22,6 +23,8 @@
 //!   refused while the company mandates 2FA)
 //! - `POST /auth/token/refresh` + `POST /auth/logout` — session lifecycle
 //! - `POST /auth/password` — change the password (revokes all sessions)
+//! - `POST /auth/password/expired` — replace an expired password with a
+//!   bridge token, when login refused to issue a session over it
 //! - `GET /auth/me` — the authenticated profile;
 //!   `GET /auth/me/permissions` — the caller's effective permissions
 //!
@@ -36,9 +39,10 @@ pub mod events;
 
 use crate::audit::Audit;
 use crate::auth::authz::Authz;
-use crate::auth::jwt::{self, CurrentUser, TokenPurpose, TwoFactorUser};
+use crate::auth::jwt::{self, CurrentUser, PasswordChangeUser, TokenPurpose, TwoFactorUser};
 use crate::auth::manager::{NewUser, TwoFactorSetup, UserManager};
 use crate::auth::permission::Registry;
+use crate::auth::policy::PasswordPolicy;
 use crate::auth::role_manager::RoleManager;
 use crate::auth::state::AuthState;
 use crate::auth::user::{self, Profile};
@@ -82,6 +86,7 @@ impl Module for AccountModule {
                 .route("/auth/token/refresh", post(refresh))
                 .route("/auth/logout", post(logout))
                 .route("/auth/password", post(change_password))
+                .route("/auth/password/expired", post(change_expired_password))
                 .route("/auth/me", get(me))
                 .route("/auth/me/permissions", get(my_permissions))
                 .with_state(state),
@@ -102,6 +107,7 @@ impl Module for AccountModule {
     refresh,
     logout,
     change_password,
+    change_expired_password,
     me,
     my_permissions,
 ))]
@@ -167,10 +173,14 @@ async fn register(
             if let Some(code) = &req.currency {
                 state.known_currency(code).await?;
             }
-            // A bad admin account (short password, invalid email) must
-            // fail here, before a tenant — and possibly a whole database
-            // — is provisioned for it.
-            crate::auth::manager::validate_new_user(&admin(None), &state.config)?;
+            // A bad admin account (weak password, invalid email) must fail
+            // here, before a tenant — and possibly a whole database — is
+            // provisioned for it. The company does not exist yet, so the
+            // deployment's policy is the only one there is to apply.
+            crate::auth::manager::validate_new_user(
+                &admin(None),
+                &PasswordPolicy::from_config(&state.config),
+            )?;
             let tenant = manager
                 .create(NewTenant {
                     display_name: req
@@ -310,6 +320,13 @@ pub enum LoginResponse {
         two_factor_token: String,
         tenant: Option<String>,
     },
+    /// The password is older than the company's policy allows: set a new
+    /// one at `POST /auth/password/expired` with this token, then log in
+    /// again. No session is issued until it is changed.
+    PasswordExpired {
+        password_token: String,
+        tenant: Option<String>,
+    },
     /// The credentials matched accounts in more than one company: retry
     /// with the tenant header set to the chosen one.
     TenantSelection { tenants: Vec<TenantChoice> },
@@ -342,7 +359,9 @@ async fn login(
         return resolve_and_login(&state, &req, audit).await.map(Json);
     }
 
-    let users = state.users(db.map(|Extension(d)| d));
+    let users = state
+        .users_with_policy(tenant.as_ref().map(|t| t.id), db.map(|Extension(d)| d))
+        .await?;
     let user = match users
         .authenticate(tenant.as_ref().map(|t| t.id), &req.login, &req.password)
         .await
@@ -387,7 +406,11 @@ async fn resolve_and_login(
             continue;
         }
         let db = manager.connection_for(&tenant).await?;
-        let users = state.users(Some(db));
+        // The tenant row is already in hand, so its policy costs nothing
+        // to resolve here — each candidate company is judged by its own
+        // lockout rules.
+        let policy = PasswordPolicy::resolve(&state.config, Some(&tenant));
+        let users = state.users(Some(db)).with_policy(policy);
         match users
             .authenticate(Some(tenant.id), &req.login, &req.password)
             .await
@@ -455,13 +478,60 @@ async fn finish_login(
         });
     }
 
+    issue_session(
+        state,
+        users,
+        tenant.as_ref().map(|t| t.id),
+        tenant_name,
+        user,
+        audit,
+        "",
+    )
+    .await
+}
+
+/// Identity is fully proved — issue the session, unless the password has
+/// aged past the company's policy and must be replaced first.
+///
+/// The expiry check sits *after* the two-factor branches deliberately.
+/// The forced change accepts the bridge token as its proof, so running
+/// this before the second factor would let someone holding nothing but a
+/// stolen password set a new one and take the account outright — turning
+/// a policy meant to harden accounts into a way through the very control
+/// protecting them.
+async fn issue_session(
+    state: &AuthState,
+    users: &UserManager,
+    tenant_id: Option<Uuid>,
+    tenant_name: Option<String>,
+    user: user::Model,
+    audit: Audit,
+    how: &str,
+) -> Result<LoginResponse> {
+    if users.password_expired(&user) {
+        let token = jwt::issue(&state.config, &user, TokenPurpose::PasswordChange)?;
+        audit
+            .0
+            .with_tenant(tenant_id)
+            .with_user(Some(user.id))
+            .event(format!(
+                "{}'s password has expired and must be changed",
+                user.user_name
+            ))
+            .await;
+        return Ok(LoginResponse::PasswordExpired {
+            password_token: token,
+            tenant: tenant_name,
+        });
+    }
+
     let token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
     let refresh_token = users.issue_refresh_token(user.id).await?;
     audit
         .0
-        .with_tenant(tenant.as_ref().map(|t| t.id))
+        .with_tenant(tenant_id)
         .with_user(Some(user.id))
-        .event(format!("{} logged in", user.user_name))
+        .event(format!("{} logged in{how}", user.user_name))
         .await;
     Ok(LoginResponse::Success {
         access_token: token,
@@ -488,21 +558,22 @@ async fn login_two_factor(
     audit: Audit,
     Json(req): Json<TwoFactorLoginRequest>,
 ) -> Result<Json<LoginResponse>> {
-    let users = state.users(db.map(|Extension(d)| d));
+    let tenant = tenant.map(|Extension(t)| t);
+    let users = state
+        .users_with_policy(tenant.as_ref().map(|t| t.id), db.map(|Extension(d)| d))
+        .await?;
     let user = users.verify_two_factor(user, &req.code).await?;
-    let token = jwt::issue(&state.config, &user, TokenPurpose::Access)?;
-    let refresh_token = users.issue_refresh_token(user.id).await?;
-    audit
-        .0
-        .with_user(Some(user.id))
-        .event(format!("{} logged in with two-factor", user.user_name))
-        .await;
-    Ok(Json(LoginResponse::Success {
-        access_token: token,
-        refresh_token,
-        user: user.into(),
-        tenant: tenant.map(|Extension(t)| t.name),
-    }))
+    issue_session(
+        &state,
+        &users,
+        tenant.as_ref().map(|t| t.id),
+        tenant.map(|t| t.name),
+        user,
+        audit,
+        " with two-factor",
+    )
+    .await
+    .map(Json)
 }
 
 /// Accepts either a full access token (profile opt-in) or a two-factor
@@ -668,11 +739,15 @@ pub struct ChangePasswordRequest {
 async fn change_password(
     State(state): State<AuthState>,
     CurrentUser(user): CurrentUser,
+    tenant: Option<Extension<TenantRef>>,
     db: Option<Extension<DatabaseConnection>>,
     audit: Audit,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<Profile>> {
-    let users = state.users(db.map(|Extension(d)| d));
+    let tenant = tenant.map(|Extension(t)| t);
+    let users = state
+        .users_with_policy(tenant.as_ref().map(|t| t.id), db.map(|Extension(d)| d))
+        .await?;
     let user = users
         .change_password(user, &req.current_password, &req.new_password)
         .await?;
@@ -681,6 +756,47 @@ async fn change_password(
         .event(format!("{} changed their password", user.user_name))
         .await;
     Ok(Json(user.into()))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ExpiredPasswordRequest {
+    pub new_password: String,
+}
+
+/// Replace a password login refused as expired, using the bridge token
+/// from the `password_expired` answer. No session is issued: the user
+/// signs in again with the new password, the same way mandated two-factor
+/// setup ends.
+///
+/// The current password is not asked for again — the bridge token is
+/// issued only to someone who just proved it (and cleared two-factor, if
+/// the company mandates it), and re-typing a password the system has
+/// already refused is not a check, only a chore.
+#[utoipa::path(post, path = "/auth/password/expired", tag = "auth",
+    request_body = ExpiredPasswordRequest,
+    responses((status = 200, body = StatusResponse)))]
+async fn change_expired_password(
+    State(state): State<AuthState>,
+    PasswordChangeUser(user): PasswordChangeUser,
+    tenant: Option<Extension<TenantRef>>,
+    db: Option<Extension<DatabaseConnection>>,
+    audit: Audit,
+    Json(req): Json<ExpiredPasswordRequest>,
+) -> Result<Json<StatusResponse>> {
+    let tenant = tenant.map(|Extension(t)| t);
+    let users = state
+        .users_with_policy(tenant.as_ref().map(|t| t.id), db.map(|Extension(d)| d))
+        .await?;
+    let user = users.replace_password(user, &req.new_password).await?;
+    audit
+        .0
+        .with_tenant(tenant.as_ref().map(|t| t.id))
+        .with_user(Some(user.id))
+        .event(format!("{} replaced an expired password", user.user_name))
+        .await;
+    Ok(Json(StatusResponse {
+        status: "password_changed".into(),
+    }))
 }
 
 #[utoipa::path(get, path = "/auth/me", tag = "auth",
