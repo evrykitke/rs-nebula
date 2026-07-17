@@ -13,7 +13,7 @@
 //! signature band.
 
 use nebula::{
-    Align, Callout, CalloutStyle, Column, Group, KeyValue, Orientation, Report, Signature,
+    Align, Callout, CalloutStyle, Column, Group, KeyValue, Orientation, Report, Row, Signature,
     SpaceSize, Table, TextStyle, Widget,
 };
 use rust_decimal::Decimal;
@@ -168,7 +168,9 @@ impl Document {
         report = report.with(Widget::Table(Table {
             title: None,
             columns: self.columns,
-            rows: self.rows,
+            // A document's lines are all the same kind of thing — the goods on
+            // one order — so none is coloured apart from the others.
+            rows: self.rows.into_iter().map(Row::new).collect(),
             totals: footer,
         }));
 

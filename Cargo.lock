@@ -3197,7 +3197,6 @@ dependencies = [
  "typst-as-lib",
  "typst-layout",
  "typst-pdf",
- "typst-svg",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

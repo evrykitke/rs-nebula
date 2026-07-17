@@ -420,6 +420,78 @@ impl Group {
     }
 }
 
+/// The colour a table row carries, for a table whose rows fall into kinds the
+/// reader needs to tell apart at a glance — a trial balance interleaves assets,
+/// liabilities and income, and reading the type column on every line is how a
+/// misfiled account goes unnoticed.
+///
+/// Named for the hue, not for a meaning. What a colour *means* belongs to the
+/// report: a statement colours assets one way and liabilities another, and
+/// neither is "good" or "bad". A framework palette of `Success`/`Danger` would
+/// make every such report claim an expense is an error to say it is red. These
+/// are print colours on fixed white paper — there is no dark mode to re-map
+/// them for, so naming the hue costs nothing and lies about nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowTone {
+    Blue,
+    Amber,
+    Violet,
+    Green,
+    Red,
+    Slate,
+}
+
+impl RowTone {
+    /// The row's wash, and the ink a `strong` row is written in — a light tint
+    /// that survives a photocopier, and a colour dark enough to read at 9pt.
+    pub(crate) fn colors(self) -> (&'static str, &'static str) {
+        match self {
+            RowTone::Blue => ("eff6ff", "1e40af"),
+            RowTone::Amber => ("fffbeb", "92400e"),
+            RowTone::Violet => ("f5f3ff", "5b21b6"),
+            RowTone::Green => ("ecfdf5", "065f46"),
+            RowTone::Red => ("fef2f2", "991b1b"),
+            RowTone::Slate => ("f1f5f9", "334155"),
+        }
+    }
+}
+
+/// One row of a [`Table`]: its cells, and how it is set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Row {
+    pub cells: Vec<String>,
+    /// The kind of thing this row is, as a colour. Plain when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<RowTone>,
+    /// Set apart from the rows around it — a section heading, or a subtotal
+    /// that is not the table's grand total.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strong: bool,
+}
+
+impl Row {
+    pub fn new<I, S>(cells: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            cells: cells.into_iter().map(Into::into).collect(),
+            tone: None,
+            strong: false,
+        }
+    }
+    pub fn tone(mut self, tone: RowTone) -> Self {
+        self.tone = Some(tone);
+        self
+    }
+    pub fn strong(mut self) -> Self {
+        self.strong = true;
+        self
+    }
+}
+
 /// A data table: labelled, aligned columns and string-rendered rows, with
 /// an optional totals row the theme sets apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,7 +499,7 @@ pub struct Table {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub columns: Vec<Column>,
-    pub rows: Vec<Vec<String>>,
+    pub rows: Vec<Row>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totals: Option<Vec<String>>,
 }
@@ -440,12 +512,18 @@ impl Table {
         self.title = Some(title.into());
         self
     }
+    /// A plain row — the common case.
     pub fn row<I, S>(mut self, cells: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.rows.push(cells.into_iter().map(Into::into).collect());
+        self.rows.push(Row::new(cells));
+        self
+    }
+    /// A row that carries a tone, a weight, or both. See [`Row`].
+    pub fn add(mut self, row: Row) -> Self {
+        self.rows.push(row);
         self
     }
     pub fn totals<I, S>(mut self, cells: I) -> Self
@@ -979,7 +1057,9 @@ impl From<&Table> for DataTable {
                     numeric: c.align == Align::End,
                 })
                 .collect(),
-            rows: table.rows.clone(),
+            // The on-screen table gets the words, not the wash: it is the app's
+            // own datatable and wears the app's theme.
+            rows: table.rows.iter().map(|r| r.cells.clone()).collect(),
             totals: table.totals.clone(),
         }
     }
@@ -1397,38 +1477,8 @@ impl Reporting {
         Ok(tables_of(&doc))
     }
 
-    /// Render a report to one themed SVG per page, for the in-app viewer. The
-    /// preview always uses the PDF layout (there is no Excel preview), so the
-    /// pages match a PDF download exactly. Requires the `reporting` feature.
-    pub async fn preview(
-        &self,
-        cx: &RenderCx,
-        name: &str,
-        format: Option<ReportFormat>,
-    ) -> Result<Vec<String>> {
-        let def = self
-            .inner
-            .reports
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("report {name:?}")))?
-            .clone();
-
-        let doc = self.document(cx, def.as_ref(), format).await?;
-
-        #[cfg(feature = "reporting")]
-        {
-            typst_backend::render_svg(&doc)
-        }
-        #[cfg(not(feature = "reporting"))]
-        {
-            let _ = doc;
-            Err(Error::internal("report preview requires the reporting feature"))
-        }
-    }
-
     /// Resolve a report's format and datasources and assemble the [`Document`]
-    /// that the renderers consume. Shared by [`render`](Self::render) and
-    /// [`preview`](Self::preview).
+    /// that the renderers consume.
     async fn document(
         &self,
         cx: &RenderCx,
@@ -2100,40 +2150,6 @@ mod typst_backend {
         }
     }
 
-    /// Compile the same document Typst uses for the PDF, but export one SVG
-    /// per page — the source of the themed in-app preview. Reusing the PDF
-    /// layout keeps the preview and the download pixel-identical.
-    pub(super) fn render_svg(doc: &Document) -> Result<Vec<String>> {
-        let mut assets: Vec<(String, Vec<u8>)> = Vec::new();
-        let source = emit(doc, &mut assets);
-
-        let resolver: Vec<(&str, Vec<u8>)> = assets
-            .iter()
-            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
-            .collect();
-
-        let engine = TypstEngine::builder()
-            .main_file(source)
-            .search_fonts_with(
-                TypstKitFontOptions::default()
-                    .include_system_fonts(false)
-                    .include_embedded_fonts(true),
-            )
-            .with_static_file_resolver(resolver)
-            .build();
-
-        let document = engine
-            .compile::<PagedDocument>()
-            .output
-            .map_err(|e| Error::internal(format!("report typesetting failed: {e}")))?;
-
-        let opts = typst_svg::SvgOptions::default();
-        Ok(document
-            .pages()
-            .iter()
-            .map(|page| typst_svg::svg(page, &opts))
-            .collect())
-    }
 
     /// Per-format look. Sizes are Typst length literals; colours are hex
     /// without the leading `#`.
@@ -3062,12 +3078,39 @@ mod typst_backend {
             }
             s.push_str("),\n");
         }
-        // Body rows.
+        // Body rows. A plain row is left to the table's own fill (the zebra
+        // function above); a toned one sets its cells' fill directly, which
+        // overrides it — the category must win over the banding, or every other
+        // row of a kind would read as a different kind.
         for row in &table.rows {
             s.push_str("  ");
-            for cell in row {
+            let colors = row.tone.map(RowTone::colors);
+            for cell in &row.cells {
+                match colors {
+                    Some((wash, _)) => {
+                        s.push_str("table.cell(fill: ");
+                        s.push_str(&color(wash));
+                        s.push(')');
+                    }
+                    None => {}
+                }
                 s.push('[');
-                s.push_str(&lit(cell));
+                // A strong row is written in its own ink: a section heading
+                // reads as the heading of *that* category, not as bold text
+                // that happens to sit on a tinted band.
+                if row.strong {
+                    s.push_str("#strong[");
+                    if let Some((_, ink)) = colors {
+                        s.push_str("#text(fill: ");
+                        s.push_str(&color(ink));
+                        s.push(')');
+                    }
+                    s.push('[');
+                    s.push_str(&lit(cell));
+                    s.push_str("]]");
+                } else {
+                    s.push_str(&lit(cell));
+                }
                 s.push_str("], ");
             }
             s.push('\n');
@@ -3433,8 +3476,16 @@ mod excel_backend {
                     }
                     row += 1;
                     for r in &table.rows {
-                        for (c, cell) in r.iter().enumerate() {
-                            ws.write(row, c as u16, cell.as_str()).map_err(xerr)?;
+                        for (c, cell) in r.cells.iter().enumerate() {
+                            // A section heading or subtotal keeps its weight
+                            // here too; the tone does not travel, since a
+                            // spreadsheet is for working on, not for reading.
+                            if r.strong {
+                                ws.write_with_format(row, c as u16, cell.as_str(), &bold)
+                                    .map_err(xerr)?;
+                            } else {
+                                ws.write(row, c as u16, cell.as_str()).map_err(xerr)?;
+                            }
                         }
                         row += 1;
                     }
@@ -3569,9 +3620,70 @@ mod tests {
         assert_eq!(ReportOutput::parse("xlsx"), Some(ReportOutput::Excel));
     }
 
-    /// The per-theme letterhead must typeset (and export SVG) for every
-    /// format with a fully populated company profile — the new contact
-    /// fields and the distinct header layouts all produce valid Typst.
+    /// A toned row must typeset, in every format. The tone is emitted as a
+    /// per-cell fill that overrides the theme's own — easy to get subtly wrong
+    /// in Typst, and a broken `table.cell` fails the whole document, not the
+    /// row. Set `REPORT_OUT_DIR` to look at what it actually produced.
+    #[cfg(feature = "reporting")]
+    #[test]
+    fn toned_rows_render_for_every_format() {
+        let tones = [
+            (RowTone::Blue, "1000", "Cash at bank", "Asset"),
+            (RowTone::Amber, "2000", "Trade creditors", "Liability"),
+            (RowTone::Violet, "3000", "Share capital", "Equity"),
+            (RowTone::Green, "4000", "Sales", "Revenue"),
+            (RowTone::Red, "5000", "Rent", "Expense"),
+        ];
+        for format in [
+            ReportFormat::Modern,
+            ReportFormat::Compact,
+            ReportFormat::Corporate,
+        ] {
+            let mut table = Table::new(vec![
+                Column::new("Code"),
+                Column::wide("Account"),
+                Column::center("Type"),
+                Column::number("Debit"),
+                Column::number("Credit"),
+            ]);
+            // A strong heading, then the toned lines beneath it — a statement's
+            // shape, which is what has to survive the round trip.
+            table = table.add(
+                Row::new(["", "Statement of balances", "", "", ""])
+                    .tone(RowTone::Slate)
+                    .strong(),
+            );
+            for (tone, code, name, kind) in tones {
+                table = table.add(
+                    Row::new([code, name, kind, "1,000.00", ""]).tone(tone),
+                );
+            }
+            table = table.totals(["", "", "Total", "5,000.00", "5,000.00"]);
+
+            let doc = Document {
+                company: CompanyInformation::default(),
+                report: Report::new("Trial Balance").with(table.into_widget()),
+                title: "Trial Balance".into(),
+                format,
+                watermark: None,
+            };
+            let pdf = typst_backend::TypstRenderer::new()
+                .render(&doc)
+                .unwrap_or_else(|e| panic!("{format:?} toned table failed: {e}"));
+            assert!(pdf.bytes.starts_with(b"%PDF"), "{format:?} is not a PDF");
+            if let Ok(dir) = std::env::var("REPORT_OUT_DIR") {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    format!("{dir}/toned-{}.pdf", format.as_str()),
+                    &pdf.bytes,
+                );
+            }
+        }
+    }
+
+    /// The per-theme letterhead must typeset for every format with a fully
+    /// populated company profile — the contact fields and the distinct header
+    /// layouts all produce valid Typst.
     #[cfg(feature = "reporting")]
     #[test]
     fn letterhead_renders_for_every_format() {
@@ -3602,18 +3714,8 @@ mod tests {
                 .render(&doc)
                 .unwrap_or_else(|e| panic!("{format:?} header PDF failed: {e}"));
             assert!(pdf.bytes.starts_with(b"%PDF"), "{format:?} is not a PDF");
-            let pages = typst_backend::render_svg(&doc)
-                .unwrap_or_else(|e| panic!("{format:?} header SVG failed: {e}"));
-            assert!(
-                pages.first().is_some_and(|p| p.trim_start().starts_with("<svg")),
-                "{format:?} preview is not SVG"
-            );
             if let Ok(dir) = std::env::var("REPORT_OUT_DIR") {
                 let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(
-                    format!("{dir}/letterhead-{}.svg", format.as_str()),
-                    pages[0].as_bytes(),
-                );
                 let _ = std::fs::write(
                     format!("{dir}/letterhead-{}.pdf", format.as_str()),
                     &pdf.bytes,

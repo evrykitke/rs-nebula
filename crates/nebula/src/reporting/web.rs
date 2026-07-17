@@ -4,7 +4,7 @@
 
 use super::{
     Column, Orientation, RenderCx, Report, ReportFormat, ReportInfo, ReportJob, ReportOutput,
-    ReportParams, ReportSettings, ReportTables, Reporting, Table,
+    ReportParams, ReportSettings, ReportTables, Reporting, Row, Table,
 };
 use std::collections::HashMap;
 use crate::auth::authz::Authz;
@@ -17,14 +17,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use sea_orm::DatabaseConnection;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// The reporting routes, merged into the app by the kernel:
 /// - `GET /reports` — the report catalogue
 /// - `GET|PUT /reports/settings` — the tenant's report preferences
 /// - `POST /reports/list-export?output=pdf` — render a caller-supplied list
 /// - `GET /reports/{name}?format=modern&output=pdf` — render a report
-/// - `GET /reports/{name}/preview` — themed SVG preview pages
 /// - `GET /reports/{name}/table` — the interactive datatable payload
 /// - `POST /reports/{name}/jobs` — queue a background render
 /// - `GET /reports/jobs`, `GET /reports/jobs/{id}`,
@@ -41,7 +40,6 @@ pub(crate) fn routes() -> Router {
             post(export_list).layer(DefaultBodyLimit::max(EXPORT_BODY_LIMIT)),
         )
         .route("/reports/{name}", get(render_report))
-        .route("/reports/{name}/preview", get(preview_report))
         .route("/reports/{name}/table", get(table_report))
         .route("/reports/{name}/jobs", post(enqueue_report_job))
         .route("/reports/jobs", get(list_report_jobs))
@@ -87,14 +85,6 @@ fn parse_output(value: Option<&str>) -> Result<ReportOutput> {
             .ok_or_else(|| Error::Validation(format!("unknown report output {s:?}"))),
         None => Ok(ReportOutput::default()),
     }
-}
-
-/// The themed in-app preview: the report's pages as SVG, for the viewer to
-/// render inside the app's own chrome (instead of the browser's native PDF
-/// viewer). One string per page.
-#[derive(Debug, Serialize)]
-struct ReportPreview {
-    pages: Vec<String>,
 }
 
 async fn list_reports(
@@ -225,7 +215,9 @@ impl ListExport {
         let table = Table {
             title: None,
             columns: self.columns,
-            rows: self.rows,
+            // A list export is a list: every row is the same kind of thing, so
+            // none of them is set apart.
+            rows: self.rows.into_iter().map(Row::new).collect(),
             totals: self.totals,
         };
         let mut report = Report::new(self.title).orientation(self.orientation);
@@ -290,28 +282,6 @@ async fn export_list(
         rendered.bytes,
     )
         .into_response())
-}
-
-async fn preview_report(
-    Extension(reporting): Extension<Reporting>,
-    authz: Authz,
-    db: Option<Extension<DatabaseConnection>>,
-    tenant: Option<Extension<TenantRef>>,
-    Path(name): Path<String>,
-    Query(params): Query<RenderParams>,
-) -> Result<Json<ReportPreview>> {
-    if let Some(required) = reporting.required_permission(&name) {
-        authz.require(required).await?;
-    }
-
-    let format = parse_format(params.format.as_deref())?;
-    let cx = RenderCx {
-        db: db.map(|e| e.0),
-        tenant: tenant.map(|e| e.0),
-        params: params.report_params(),
-    };
-    let pages = reporting.preview(&cx, &name, format).await?;
-    Ok(Json(ReportPreview { pages }))
 }
 
 async fn table_report(

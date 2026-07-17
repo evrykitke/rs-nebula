@@ -13,7 +13,6 @@ default = ["reporting"]
 reporting = [
     "dep:typst",
     "dep:typst-pdf",
-    "dep:typst-svg",
     "dep:typst-layout",
     "dep:typst-as-lib",
     "dep:rust_xlsxwriter",
@@ -22,7 +21,6 @@ reporting = [
 [dependencies]
 typst = { version = "0.15", optional = true }
 typst-pdf = { version = "0.15", optional = true }
-typst-svg = { version = "0.15", optional = true }
 typst-layout = { version = "0.15", optional = true }
 typst-as-lib = { version = "0.16", default-features = false, features = [
     "typst-kit-fonts",
