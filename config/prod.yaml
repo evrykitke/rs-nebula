@@ -3,9 +3,15 @@
 # never from this file.
 
 server:
-  host: 0.0.0.0
+  # Loopback only: nginx terminates TLS and reverse-proxies /api to this
+  # port from the same host, so the API needs no externally bound socket.
+  host: 127.0.0.1
   port: 5000
   request_timeout_secs: 30
+  # Empty: the SPA is served from the same origin as the API
+  # (https://nebula.evrykit.com, /api proxied here), so no cross-origin
+  # request is ever made and CORS stays off.
+  cors_origins: []
 
 multitenancy:
   enabled: false
@@ -13,9 +19,34 @@ multitenancy:
 logging:
   level: info
   format: json
+  # Mirror the journal to a rolling file under the working directory
+  # (/opt/nebula/var), rolled at 5 MiB.
+  file: var/prod.log
 
 database:
-  auto_migrate: false
+  # Schema is applied at service start. Every migration is recorded and
+  # runs once per database, so a restart is a no-op once applied.
+  auto_migrate: true
+  max_connections: 20
+
+# Read-through caching through redis.url (redis runs on this host).
+cache:
+  enabled: true
+  prefix: nebula
+  default_ttl_secs: 300
+
+# Background workers connect through redis.url; boot fails fast if Redis
+# is unreachable.
+jobs:
+  enabled: true
+  concurrency: 4
+
+# Integration events through RabbitMQ (rabbitmq.url); the broker URL with
+# credentials lives in prod.local.yaml.
+events:
+  distributed: true
+  exchange: nebula.events
+  queue: nebula
 
 currencies:
   - { code: KES, minor_units: 2 }
