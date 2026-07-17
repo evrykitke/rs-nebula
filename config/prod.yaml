@@ -14,7 +14,15 @@ server:
   cors_origins: []
 
 multitenancy:
-  enabled: false
+  enabled: true
+  # Each tenant gets its own database ({slug}-{key}): a module's rows carry
+  # no tenant column, so a tenant's isolation IS the database it is handed.
+  # The `nebula` role has been granted CREATEDB for this.
+  provision_databases: true
+  # /auth/register is unauthenticated and provisions a whole database, so a
+  # public deployment needs a ceiling. Raise it deliberately as real tenants
+  # sign up; nginx additionally rate-limits the endpoint.
+  max_tenants: 25
 
 logging:
   level: info
