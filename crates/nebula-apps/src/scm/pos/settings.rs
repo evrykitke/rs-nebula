@@ -11,7 +11,8 @@
 //!   without its confirmation code. On by default; a tenant that values
 //!   queue speed over reconciliation rigour turns it off.
 //! - **receipt_*** — the paper the tills print receipts to (width, margin,
-//!   type size). The client renders to these; the server just keeps them.
+//!   type size) and which parts of the company profile the receipt header
+//!   shows. The client renders to these; the server just keeps them.
 
 use crate::scm::pos::permissions::names;
 use axum::routing::get;
@@ -47,6 +48,10 @@ pub mod row {
         pub receipt_paper_width_mm: i32,
         pub receipt_margin_mm: i32,
         pub receipt_font_size_px: i32,
+        pub receipt_show_company_name: bool,
+        pub receipt_show_address: bool,
+        pub receipt_show_contacts: bool,
+        pub receipt_show_tax_ids: bool,
         pub updated_at: DateTimeUtc,
         pub updated_by: Option<Uuid>,
     }
@@ -69,6 +74,11 @@ pub struct Settings {
     pub receipt_paper_width_mm: i32,
     pub receipt_margin_mm: i32,
     pub receipt_font_size_px: i32,
+    /// Which parts of the company profile the receipt header shows.
+    pub receipt_show_company_name: bool,
+    pub receipt_show_address: bool,
+    pub receipt_show_contacts: bool,
+    pub receipt_show_tax_ids: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +90,10 @@ impl Default for Settings {
             receipt_paper_width_mm: 80,
             receipt_margin_mm: 4,
             receipt_font_size_px: 12,
+            receipt_show_company_name: true,
+            receipt_show_address: true,
+            receipt_show_contacts: true,
+            receipt_show_tax_ids: true,
         }
     }
 }
@@ -96,6 +110,10 @@ pub async fn load<C: ConnectionTrait>(conn: &C) -> Result<Settings> {
         receipt_paper_width_mm: stored.receipt_paper_width_mm,
         receipt_margin_mm: stored.receipt_margin_mm,
         receipt_font_size_px: stored.receipt_font_size_px,
+        receipt_show_company_name: stored.receipt_show_company_name,
+        receipt_show_address: stored.receipt_show_address,
+        receipt_show_contacts: stored.receipt_show_contacts,
+        receipt_show_tax_ids: stored.receipt_show_tax_ids,
     })
 }
 
@@ -140,6 +158,10 @@ pub async fn save<C: ConnectionTrait>(
             active.receipt_paper_width_mm = Set(settings.receipt_paper_width_mm);
             active.receipt_margin_mm = Set(settings.receipt_margin_mm);
             active.receipt_font_size_px = Set(settings.receipt_font_size_px);
+            active.receipt_show_company_name = Set(settings.receipt_show_company_name);
+            active.receipt_show_address = Set(settings.receipt_show_address);
+            active.receipt_show_contacts = Set(settings.receipt_show_contacts);
+            active.receipt_show_tax_ids = Set(settings.receipt_show_tax_ids);
             active.updated_at = Set(now);
             active.updated_by = Set(by);
             active.update(conn).await?;
@@ -153,6 +175,10 @@ pub async fn save<C: ConnectionTrait>(
                 receipt_paper_width_mm: Set(settings.receipt_paper_width_mm),
                 receipt_margin_mm: Set(settings.receipt_margin_mm),
                 receipt_font_size_px: Set(settings.receipt_font_size_px),
+                receipt_show_company_name: Set(settings.receipt_show_company_name),
+                receipt_show_address: Set(settings.receipt_show_address),
+                receipt_show_contacts: Set(settings.receipt_show_contacts),
+                receipt_show_tax_ids: Set(settings.receipt_show_tax_ids),
                 updated_at: Set(now),
                 updated_by: Set(by),
             }
@@ -178,6 +204,10 @@ pub struct UpdateSettingsRequest {
     pub receipt_paper_width_mm: i32,
     pub receipt_margin_mm: i32,
     pub receipt_font_size_px: i32,
+    pub receipt_show_company_name: bool,
+    pub receipt_show_address: bool,
+    pub receipt_show_contacts: bool,
+    pub receipt_show_tax_ids: bool,
 }
 
 pub(crate) fn routes() -> Router {
@@ -251,6 +281,10 @@ async fn put_settings(
         receipt_paper_width_mm: req.receipt_paper_width_mm,
         receipt_margin_mm: req.receipt_margin_mm,
         receipt_font_size_px: req.receipt_font_size_px,
+        receipt_show_company_name: req.receipt_show_company_name,
+        receipt_show_address: req.receipt_show_address,
+        receipt_show_contacts: req.receipt_show_contacts,
+        receipt_show_tax_ids: req.receipt_show_tax_ids,
     };
     save(&db, &settings, Some(authz.user.id)).await?;
     audit

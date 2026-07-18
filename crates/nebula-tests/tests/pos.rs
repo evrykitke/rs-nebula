@@ -945,6 +945,10 @@ async fn run(url: &str) -> Result<(), String> {
         defaults.require_mpesa_reference && defaults.receipt_paper_width_mm == 80,
         "settings default to a mandatory M-Pesa code and an 80mm roll"
     );
+    ensure!(
+        defaults.receipt_show_company_name && defaults.receipt_show_tax_ids,
+        "the receipt shows the whole company block by default"
+    );
     pos_settings::save(
         &db,
         &Settings {
@@ -954,6 +958,10 @@ async fn run(url: &str) -> Result<(), String> {
             receipt_paper_width_mm: 58,
             receipt_margin_mm: 3,
             receipt_font_size_px: 11,
+            receipt_show_company_name: true,
+            receipt_show_address: false,
+            receipt_show_contacts: true,
+            receipt_show_tax_ids: false,
         },
         None,
     )
@@ -969,6 +977,10 @@ async fn run(url: &str) -> Result<(), String> {
     ensure!(
         !stored.require_mpesa_reference && stored.receipt_paper_width_mm == 58,
         "the new knobs read back"
+    );
+    ensure!(
+        !stored.receipt_show_address && stored.receipt_show_contacts,
+        "the company-block selection reads back"
     );
     // With the requirement off, the tender S2 refused now captures.
     let s3 = sessions
