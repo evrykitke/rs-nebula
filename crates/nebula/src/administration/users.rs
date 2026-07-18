@@ -30,6 +30,10 @@ pub(super) fn routes(state: AuthState) -> Router {
             "/auth/users/{id}/permissions",
             get(user_permissions).put(set_user_permissions),
         )
+        .route(
+            "/auth/users/{id}/override-pin",
+            axum::routing::put(set_override_pin),
+        )
         .with_state(state)
 }
 
@@ -45,6 +49,7 @@ pub(super) fn api() -> utoipa::openapi::OpenApi {
     set_user_roles,
     user_permissions,
     set_user_permissions,
+    set_override_pin,
 ))]
 struct ApiDoc;
 
@@ -301,6 +306,55 @@ async fn set_user_permissions(
 }
 
 /// A user in the caller's tenant, or 404.
+#[derive(Deserialize, ToSchema)]
+pub struct SetOverridePinRequest {
+    /// 4–8 digits; `null` clears the PIN.
+    pub pin: Option<String>,
+}
+
+/// Set or clear a user's override PIN — the short numeric credential a
+/// supervisor keys in at a till to approve gated acts (voids, discounts,
+/// price overrides). The PIN itself is never stored or echoed; approval
+/// also requires the override permission, so the PIN alone grants nothing.
+#[utoipa::path(put, path = "/auth/users/{id}/override-pin", tag = "auth",
+    params(("id" = Uuid, Path, description = "User id")),
+    request_body = SetOverridePinRequest,
+    responses((status = 200, body = Profile)))]
+async fn set_override_pin(
+    State(state): State<AuthState>,
+    authz: Authz,
+    audit: Audit,
+    db: Option<Extension<DatabaseConnection>>,
+    axum::extract::Path(user_id): axum::extract::Path<Uuid>,
+    Json(req): Json<SetOverridePinRequest>,
+) -> Result<Json<Profile>> {
+    authz.require(permission::names::USERS_EDIT).await?;
+    if let Some(pin) = &req.pin {
+        if !(4..=8).contains(&pin.len()) || !pin.chars().all(|c| c.is_ascii_digit()) {
+            return Err(Error::Validation(
+                "the override PIN must be 4 to 8 digits".into(),
+            ));
+        }
+    }
+    let users = state.users(db.map(|Extension(d)| d));
+    let target = users
+        .find_by_id(user_id)
+        .await?
+        .filter(|u| u.tenant_id == authz.user.tenant_id)
+        .ok_or_else(|| Error::NotFound(format!("user {user_id}")))?;
+    let action = if req.pin.is_some() { "set" } else { "cleared" };
+    let user = users.set_override_pin(target, req.pin.as_deref()).await?;
+    let profile: Profile = user.into();
+    audit
+        .0
+        .event(format!(
+            "{action} the override PIN of {}",
+            profile.user_name
+        ))
+        .await;
+    Ok(Json(profile))
+}
+
 async fn tenant_user(
     state: &AuthState,
     authz: &Authz,

@@ -469,6 +469,24 @@ impl UserManager {
         active.update(&self.db).await.map_err(Error::from)
     }
 
+    /// Set (or clear, with `None`) the user's override PIN — the short
+    /// numeric credential supervised acts are approved with. Only the
+    /// Argon2 hash is stored.
+    pub async fn set_override_pin(
+        &self,
+        user: user::Model,
+        pin: Option<&str>,
+    ) -> Result<user::Model> {
+        let hash = match pin {
+            Some(p) => Some(password::hash(p)?),
+            None => None,
+        };
+        let mut active: user::ActiveModel = user.into();
+        active.override_pin_hash = Set(hash);
+        active.updated_at = Set(Utc::now());
+        active.update(&self.db).await.map_err(Error::from)
+    }
+
     /// Issue a refresh token: 48 random bytes, returned raw exactly once,
     /// stored only as a SHA-256 hash.
     pub async fn issue_refresh_token(&self, user_id: Uuid) -> Result<String> {

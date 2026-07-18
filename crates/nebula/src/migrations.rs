@@ -31,6 +31,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddTenantPasswordPolicy),
             Box::new(CreatePasswordHistory),
             Box::new(CreateTenantMailSettings),
+            Box::new(AddUserOverridePin),
         ]
     }
 
@@ -325,6 +326,7 @@ enum Users {
     TotpSecret,
     TotpConfirmedAt,
     RecoveryCodes,
+    OverridePinHash,
     LastLoginAt,
     Language,
     TimeZone,
@@ -1660,6 +1662,45 @@ impl MigrationTrait for AddAuditLogMessage {
                 Table::alter()
                     .table(AuditLogs::Table)
                     .drop_column(AuditLogs::Message)
+                    .to_owned(),
+            )
+            .await
+    }
+}
+
+/// The short numeric override PIN a supervisor keys in to approve gated
+/// acts (POS voids, discounts, price overrides). Stored as an Argon2
+/// hash, exactly like the password; a user without one simply cannot
+/// approve by PIN.
+struct AddUserOverridePin;
+
+impl MigrationName for AddUserOverridePin {
+    fn name(&self) -> &str {
+        "m20260718_000020_add_user_override_pin"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddUserOverridePin {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Users::Table)
+                    .add_column_if_not_exists(
+                        ColumnDef::new(Users::OverridePinHash).string().null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Users::Table)
+                    .drop_column(Users::OverridePinHash)
                     .to_owned(),
             )
             .await

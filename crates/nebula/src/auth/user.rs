@@ -50,6 +50,10 @@ pub struct Model {
     pub totp_confirmed_at: Option<DateTimeUtc>,
     /// JSON array of SHA-256 hashes of unused one-time recovery codes.
     pub recovery_codes: Option<String>,
+    /// Argon2 hash of the short numeric PIN this user keys in to approve
+    /// supervised acts (POS voids, discounts, price overrides). `None`
+    /// means no PIN is set and the user cannot approve by PIN.
+    pub override_pin_hash: Option<String>,
 
     pub last_login_at: Option<DateTimeUtc>,
     pub language: Option<String>,
