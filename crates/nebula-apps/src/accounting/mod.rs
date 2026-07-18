@@ -49,7 +49,7 @@ pub(crate) const EXPENSE_SERIES: &str = "accounting.expense";
 pub(crate) const SYSTEM_SERIES: &str = "accounting.system";
 
 /// The currency a tenant with no configured default is seeded in.
-const FALLBACK_CURRENCY: &str = "USD";
+const FALLBACK_CURRENCY: &str = "KES";
 
 pub struct AccountingApp;
 

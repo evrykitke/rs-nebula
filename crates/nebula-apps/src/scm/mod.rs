@@ -102,7 +102,7 @@ pub(crate) const SALES_PAYMENT_SERIES: &str = "sales.payment";
 
 /// The currency the walk-in customer is seeded in when the tenant has
 /// none configured (the accounting app's fallback, for the same reason).
-const FALLBACK_CURRENCY: &str = "USD";
+const FALLBACK_CURRENCY: &str = "KES";
 
 pub struct ScmApp;
 
