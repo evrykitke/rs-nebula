@@ -282,6 +282,9 @@ impl Kernel {
             crate::reporting::Reporting::build(parts.reports, tenants.clone(), storage.clone())?;
         tracing::info!(count = reporting.len(), "reports registered");
 
+        let dashboards = crate::dashboard::Dashboards::build(parts.widgets)?;
+        tracing::info!(count = dashboards.len(), "dashboard widgets registered");
+
         let router = crate::web::finalize(
             parts.router,
             &self.config,
@@ -294,6 +297,7 @@ impl Kernel {
             cache.clone(),
             numbering.clone(),
             reporting.clone(),
+            dashboards.clone(),
             parts.api_docs,
         );
 
@@ -318,6 +322,7 @@ impl Kernel {
             permissions,
             numbering,
             reporting,
+            dashboards,
             jobs,
             events,
             storage,
@@ -429,6 +434,7 @@ pub struct App {
     permissions: Arc<permission::Registry>,
     numbering: crate::numbering::Numbering,
     reporting: crate::reporting::Reporting,
+    dashboards: crate::dashboard::Dashboards,
     jobs: Option<Jobs>,
     events: crate::events::Events,
     storage: crate::storage::Storage,
@@ -471,6 +477,11 @@ impl App {
     /// The reporting engine.
     pub fn reporting(&self) -> crate::reporting::Reporting {
         self.reporting.clone()
+    }
+
+    /// The dashboard registry.
+    pub fn dashboards(&self) -> crate::dashboard::Dashboards {
+        self.dashboards.clone()
     }
 
     /// The job client, when `jobs.enabled` is on.

@@ -28,6 +28,7 @@ pub mod payment;
 pub mod pricing;
 pub mod quotation;
 pub mod reports;
+pub mod widgets;
 
 pub mod permissions {
     use nebula::auth::PermissionDef;

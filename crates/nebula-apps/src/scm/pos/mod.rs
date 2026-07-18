@@ -29,6 +29,7 @@ pub mod reports;
 pub mod sale;
 pub mod session;
 pub mod settings;
+pub mod widgets;
 
 pub mod permissions {
     use nebula::auth::PermissionDef;

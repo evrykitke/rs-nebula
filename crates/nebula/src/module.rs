@@ -11,6 +11,7 @@
 use crate::auth::permission::PermissionDef;
 use crate::cache::Cache;
 use crate::config::Config;
+use crate::dashboard::WidgetDefinition;
 use crate::events::Events;
 use crate::jobs::Jobs;
 use crate::money::CurrencyRegistry;
@@ -103,6 +104,7 @@ pub struct ModuleContext<'a> {
     permissions: Vec<PermissionDef>,
     series: Vec<SeriesDef>,
     reports: Vec<Arc<dyn ReportDefinition>>,
+    widgets: Vec<Arc<dyn WidgetDefinition>>,
     workers: Vec<WorkerRegistration>,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 }
@@ -133,6 +135,7 @@ impl<'a> ModuleContext<'a> {
             permissions: Vec::new(),
             series: Vec::new(),
             reports: Vec::new(),
+            widgets: Vec::new(),
             workers: Vec::new(),
             api_docs: Vec::new(),
         }
@@ -202,6 +205,15 @@ impl<'a> ModuleContext<'a> {
         self.reports.push(report);
     }
 
+    /// Declare a dashboard widget. The kernel builds one registry after
+    /// every module configures (rejecting duplicate names) and serves
+    /// every dashboard from `/dashboards/{name}` — the widget's own
+    /// declaration says which dashboard it belongs to and what
+    /// permission it needs.
+    pub fn declare_widget(&mut self, widget: Arc<dyn WidgetDefinition>) {
+        self.widgets.push(widget);
+    }
+
     /// The job client, when `jobs.enabled` is on — for enqueueing and
     /// for building worker backends via [`Jobs::storage`].
     pub fn jobs(&self) -> Option<Jobs> {
@@ -269,6 +281,7 @@ impl<'a> ModuleContext<'a> {
             permissions: self.permissions,
             series: self.series,
             reports: self.reports,
+            widgets: self.widgets,
             workers: self.workers,
             api_docs: self.api_docs,
         }
@@ -297,6 +310,7 @@ pub(crate) struct ModuleParts {
     pub permissions: Vec<PermissionDef>,
     pub series: Vec<SeriesDef>,
     pub reports: Vec<Arc<dyn ReportDefinition>>,
+    pub widgets: Vec<Arc<dyn WidgetDefinition>>,
     pub workers: Vec<WorkerRegistration>,
     pub api_docs: Vec<utoipa::openapi::OpenApi>,
 }

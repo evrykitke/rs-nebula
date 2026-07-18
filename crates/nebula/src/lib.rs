@@ -10,6 +10,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod crypto;
+pub mod dashboard;
 pub mod db;
 pub mod error;
 pub mod events;
@@ -49,6 +50,11 @@ pub use auth::{CurrentUser as AuthUser, UserManager};
 pub use cache::{Cache, Scope as CacheScope};
 pub use config::Config;
 pub use crypto::Cipher;
+pub use dashboard::{
+    ChartData, ChartType, DashboardView, Dashboards, ListData, ListItemData, PlacedWidget,
+    PlacedWidgetView, ProgressData, ProgressItemData, SeriesData, StatData, TableColumnData,
+    TableData, TrendDirection, WidgetCx, WidgetData, WidgetDefinition, WidgetInfo, WidgetKind,
+};
 pub use error::{Error, Result};
 pub use events::{Event, Events};
 pub use kernel::{App, Kernel};

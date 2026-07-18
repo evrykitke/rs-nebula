@@ -15,6 +15,8 @@ pub mod accounting;
 pub mod scm;
 pub mod workspace;
 
+pub(crate) mod widgets;
+
 pub use accounting::AccountingApp;
 pub use scm::ScmApp;
 pub use workspace::WorkspaceApp;

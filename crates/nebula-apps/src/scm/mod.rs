@@ -260,6 +260,37 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(pos::reports::ZReportDocument));
         ctx.declare_report(Arc::new(gl::GlReconciliationReport));
 
+        // The four SCM dashboards, plus the tiles SCM lends the
+        // workspace dashboard (stock value, receivables, till takings).
+        ctx.declare_widget(Arc::new(inventory::widgets::StockValueWidget));
+        ctx.declare_widget(Arc::new(inventory::widgets::BelowReorderWidget));
+        ctx.declare_widget(Arc::new(inventory::widgets::ValueByWarehouseWidget));
+        ctx.declare_widget(Arc::new(inventory::widgets::TopStockItemsWidget));
+        ctx.declare_widget(Arc::new(inventory::widgets::RecentMovementsWidget));
+        ctx.declare_widget(Arc::new(inventory::widgets::WorkspaceStockValueWidget));
+        ctx.declare_widget(Arc::new(procurement::widgets::OpenOrdersWidget));
+        ctx.declare_widget(Arc::new(procurement::widgets::PendingRequisitionsWidget));
+        ctx.declare_widget(Arc::new(procurement::widgets::GrniWidget));
+        ctx.declare_widget(Arc::new(procurement::widgets::ApOutstandingWidget));
+        ctx.declare_widget(Arc::new(procurement::widgets::TopSuppliersWidget));
+        ctx.declare_widget(Arc::new(procurement::widgets::RecentOrdersWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::InvoicedMonthWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::ArOutstandingWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::OverdueArWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::OpenOrdersWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::InvoicedTrendWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::ArAgingChartWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::RecentInvoicesWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::TopCustomersWidget));
+        ctx.declare_widget(Arc::new(sales::widgets::WorkspaceArOutstandingWidget));
+        ctx.declare_widget(Arc::new(pos::widgets::TakingsTodayWidget));
+        ctx.declare_widget(Arc::new(pos::widgets::BasketTodayWidget));
+        ctx.declare_widget(Arc::new(pos::widgets::TenderMixTodayWidget));
+        ctx.declare_widget(Arc::new(pos::widgets::WeekTrendWidget));
+        ctx.declare_widget(Arc::new(pos::widgets::OpenSessionsWidget));
+        ctx.declare_widget(Arc::new(pos::widgets::TopItemsWeekWidget));
+        ctx.declare_widget(Arc::new(pos::widgets::WorkspaceTakingsTodayWidget));
+
         // GL integration: clear outbox rows on accounting's acknowledgement
         // and re-publish anything that lingers unbooked.
         gl::subscribe_acks(ctx);

@@ -21,6 +21,7 @@ pub mod moves;
 pub mod reports;
 pub mod stock;
 pub mod warehouse;
+pub mod widgets;
 
 pub mod permissions {
     use nebula::auth::PermissionDef;

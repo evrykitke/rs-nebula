@@ -32,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreatePasswordHistory),
             Box::new(CreateTenantMailSettings),
             Box::new(AddUserOverridePin),
+            Box::new(CreateDashboardLayouts),
         ]
     }
 
@@ -1705,4 +1706,63 @@ impl MigrationTrait for AddUserOverridePin {
             )
             .await
     }
+}
+
+/// Saved dashboard arrangements for [`crate::dashboard`]: one row per
+/// (user, dashboard) holding the placed widgets as JSON. Per database,
+/// so each tenant's users keep their layouts next to the data the
+/// widgets show. No row means the dashboard's default layout.
+struct CreateDashboardLayouts;
+
+impl MigrationName for CreateDashboardLayouts {
+    fn name(&self) -> &str {
+        "m20260718_000021_create_dashboard_layouts"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateDashboardLayouts {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(DashboardLayouts::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(DashboardLayouts::UserId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(DashboardLayouts::Dashboard)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(DashboardLayouts::Widgets).json_binary().not_null())
+                    .col(
+                        ColumnDef::new(DashboardLayouts::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(DashboardLayouts::UserId)
+                            .col(DashboardLayouts::Dashboard),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(DashboardLayouts::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum DashboardLayouts {
+    Table,
+    UserId,
+    Dashboard,
+    Widgets,
+    UpdatedAt,
 }

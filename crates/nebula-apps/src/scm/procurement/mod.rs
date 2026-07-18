@@ -26,6 +26,7 @@ pub mod requisition;
 pub mod returns;
 pub mod rfq;
 pub mod supplier;
+pub mod widgets;
 
 pub mod permissions {
     use nebula::auth::PermissionDef;

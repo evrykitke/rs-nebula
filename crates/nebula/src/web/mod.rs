@@ -50,9 +50,13 @@ pub(crate) fn finalize(
     cache: crate::cache::Cache,
     numbering: crate::numbering::Numbering,
     reporting: crate::reporting::Reporting,
+    dashboards: crate::dashboard::Dashboards,
     api_docs: Vec<utoipa::openapi::OpenApi>,
 ) -> Router {
     let mut api = ApiDoc::openapi();
+    // The dashboard endpoints are framework-owned but client-facing, so
+    // their document is contributed here rather than by any module.
+    api.merge(crate::dashboard::api());
     for doc in api_docs {
         api.merge(doc);
     }
@@ -60,6 +64,7 @@ pub(crate) fn finalize(
     let mut router = router
         .merge(health::routes(config, database.clone()))
         .merge(crate::reporting::routes())
+        .merge(crate::dashboard::routes())
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
         // Public files: uploads under {root}/{tenant-slug}/{id}/{resource}.
         // Served with nosniff + a locked-down CSP so a stored file can
@@ -94,6 +99,7 @@ pub(crate) fn finalize(
     router = router.layer(axum::Extension(cache));
     router = router.layer(axum::Extension(numbering));
     router = router.layer(axum::Extension(reporting));
+    router = router.layer(axum::Extension(dashboards));
 
     if let Some(cors) = cors_layer(config) {
         router = router.layer(cors);

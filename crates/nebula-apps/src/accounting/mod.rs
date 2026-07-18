@@ -31,6 +31,7 @@ pub mod ledger;
 pub mod reports;
 pub mod seed;
 pub mod tax;
+pub mod widgets;
 
 use nebula::error::Result;
 use nebula::tenancy::{TenantCreated, TenantCurrencyChanged, TenantManager};
@@ -110,6 +111,20 @@ impl Module for AccountingApp {
         ctx.declare_report(Arc::new(reports::TrialBalanceReport));
         ctx.declare_report(Arc::new(reports::BalanceSheetReport));
         ctx.declare_report(Arc::new(reports::IncomeStatementReport));
+
+        // The accounting dashboard, and the financial tiles the
+        // workspace dashboard shows first.
+        ctx.declare_widget(Arc::new(widgets::CashPositionWidget));
+        ctx.declare_widget(Arc::new(widgets::RevenueMonthWidget));
+        ctx.declare_widget(Arc::new(widgets::ExpensesMonthWidget));
+        ctx.declare_widget(Arc::new(widgets::NetIncomeMonthWidget));
+        ctx.declare_widget(Arc::new(widgets::RevenueVsExpensesWidget));
+        ctx.declare_widget(Arc::new(widgets::ExpenseBreakdownWidget));
+        ctx.declare_widget(Arc::new(widgets::RecentJournalsWidget));
+        ctx.declare_widget(Arc::new(widgets::TopExpensesWidget));
+        ctx.declare_widget(Arc::new(widgets::WorkspaceCashPositionWidget));
+        ctx.declare_widget(Arc::new(widgets::WorkspaceRevenueMonthWidget));
+        ctx.declare_widget(Arc::new(widgets::WorkspaceNetIncomeMonthWidget));
 
         // Other modules' financial side effects arrive over the GL port.
         gl_port::GlPort::subscribe(ctx);
