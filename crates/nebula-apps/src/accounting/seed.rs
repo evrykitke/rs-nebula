@@ -59,6 +59,16 @@ fn default_accounts() -> Vec<SeedGroup> {
                     system_key: keys::BANK,
                 },
                 SeedChild {
+                    code: "1030",
+                    name: "M-Pesa Clearing",
+                    system_key: keys::MPESA_CLEARING,
+                },
+                SeedChild {
+                    code: "1040",
+                    name: "Card Clearing",
+                    system_key: keys::CARD_CLEARING,
+                },
+                SeedChild {
                     code: "1100",
                     name: "Accounts Receivable",
                     system_key: keys::AR,
@@ -167,6 +177,11 @@ fn default_accounts() -> Vec<SeedGroup> {
                     code: "6100",
                     name: "Operating Expenses",
                     system_key: keys::OPEX,
+                },
+                SeedChild {
+                    code: "6200",
+                    name: "Cash Over / Short",
+                    system_key: keys::CASH_OVER_SHORT,
                 },
                 SeedChild {
                     code: "6900",

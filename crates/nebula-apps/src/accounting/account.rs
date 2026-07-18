@@ -25,6 +25,10 @@ use uuid::Uuid;
 pub mod keys {
     pub const CASH: &str = "cash";
     pub const BANK: &str = "bank";
+    /// M-Pesa takings awaiting settlement to the bank (an asset).
+    pub const MPESA_CLEARING: &str = "mpesa_clearing";
+    /// Card takings awaiting the acquirer's settlement (an asset).
+    pub const CARD_CLEARING: &str = "card_clearing";
     pub const AR: &str = "ar";
     pub const INVENTORY: &str = "inventory";
     /// Recoverable VAT paid on purchases (an asset).
@@ -46,6 +50,8 @@ pub mod keys {
     /// Differences between the billed price and the receipt's accrual.
     pub const PURCHASE_PRICE_VARIANCE: &str = "purchase_price_variance";
     pub const OPEX: &str = "opex";
+    /// Till count differences against expected cash (over or short).
+    pub const CASH_OVER_SHORT: &str = "cash_over_short";
     /// Absorbs sub-unit rounding differences on tax and allocation.
     pub const ROUNDING: &str = "rounding";
 }
