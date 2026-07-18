@@ -70,6 +70,12 @@ const ROUNDING_ROLE: &str = "rounding";
 const AR_ROLE: &str = "ar";
 const SALES_ROLE: &str = "sales";
 const VAT_OUTPUT_ROLE: &str = "vat_output";
+/// POS role keys — where each tender's takings land and where till count
+/// differences go. Seeded for exactly this moment.
+const CASH_ROLE: &str = "cash";
+const MPESA_CLEARING_ROLE: &str = "mpesa_clearing";
+const CARD_CLEARING_ROLE: &str = "card_clearing";
+const CASH_OVER_SHORT_ROLE: &str = "cash_over_short";
 
 /// Rows staged after this long without an acknowledgement are re-published.
 const SWEEP_GRACE_SECS: i64 = 120;
@@ -734,6 +740,64 @@ pub(crate) fn ar_payment_request(
     }))
 }
 
+/// The takings a POS session close books per tender, already net of
+/// refunds. `cash` carries the *counted* cash effect (net cash takings
+/// plus the over/short), so the drawer and the books agree.
+pub(crate) struct PosTenderTotals {
+    /// Net cash takings adjusted to what was actually counted.
+    pub cash: Decimal,
+    pub mpesa: Decimal,
+    pub card: Decimal,
+    /// `counted − expected` on cash: over (positive) or short (negative).
+    pub over_short: Decimal,
+}
+
+/// The revenue entry consolidating one POS session:
+///
+/// - **Dr Cash** at the counted cash effect, **Dr M-Pesa clearing** and
+///   **Dr Card clearing** at their net takings.
+/// - **Cr Sales** the net revenue (ex VAT, net of refunds).
+/// - **Cr VAT output** the tax collected.
+/// - **Cash over/short** absorbs the count variance — a credit when the
+///   drawer was over, flipping to a debit (an expense) when short; the
+///   builder's sign netting does that by itself.
+///
+/// COGS is *not* here — it rides on the session's stock movement, as on
+/// every issue.
+pub(crate) fn pos_session_request(
+    source: String,
+    memo: String,
+    entry_date: chrono::NaiveDate,
+    tenders: PosTenderTotals,
+    net_sales: Decimal,
+    tax: Decimal,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<GlPostingRequested>> {
+    let mut entry = EntryBuilder::default();
+    entry.debit(CASH_ROLE, tenders.cash, None);
+    entry.debit(MPESA_CLEARING_ROLE, tenders.mpesa, None);
+    entry.debit(CARD_CLEARING_ROLE, tenders.card, None);
+    entry.credit(SALES_ROLE, net_sales, None);
+    entry.credit(VAT_OUTPUT_ROLE, tax, None);
+    entry.credit(
+        CASH_OVER_SHORT_ROLE,
+        tenders.over_short,
+        Some("Till count over/short"),
+    );
+    let lines = entry.lines();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(GlPostingRequested {
+        tenant_id,
+        source,
+        entry_date,
+        memo,
+        currency: None,
+        lines,
+    }))
+}
+
 /// Swap a line's debit and credit — the mirror of a posting entry.
 fn flip(l: GlLine) -> GlLine {
     GlLine {
@@ -773,9 +837,13 @@ pub fn subscribe_acks(ctx: &mut ModuleContext) {
         let main = main.clone();
         async move {
             // Only SCM's own sources are ours to clear: the inventory /
-            // procurement postings (`scm.*`) and the order-to-cash ones
-            // (`sales.*`), both staged in this module's outbox.
-            if !(ev.source.starts_with("scm.") || ev.source.starts_with("sales.")) {
+            // procurement postings (`scm.*`), the order-to-cash ones
+            // (`sales.*`) and the POS session ones (`pos.*`), all staged
+            // in this module's outbox.
+            if !(ev.source.starts_with("scm.")
+                || ev.source.starts_with("sales.")
+                || ev.source.starts_with("pos."))
+            {
                 return Ok(());
             }
             if let Some(db) = resolve_db(&tenants, &main, ev.tenant_id).await? {

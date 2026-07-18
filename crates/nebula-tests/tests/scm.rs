@@ -392,6 +392,13 @@ async fn scenario() {
     admin_db
         .execute_unprepared(
             "DROP TABLE IF EXISTS scm_gl_outbox; \
+             DROP TABLE IF EXISTS pos_order_payments; \
+             DROP TABLE IF EXISTS pos_order_lines; \
+             DROP TABLE IF EXISTS pos_orders; \
+             DROP TABLE IF EXISTS pos_cash_movements; \
+             DROP TABLE IF EXISTS pos_session_counts; \
+             DROP TABLE IF EXISTS pos_sessions; \
+             DROP TABLE IF EXISTS pos_registers; \
              DROP TABLE IF EXISTS sales_payment_allocations; \
              DROP TABLE IF EXISTS sales_payments; \
              DROP TABLE IF EXISTS sales_credit_note_lines; \

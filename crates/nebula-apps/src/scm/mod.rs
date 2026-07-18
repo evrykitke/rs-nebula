@@ -34,6 +34,7 @@
 pub mod document;
 pub mod gl;
 pub mod inventory;
+pub mod pos;
 pub mod procurement;
 pub mod sales;
 pub mod seed;
@@ -100,6 +101,14 @@ pub(crate) const SALES_CREDIT_NOTE_SERIES: &str = "sales.credit_note";
 /// Number series for customer payments (receipts), allocated at post.
 pub(crate) const SALES_PAYMENT_SERIES: &str = "sales.payment";
 
+/// Number series for POS receipts, allocated per sale at capture (the
+/// server side of sync — an offline sale prints an interim client
+/// reference and receives its RCP number when the queue drains).
+pub(crate) const POS_RECEIPT_SERIES: &str = "pos.receipt";
+
+/// Number series for POS sessions, allocated at open.
+pub(crate) const POS_SESSION_SERIES: &str = "pos.session";
+
 /// The currency the walk-in customer is seeded in when the tenant has
 /// none configured (the accounting app's fallback, for the same reason).
 const FALLBACK_CURRENCY: &str = "KES";
@@ -119,6 +128,7 @@ impl Module for ScmApp {
         ctx.add_permissions(inventory::permissions::tree());
         ctx.add_permissions(procurement::permissions::tree());
         ctx.add_permissions(sales::permissions::tree());
+        ctx.add_permissions(pos::permissions::tree());
 
         for (key, name, template) in [
             (RECEIPT_SERIES, "Goods Receipt", "GRN-{YYYY}-{SEQ:5}"),
@@ -145,6 +155,8 @@ impl Module for ScmApp {
                 "Customer Payment",
                 "RCT-{YYYY}-{SEQ:5}",
             ),
+            (POS_RECEIPT_SERIES, "POS Receipt", "RCP-{YYYY}-{SEQ:6}"),
+            (POS_SESSION_SERIES, "POS Session", "PS-{YYYY}-{SEQ:5}"),
         ] {
             ctx.declare_series(
                 SeriesDef::new(key, name, template, Reset::Yearly)
@@ -176,6 +188,9 @@ impl Module for ScmApp {
         ctx.add_api(sales::credit_note::api());
         ctx.add_api(sales::payment::api());
         ctx.add_api(sales::reports::api());
+        ctx.add_api(pos::register::api());
+        ctx.add_api(pos::session::api());
+        ctx.add_api(pos::sale::api());
         ctx.add_api(gl::api());
         ctx.add_routes(
             inventory::item::routes()
@@ -202,6 +217,9 @@ impl Module for ScmApp {
                 .merge(sales::credit_note::routes())
                 .merge(sales::payment::routes())
                 .merge(sales::reports::routes())
+                .merge(pos::register::routes())
+                .merge(pos::session::routes())
+                .merge(pos::sale::routes())
                 .merge(gl::routes()),
         );
 
