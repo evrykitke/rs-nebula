@@ -25,7 +25,11 @@ use nebula_apps::scm::pos::sale::{
     self, NewRefund, NewSale, OrderKind, OrderStatus, RefundLineInput, SaleLineInput,
     SaleService, TenderInput,
 };
-use nebula_apps::scm::pos::session::{CountInput, SessionService, SessionStatus};
+use nebula_apps::scm::pos::reports::PosQueries;
+use nebula_apps::scm::pos::session::{
+    CountInput, DenominationCount, SessionService, SessionStatus,
+};
+use nebula_apps::scm::pos::settings::{self as pos_settings, Settings};
 use nebula_apps::scm::seed as scm_seed;
 use rust_decimal::Decimal;
 use sea_orm::{
@@ -333,13 +337,13 @@ async fn run(url: &str) -> Result<(), String> {
     let sales = SaleService::new(db.clone());
 
     // S1: 3 water, cash 500 handed over → 152 change; VAT inside = 48.
-    let s1_sale = sales
-        .capture(
-            simple_sale(s1.id, vec![line(water.id, 3, 116, None)], vec![cash(348, Some(500))]),
-            &numbering,
-        )
-        .await
-        .map_err(|e| format!("S1: {e}"))?;
+    // The till also reports its tempo: 30 seconds, 5 inputs.
+    let s1_sale = {
+        let mut ns = simple_sale(s1.id, vec![line(water.id, 3, 116, None)], vec![cash(348, Some(500))]);
+        ns.capture_seconds = Some(30);
+        ns.input_count = Some(5);
+        sales.capture(ns, &numbering).await.map_err(|e| format!("S1: {e}"))?
+    };
     ensure!(
         s1_sale.number.as_deref().is_some_and(|n| n.starts_with("RCP-")),
         "sales number from the RCP series"
@@ -383,22 +387,22 @@ async fn run(url: &str) -> Result<(), String> {
             .is_err(),
         "an M-Pesa tender without its code must be refused"
     );
-    sales
-        .capture(
-            simple_sale(
-                s1.id,
-                vec![line(bread.id, 2, 50, None)],
-                vec![TenderInput {
-                    tender: "mpesa".into(),
-                    amount: dec(100),
-                    tendered: None,
-                    reference: Some("SFB0X1TEST".into()),
-                }],
-            ),
-            &numbering,
-        )
-        .await
-        .map_err(|e| format!("S2: {e}"))?;
+    {
+        let mut ns = simple_sale(
+            s1.id,
+            vec![line(bread.id, 2, 50, None)],
+            vec![TenderInput {
+                tender: "mpesa".into(),
+                amount: dec(100),
+                tendered: None,
+                reference: Some("SFB0X1TEST".into()),
+            }],
+        );
+        // Tempo: 50 seconds, 7 inputs — with S1 that averages 40 / 6.
+        ns.capture_seconds = Some(50);
+        ns.input_count = Some(7);
+        sales.capture(ns, &numbering).await.map_err(|e| format!("S2: {e}"))?;
+    }
 
     // S3: 1 pill from lot B1 by card; the lot is mandatory.
     ensure!(
@@ -590,7 +594,7 @@ async fn run(url: &str) -> Result<(), String> {
     // Cash: 348 + 90 + 45 sold, 116 refunded → 367 net; expected drawer
     // 1000 float + 367 + 200 in − 300 out = 1267.
     let x = sessions
-        .x_report(s1.id)
+        .x_report(s1.id, false)
         .await
         .map_err(|e| format!("x report: {e}"))?;
     ensure!(x.orders == 5, "five captured sales, got {}", x.orders);
@@ -600,32 +604,96 @@ async fn run(url: &str) -> Result<(), String> {
     ensure!(x.refund_total == dec(116), "refund total, got {}", x.refund_total);
     ensure!(x.tax_total == dec(32), "net VAT, got {}", x.tax_total);
     ensure!(
-        x.expected_cash == dec(1267),
-        "expected cash, got {}",
+        x.expected_cash == Some(dec(1267)),
+        "expected cash, got {:?}",
         x.expected_cash
     );
     let x_cash = x.tenders.iter().find(|t| t.tender == "cash").ok_or("cash line")?;
     ensure!(x_cash.net == dec(367), "cash net, got {}", x_cash.net);
     let x_mpesa = x.tenders.iter().find(|t| t.tender == "mpesa").ok_or("mpesa line")?;
     ensure!(x_mpesa.net == dec(100), "mpesa net, got {}", x_mpesa.net);
+    ensure!(
+        x.avg_sale_seconds == Some(dec(40)) && x.avg_sale_inputs == Some(dec(6)),
+        "live tempo averages over the sales that reported, got {:?}/{:?}",
+        x.avg_sale_seconds,
+        x.avg_sale_inputs
+    );
+
+    // A blind X withholds the cash expectation and the cash line — the
+    // count proceeds with no number to count to; the record tenders stay.
+    let blind = sessions
+        .x_report(s1.id, true)
+        .await
+        .map_err(|e| format!("blind x report: {e}"))?;
+    ensure!(
+        blind.blind && blind.expected_cash.is_none(),
+        "a blind X must withhold the cash expectation"
+    );
+    ensure!(
+        blind.tenders.iter().all(|t| t.tender != "cash")
+            && blind.tenders.iter().any(|t| t.tender == "mpesa"),
+        "a blind X drops the cash line and keeps the record tenders"
+    );
 
     // ---- closing --------------------------------------------------------
+    // The cash count arrives with its count sheet: 1×1000 + 1×200 + 2×20.
     let full_counts = || {
         vec![
             CountInput {
                 tender: "cash".into(),
                 counted: dec(1240),
+                denominations: Some(vec![
+                    DenominationCount { denom: dec(1000), count: 1 },
+                    DenominationCount { denom: dec(200), count: 1 },
+                    DenominationCount { denom: dec(20), count: 2 },
+                ]),
             },
             CountInput {
                 tender: "mpesa".into(),
                 counted: dec(100),
+                denominations: None,
             },
             CountInput {
                 tender: "card".into(),
                 counted: dec(20),
+                denominations: None,
             },
         ]
     };
+    // A count sheet that does not add up to its count is refused.
+    ensure!(
+        sessions
+            .close(
+                s1.id,
+                vec![
+                    CountInput {
+                        tender: "cash".into(),
+                        counted: dec(1240),
+                        denominations: Some(vec![DenominationCount {
+                            denom: dec(1000),
+                            count: 1,
+                        }]),
+                    },
+                    CountInput {
+                        tender: "mpesa".into(),
+                        counted: dec(100),
+                        denominations: None,
+                    },
+                    CountInput {
+                        tender: "card".into(),
+                        counted: dec(20),
+                        denominations: None,
+                    },
+                ],
+                Some("x".into()),
+                0,
+                None,
+                &gl,
+            )
+            .await
+            .is_err(),
+        "a count sheet that does not sum to the count must be refused"
+    );
     ensure!(
         sessions
             .close(s1.id, full_counts(), Some("x".into()), 3, None, &gl)
@@ -640,6 +708,7 @@ async fn run(url: &str) -> Result<(), String> {
                 vec![CountInput {
                     tender: "cash".into(),
                     counted: dec(1240),
+                    denominations: None,
                 }],
                 Some("x".into()),
                 0,
@@ -761,6 +830,135 @@ async fn run(url: &str) -> Result<(), String> {
         "the closing note survives"
     );
 
+    // ---- instrumentation settled onto the session record ----------------
+    ensure!(
+        z.session.avg_sale_seconds == Some(dec(40))
+            && z.session.avg_sale_inputs == Some(dec(6))
+            && z.session.void_count == Some(1),
+        "the close settles the till tempo onto the session, got {:?}/{:?}/{:?}",
+        z.session.avg_sale_seconds,
+        z.session.avg_sale_inputs,
+        z.session.void_count
+    );
+
+    // ---- the report queries (what the framework reports print) ----------
+    let queries = PosQueries::new(db.clone());
+
+    // The printable Z's data: the stored count sheet and the item summary.
+    let zv = queries.z(s1.id).await.map_err(|e| format!("z view: {e}"))?;
+    ensure!(
+        zv.sheets.len() == 1 && zv.sheets[0].tender == "cash" && zv.sheets[0].lines.len() == 3,
+        "the cash count sheet rides on the Z"
+    );
+    let sheet_total: Decimal = zv.sheets[0]
+        .lines
+        .iter()
+        .map(|l| l.denom * Decimal::from(l.count))
+        .sum();
+    ensure!(sheet_total == dec(1240), "the stored sheet sums to the count");
+    ensure!(
+        zv.items
+            .iter()
+            .any(|i| i.qty == dec(2) && i.gross == dec(232)),
+        "the Z item summary nets the refunded water: 3 sold − 1 back = 2 for 232"
+    );
+
+    // Session summary over an open window: s1's day, to the shilling.
+    let summary = queries
+        .sessions(None, None, None)
+        .await
+        .map_err(|e| format!("sessions summary: {e}"))?;
+    let s1_row = summary
+        .rows
+        .iter()
+        .find(|r| r.session_id == s1.id)
+        .ok_or("s1 in the summary")?;
+    ensure!(
+        s1_row.orders == 5
+            && s1_row.refunds == 1
+            && s1_row.voids == 1
+            && s1_row.gross_sales == dec(603)
+            && s1_row.net_total == dec(487)
+            && s1_row.tax_total == dec(32)
+            && s1_row.cash_variance == Some(dec(-27))
+            && s1_row.avg_sale_seconds == Some(dec(40)),
+        "the session summary row ties out"
+    );
+
+    // Tender mix: how the day's money arrived.
+    let mix = queries
+        .tender_mix(None, None)
+        .await
+        .map_err(|e| format!("tender mix: {e}"))?;
+    ensure!(mix.net_total == dec(487), "mix net, got {}", mix.net_total);
+    let mix_of = |t: &str| {
+        mix.rows
+            .iter()
+            .find(|r| r.tender == t)
+            .map(|r| r.net)
+            .unwrap_or_default()
+    };
+    ensure!(
+        mix_of("cash") == dec(367) && mix_of("mpesa") == dec(100) && mix_of("card") == dec(20),
+        "the tender mix nets per tender"
+    );
+
+    // Item sales: water sold 3, one came back.
+    let items_view = queries
+        .item_sales(None, None)
+        .await
+        .map_err(|e| format!("item sales: {e}"))?;
+    let water_row = items_view
+        .rows
+        .iter()
+        .find(|r| r.sku == "WTR-1")
+        .ok_or("water in item sales")?;
+    ensure!(
+        water_row.qty_sold == dec(3)
+            && water_row.qty_refunded == dec(1)
+            && water_row.gross == dec(232)
+            && water_row.tax == dec(32),
+        "the water item row ties out"
+    );
+
+    // Hourly: whatever hour the test ran in, the sums must tie out.
+    let hourly = queries
+        .hourly(None, None, 0)
+        .await
+        .map_err(|e| format!("hourly: {e}"))?;
+    let hourly_sales: i64 = hourly.rows.iter().map(|r| r.sales).sum();
+    let hourly_net: Decimal = hourly.rows.iter().map(|r| r.net_total).sum();
+    ensure!(
+        hourly_sales == 5 && hourly_net == dec(487),
+        "the hourly buckets sum to the day"
+    );
+
+    // ---- POS settings ---------------------------------------------------
+    let defaults = pos_settings::load(&db)
+        .await
+        .map_err(|e| format!("settings defaults: {e}"))?;
+    ensure!(
+        !defaults.blind_count && defaults.denominations.first() == Some(&dec(1000)),
+        "settings default to declared counts and the KES note set"
+    );
+    pos_settings::save(
+        &db,
+        &Settings {
+            blind_count: true,
+            denominations: vec![dec(1000), dec(500), dec(100)],
+        },
+        None,
+    )
+    .await
+    .map_err(|e| format!("settings save: {e}"))?;
+    let stored = pos_settings::load(&db)
+        .await
+        .map_err(|e| format!("settings reload: {e}"))?;
+    ensure!(
+        stored.blind_count && stored.denominations == vec![dec(1000), dec(500), dec(100)],
+        "saved settings read back"
+    );
+
     // ---- the catalog feed ----------------------------------------------
     let cat = sale::catalog(&db, till1.id, None)
         .await
@@ -817,6 +1015,7 @@ async fn run(url: &str) -> Result<(), String> {
         vec![CountInput {
             tender: "cash".into(),
             counted: dec(50),
+            denominations: None,
         }]
     };
     ensure!(
@@ -1042,6 +1241,8 @@ fn simple_sale_with_uuid(
         lines,
         tenders,
         allow_override: false,
+        capture_seconds: None,
+        input_count: None,
         created_by: None,
     }
 }

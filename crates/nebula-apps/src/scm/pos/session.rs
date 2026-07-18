@@ -104,6 +104,13 @@ pub mod session {
         pub closing_note: Option<String>,
         pub move_id: Option<Uuid>,
         pub gl_source: Option<String>,
+        // Instrumentation, aggregated once at close (see 02 §7): how fast
+        // this till ran, without rescanning its orders.
+        #[sea_orm(column_type = "Decimal(Some((10, 2)))", nullable)]
+        pub avg_sale_seconds: Option<Decimal>,
+        #[sea_orm(column_type = "Decimal(Some((10, 2)))", nullable)]
+        pub avg_sale_inputs: Option<Decimal>,
+        pub void_count: Option<i32>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
@@ -131,6 +138,10 @@ pub mod session_count {
         pub expected: Decimal,
         #[sea_orm(column_type = "Decimal(Some((20, 4)))")]
         pub counted: Decimal,
+        /// The count-sheet breakdown behind `counted`, when one was used:
+        /// `[{"denom": "1000", "count": 3}, …]`.
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub denominations: Option<Json>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -171,6 +182,18 @@ pub mod cash_movement {
 pub struct CountInput {
     pub tender: String,
     pub counted: Decimal,
+    /// The count-sheet breakdown, when the drawer was counted by
+    /// denomination; must sum to `counted`.
+    pub denominations: Option<Vec<DenominationCount>>,
+}
+
+/// One line of a count sheet: so many pieces of one denomination.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DenominationCount {
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub denom: Decimal,
+    pub count: i64,
 }
 
 pub struct SessionService {
@@ -226,6 +249,9 @@ impl SessionService {
             closing_note: Set(None),
             move_id: Set(None),
             gl_source: Set(None),
+            avg_sale_seconds: Set(None),
+            avg_sale_inputs: Set(None),
+            void_count: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         }
@@ -310,10 +336,16 @@ impl SessionService {
         })
     }
 
-    /// The X report: the live mid-shift picture, computed fresh.
-    pub async fn x_report(&self, session_id: Uuid) -> Result<SessionReport> {
+    /// The X report: the live mid-shift picture, computed fresh. `blind`
+    /// withholds the cash expectation (the blind-count tenant setting, for
+    /// a caller who is only a cashier): the cash tender line and the
+    /// expected-cash figure are omitted, so the drawer is counted without
+    /// a number to count *to*. The M-Pesa/card lines stay — those totals
+    /// come from records, not from a count, and the close screen shows
+    /// them either way.
+    pub async fn x_report(&self, session_id: Uuid, blind: bool) -> Result<SessionReport> {
         let session_row = load_session(&self.db, session_id).await?;
-        self.report_for(&session_row, false).await
+        self.report_for(&session_row, false, blind).await
     }
 
     /// The Z report: the closed session's stored summary — counted and
@@ -325,7 +357,7 @@ impl SessionService {
                 "the session is still open; ask for the X report".into(),
             ));
         }
-        self.report_for(&session_row, true).await
+        self.report_for(&session_row, true, false).await
     }
 
     /// Close the session. Step one validates and stores the counts and
@@ -355,7 +387,8 @@ impl SessionService {
         match status {
             SessionStatus::Open => {
                 let expected = expected_by_tender(&txn, &session_row).await?;
-                let mut provided: HashMap<String, Decimal> = HashMap::new();
+                let mut provided: HashMap<String, (Decimal, Option<serde_json::Value>)> =
+                    HashMap::new();
                 for c in &counts {
                     if !TENDERS.contains(&c.tender.as_str()) {
                         return Err(Error::Validation(format!(
@@ -368,7 +401,41 @@ impl SessionService {
                             "a counted amount must not be negative".into(),
                         ));
                     }
-                    if provided.insert(c.tender.clone(), round_money(c.counted)).is_some() {
+                    // A count sheet is not decoration: when one comes with
+                    // the count, it must actually add up to it.
+                    let denominations = match &c.denominations {
+                        None => None,
+                        Some(sheet) => {
+                            let mut sum = Decimal::ZERO;
+                            for d in sheet {
+                                if d.denom <= Decimal::ZERO || d.count < 0 {
+                                    return Err(Error::Validation(format!(
+                                        "tender {:?}: a count sheet line needs a positive \
+                                         denomination and a non-negative count",
+                                        c.tender
+                                    )));
+                                }
+                                sum += d.denom * Decimal::from(d.count);
+                            }
+                            if round_money(sum) != round_money(c.counted) {
+                                return Err(Error::Validation(format!(
+                                    "tender {:?}: the count sheet sums to {} but the counted \
+                                     amount is {}",
+                                    c.tender,
+                                    round_money(sum),
+                                    round_money(c.counted)
+                                )));
+                            }
+                            Some(
+                                serde_json::to_value(sheet)
+                                    .map_err(|e| Error::internal(e.to_string()))?,
+                            )
+                        }
+                    };
+                    if provided
+                        .insert(c.tender.clone(), (round_money(c.counted), denominations))
+                        .is_some()
+                    {
                         return Err(Error::Validation(format!(
                             "tender {:?} is counted twice",
                             c.tender
@@ -378,7 +445,7 @@ impl SessionService {
                 let mut any_variance = false;
                 for tender in TENDERS {
                     let exp = expected.get(*tender).copied().unwrap_or(Decimal::ZERO);
-                    let counted = provided.get(*tender).copied();
+                    let counted = provided.get(*tender).map(|(c, _)| *c);
                     if counted.is_none() && !exp.is_zero() {
                         return Err(Error::Validation(format!(
                             "tender {tender:?} has takings; count it before closing"
@@ -403,7 +470,10 @@ impl SessionService {
                     .await?;
                 for tender in TENDERS {
                     let exp = expected.get(*tender).copied().unwrap_or(Decimal::ZERO);
-                    let counted = provided.get(*tender).copied().unwrap_or(Decimal::ZERO);
+                    let (counted, denominations) = provided
+                        .get(*tender)
+                        .cloned()
+                        .unwrap_or((Decimal::ZERO, None));
                     if exp.is_zero() && counted.is_zero() {
                         continue;
                     }
@@ -413,6 +483,7 @@ impl SessionService {
                         tender: Set(String::from(*tender)),
                         expected: Set(exp),
                         counted: Set(counted),
+                        denominations: Set(denominations),
                     }
                     .insert(&txn)
                     .await?;
@@ -659,6 +730,10 @@ impl SessionService {
         active.closed_by = Set(by);
         active.move_id = Set(move_id);
         active.gl_source = Set(Some(gl_source));
+        // The instrumentation the tills reported, settled onto the record.
+        active.avg_sale_seconds = Set(money.avg_sale_seconds());
+        active.avg_sale_inputs = Set(money.avg_sale_inputs());
+        active.void_count = Set(Some(money.voids_count as i32));
         active.updated_at = Set(now);
         active.update(&txn).await?;
         txn.commit().await?;
@@ -712,6 +787,7 @@ impl SessionService {
         &self,
         session_row: &session::Model,
         stored_counts: bool,
+        blind: bool,
     ) -> Result<SessionReport> {
         let money = session_money(&self.db, session_row).await?;
         let expected = expected_by_tender(&self.db, session_row).await?;
@@ -729,6 +805,9 @@ impl SessionService {
 
         let mut tenders = Vec::new();
         for tender in TENDERS {
+            if blind && *tender == "cash" {
+                continue;
+            }
             let sales = money.tender_sales.get(*tender).copied().unwrap_or_default();
             let refunds = money
                 .tender_refunds
@@ -780,7 +859,11 @@ impl SessionService {
             tax_total: money.tax_net(),
             paid_in: money.paid_in,
             paid_out: money.paid_out,
-            expected_cash: expected.get("cash").copied().unwrap_or(Decimal::ZERO),
+            expected_cash: (!blind)
+                .then(|| expected.get("cash").copied().unwrap_or(Decimal::ZERO)),
+            blind,
+            avg_sale_seconds: money.avg_sale_seconds(),
+            avg_sale_inputs: money.avg_sale_inputs(),
             tenders,
         })
     }
@@ -791,41 +874,58 @@ impl SessionService {
 // ---------------------------------------------------------------------------
 
 /// Everything the captured orders of one session add up to.
-struct SessionMoney {
+pub(crate) struct SessionMoney {
     /// Per tender, gross amounts applied on sales / on refunds.
-    tender_sales: HashMap<String, Decimal>,
-    tender_refunds: HashMap<String, Decimal>,
-    gross_sales: Decimal,
-    refund_total: Decimal,
+    pub(crate) tender_sales: HashMap<String, Decimal>,
+    pub(crate) tender_refunds: HashMap<String, Decimal>,
+    pub(crate) gross_sales: Decimal,
+    pub(crate) refund_total: Decimal,
     /// Tax inside sales minus tax inside refunds.
-    sales_tax: Decimal,
-    refund_tax: Decimal,
-    paid_in: Decimal,
-    paid_out: Decimal,
-    sales_count: i64,
-    refunds_count: i64,
-    voids_count: i64,
-    drift_count: i64,
-    offline_count: i64,
+    pub(crate) sales_tax: Decimal,
+    pub(crate) refund_tax: Decimal,
+    pub(crate) paid_in: Decimal,
+    pub(crate) paid_out: Decimal,
+    pub(crate) sales_count: i64,
+    pub(crate) refunds_count: i64,
+    pub(crate) voids_count: i64,
+    pub(crate) drift_count: i64,
+    pub(crate) offline_count: i64,
+    /// Instrumentation sums over the sales that reported them.
+    seconds_sum: i64,
+    seconds_n: i64,
+    inputs_sum: i64,
+    inputs_n: i64,
 }
 
 impl SessionMoney {
-    fn tender_net(&self, tender: &str) -> Decimal {
+    pub(crate) fn tender_net(&self, tender: &str) -> Decimal {
         self.tender_sales.get(tender).copied().unwrap_or_default()
             - self.tender_refunds.get(tender).copied().unwrap_or_default()
     }
 
     /// Net revenue ex VAT, net of refunds.
-    fn net_sales(&self) -> Decimal {
+    pub(crate) fn net_sales(&self) -> Decimal {
         (self.gross_sales - self.sales_tax) - (self.refund_total - self.refund_tax)
     }
 
-    fn tax_net(&self) -> Decimal {
+    pub(crate) fn tax_net(&self) -> Decimal {
         self.sales_tax - self.refund_tax
+    }
+
+    /// Mean seconds per sale, over the sales that reported a timing.
+    pub(crate) fn avg_sale_seconds(&self) -> Option<Decimal> {
+        (self.seconds_n > 0)
+            .then(|| (Decimal::from(self.seconds_sum) / Decimal::from(self.seconds_n)).round_dp(2))
+    }
+
+    /// Mean inputs per sale, over the sales that reported a count.
+    pub(crate) fn avg_sale_inputs(&self) -> Option<Decimal> {
+        (self.inputs_n > 0)
+            .then(|| (Decimal::from(self.inputs_sum) / Decimal::from(self.inputs_n)).round_dp(2))
     }
 }
 
-async fn session_money<C: ConnectionTrait>(
+pub(crate) async fn session_money<C: ConnectionTrait>(
     conn: &C,
     session_row: &session::Model,
 ) -> Result<SessionMoney> {
@@ -868,6 +968,10 @@ async fn session_money<C: ConnectionTrait>(
             .count() as i64,
         drift_count: captured.iter().filter(|o| o.price_drift).count() as i64,
         offline_count: captured.iter().filter(|o| o.captured_offline).count() as i64,
+        seconds_sum: 0,
+        seconds_n: 0,
+        inputs_sum: 0,
+        inputs_n: 0,
     };
     for o in &captured {
         match OrderKind::parse(&o.kind)? {
@@ -875,6 +979,14 @@ async fn session_money<C: ConnectionTrait>(
                 money.gross_sales += o.total;
                 money.sales_tax += o.tax_total;
                 money.sales_count += 1;
+                if let Some(s) = o.capture_seconds {
+                    money.seconds_sum += i64::from(s);
+                    money.seconds_n += 1;
+                }
+                if let Some(n) = o.input_count {
+                    money.inputs_sum += i64::from(n);
+                    money.inputs_n += 1;
+                }
             }
             OrderKind::Refund => {
                 money.refund_total += o.total;
@@ -1009,6 +1121,9 @@ fn view_of(row: &session::Model, register_row: Option<&register::Model>) -> Resu
         closing_note: row.closing_note.clone(),
         move_id: row.move_id,
         gl_source: row.gl_source.clone(),
+        avg_sale_seconds: row.avg_sale_seconds,
+        avg_sale_inputs: row.avg_sale_inputs,
+        void_count: row.void_count,
     })
 }
 
@@ -1016,7 +1131,7 @@ fn view_of(row: &session::Model, register_row: Option<&register::Model>) -> Resu
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SessionView {
     pub id: Uuid,
     pub number: Option<String>,
@@ -1038,6 +1153,15 @@ pub struct SessionView {
     pub move_id: Option<Uuid>,
     /// The revenue entry's outbox source key, once closed.
     pub gl_source: Option<String>,
+    /// Instrumentation, settled at close: mean seconds and inputs per
+    /// sale (over the sales that reported them) and voided orders.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub avg_sale_seconds: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub avg_sale_inputs: Option<Decimal>,
+    pub void_count: Option<i32>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -1053,7 +1177,7 @@ pub struct CashMovementView {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TenderReportLine {
     pub tender: String,
     #[serde(with = "rust_decimal::serde::str")]
@@ -1080,7 +1204,7 @@ pub struct TenderReportLine {
 }
 
 /// The X (live) or Z (stored) picture of a session.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SessionReport {
     pub session: SessionView,
     pub orders: i64,
@@ -1109,9 +1233,21 @@ pub struct SessionReport {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub paid_out: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub expected_cash: Decimal,
+    /// Withheld (`None`) on a blind X report: the drawer is counted
+    /// without a number to count to.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub expected_cash: Option<Decimal>,
+    /// True when the cash expectation was withheld (blind count).
+    pub blind: bool,
+    /// Live instrumentation: mean seconds / inputs per sale, over the
+    /// sales that reported them.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub avg_sale_seconds: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub avg_sale_inputs: Option<Decimal>,
     pub tenders: Vec<TenderReportLine>,
 }
 
@@ -1151,6 +1287,9 @@ pub struct SessionCountRequest {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub counted: Decimal,
+    /// The count-sheet breakdown behind `counted`, when one was used;
+    /// must sum to `counted`.
+    pub denominations: Option<Vec<DenominationCount>>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -1315,7 +1454,11 @@ async fn x_report(
     Path(id): Path<Uuid>,
 ) -> Result<Json<SessionReport>> {
     authz.require(names::SELL).await?;
-    SessionService::new(db).x_report(id).await.map(Json)
+    // Blind count binds the cashier, not the back office: a caller who
+    // can read POS reports sees the expectation regardless.
+    let blind = crate::scm::pos::settings::load(&db).await?.blind_count
+        && !authz.is_granted(names::REPORTS_VIEW).await?;
+    SessionService::new(db).x_report(id, blind).await.map(Json)
 }
 
 #[utoipa::path(post, path = "/pos/sessions/{id}/close", tag = "pos",
@@ -1341,6 +1484,7 @@ async fn close_session(
                 .map(|c| CountInput {
                     tender: c.tender,
                     counted: c.counted,
+                    denominations: c.denominations,
                 })
                 .collect(),
             req.note,

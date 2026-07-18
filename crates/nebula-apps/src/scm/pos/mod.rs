@@ -15,14 +15,20 @@
 //!   paid-in/out, X report, close + consolidation, Z report
 //! - [`sale`] — POS orders: capture (online and offline-synced,
 //!   idempotent on the client UUID), voids, refunds, the catalog feed
+//! - [`settings`] — tenant-wide POS behaviour: blind counts and the
+//!   count-sheet denomination set
+//! - [`reports`] — the framework-engine reports: session summaries,
+//!   tender mix, item and hourly sales, and the printable Z
 //!
 //! Tenders are cash, M-Pesa and card in v1; their clearing accounts are
 //! seeded accounting roles (`mpesa_clearing`, `card_clearing`,
 //! `cash_over_short`) — the only accounting-side vocabulary POS adds.
 
 pub mod register;
+pub mod reports;
 pub mod sale;
 pub mod session;
+pub mod settings;
 
 pub mod permissions {
     use nebula::auth::PermissionDef;

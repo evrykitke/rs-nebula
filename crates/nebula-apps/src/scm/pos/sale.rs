@@ -135,6 +135,8 @@ pub mod order {
         pub voided_at: Option<DateTimeUtc>,
         pub voided_by: Option<Uuid>,
         pub void_reason: Option<String>,
+        pub capture_seconds: Option<i32>,
+        pub input_count: Option<i32>,
         pub created_at: DateTimeUtc,
         pub created_by: Option<Uuid>,
     }
@@ -306,6 +308,10 @@ pub struct NewSale {
     /// allowed — resolved by the handler from the caller's permission or
     /// a verified PIN approval.
     pub allow_override: bool,
+    /// Till-measured: first line to payment, in seconds.
+    pub capture_seconds: Option<i32>,
+    /// Till-measured: taps/keys/scans the sale cost.
+    pub input_count: Option<i32>,
     pub created_by: Option<Uuid>,
 }
 
@@ -372,6 +378,11 @@ impl SaleService {
         }
         if new.tenders.is_empty() {
             return Err(Error::Validation("a sale needs at least one tender".into()));
+        }
+        if new.capture_seconds.is_some_and(|s| s < 0) || new.input_count.is_some_and(|n| n < 0) {
+            return Err(Error::Validation(
+                "instrumentation counters must not be negative".into(),
+            ));
         }
 
         // Price and tax every line server-side.
@@ -443,6 +454,8 @@ impl SaleService {
             price_drift,
             lines: priced,
             tenders: new.tenders,
+            capture_seconds: new.capture_seconds,
+            input_count: new.input_count,
             created_by: new.created_by,
         }, numbering)
         .await
@@ -573,6 +586,10 @@ impl SaleService {
             price_drift: false,
             lines: priced,
             tenders: vec![tender],
+            // Refunds are supervised, deliberate acts; speed is not a
+            // metric anyone tunes on them.
+            capture_seconds: None,
+            input_count: None,
             created_by: new.created_by,
         }, numbering)
         .await
@@ -878,6 +895,8 @@ impl SaleService {
             voided_at: Set(None),
             voided_by: Set(None),
             void_reason: Set(None),
+            capture_seconds: Set(ins.capture_seconds),
+            input_count: Set(ins.input_count),
             created_at: Set(now),
             created_by: Set(ins.created_by),
         }
@@ -979,6 +998,8 @@ struct InsertOrder {
     price_drift: bool,
     lines: Vec<PricedLine>,
     tenders: Vec<TenderInput>,
+    capture_seconds: Option<i32>,
+    input_count: Option<i32>,
     created_by: Option<Uuid>,
 }
 
@@ -1607,6 +1628,10 @@ pub struct CreateSaleRequest {
     pub captured_offline: bool,
     pub lines: Vec<SaleLineRequest>,
     pub tenders: Vec<SaleTenderRequest>,
+    /// Till-measured seconds from first line to payment (instrumentation).
+    pub capture_seconds: Option<i32>,
+    /// Till-measured inputs (taps/keys/scans) the sale cost.
+    pub input_count: Option<i32>,
     /// Supervisor approval for override-gated content, when the cashier
     /// lacks the permission themselves.
     pub approval: Option<PinApproval>,
@@ -1701,6 +1726,8 @@ fn new_sale(req: CreateSaleRequest, allow_override: bool, created_by: Option<Uui
             })
             .collect(),
         allow_override,
+        capture_seconds: req.capture_seconds,
+        input_count: req.input_count,
         created_by,
     }
 }

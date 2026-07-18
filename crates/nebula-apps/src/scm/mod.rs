@@ -191,6 +191,8 @@ impl Module for ScmApp {
         ctx.add_api(pos::register::api());
         ctx.add_api(pos::session::api());
         ctx.add_api(pos::sale::api());
+        ctx.add_api(pos::settings::api());
+        ctx.add_api(pos::reports::api());
         ctx.add_api(gl::api());
         ctx.add_routes(
             inventory::item::routes()
@@ -220,6 +222,8 @@ impl Module for ScmApp {
                 .merge(pos::register::routes())
                 .merge(pos::session::routes())
                 .merge(pos::sale::routes())
+                .merge(pos::settings::routes())
+                .merge(pos::reports::routes())
                 .merge(gl::routes()),
         );
 
@@ -249,6 +253,11 @@ impl Module for ScmApp {
         ctx.declare_report(Arc::new(sales::reports::SalesRegisterReport));
         ctx.declare_report(Arc::new(sales::reports::SalesMarginsReport));
         ctx.declare_report(Arc::new(sales::reports::ArReconciliationReport));
+        ctx.declare_report(Arc::new(pos::reports::SessionSummaryReport));
+        ctx.declare_report(Arc::new(pos::reports::TenderMixReport));
+        ctx.declare_report(Arc::new(pos::reports::ItemSalesReport));
+        ctx.declare_report(Arc::new(pos::reports::HourlySalesReport));
+        ctx.declare_report(Arc::new(pos::reports::ZReportDocument));
         ctx.declare_report(Arc::new(gl::GlReconciliationReport));
 
         // GL integration: clear outbox rows on accounting's acknowledgement
