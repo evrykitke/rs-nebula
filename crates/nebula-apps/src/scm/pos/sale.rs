@@ -1476,7 +1476,11 @@ pub async fn catalog(
 // Views (API DTOs)
 // ---------------------------------------------------------------------------
 
+// The `as` aliases below keep the OpenAPI document honest: procurement also
+// publishes an OrderView/OrderHeader/OrderLineView, and two schemas under one
+// name silently become one schema — whichever registered last.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = PosOrderLineView)]
 pub struct OrderLineView {
     pub id: Uuid,
     pub line_no: i32,
@@ -1503,6 +1507,7 @@ pub struct OrderLineView {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = PosOrderPaymentView)]
 pub struct OrderPaymentView {
     pub tender: String,
     #[serde(with = "rust_decimal::serde::str")]
@@ -1515,6 +1520,7 @@ pub struct OrderPaymentView {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = PosOrderView)]
 pub struct OrderView {
     pub id: Uuid,
     /// The RCP receipt number (always present once captured server-side).
@@ -1553,6 +1559,7 @@ pub struct OrderView {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = PosOrderHeader)]
 pub struct OrderHeader {
     pub id: Uuid,
     pub number: Option<String>,
