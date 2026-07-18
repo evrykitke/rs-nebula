@@ -941,11 +941,19 @@ async fn run(url: &str) -> Result<(), String> {
         !defaults.blind_count && defaults.denominations.first() == Some(&dec(1000)),
         "settings default to declared counts and the KES note set"
     );
+    ensure!(
+        defaults.require_mpesa_reference && defaults.receipt_paper_width_mm == 80,
+        "settings default to a mandatory M-Pesa code and an 80mm roll"
+    );
     pos_settings::save(
         &db,
         &Settings {
             blind_count: true,
             denominations: vec![dec(1000), dec(500), dec(100)],
+            require_mpesa_reference: false,
+            receipt_paper_width_mm: 58,
+            receipt_margin_mm: 3,
+            receipt_font_size_px: 11,
         },
         None,
     )
@@ -958,6 +966,31 @@ async fn run(url: &str) -> Result<(), String> {
         stored.blind_count && stored.denominations == vec![dec(1000), dec(500), dec(100)],
         "saved settings read back"
     );
+    ensure!(
+        !stored.require_mpesa_reference && stored.receipt_paper_width_mm == 58,
+        "the new knobs read back"
+    );
+    // With the requirement off, the tender S2 refused now captures.
+    let s3 = sessions
+        .open(till1.id, dec(0), cashier, &numbering)
+        .await
+        .map_err(|e| format!("open s3: {e}"))?;
+    sales
+        .capture(
+            simple_sale(
+                s3.id,
+                vec![line(bread.id, 2, 50, None)],
+                vec![TenderInput {
+                    tender: "mpesa".into(),
+                    amount: dec(100),
+                    tendered: None,
+                    reference: None,
+                }],
+            ),
+            &numbering,
+        )
+        .await
+        .map_err(|e| format!("code-optional M-Pesa sale: {e}"))?;
 
     // ---- the catalog feed ----------------------------------------------
     let cat = sale::catalog(&db, till1.id, None)

@@ -438,7 +438,8 @@ impl SaleService {
         }
 
         let totals = compute_totals(&self.db, &mut priced, buyer.tax_exempt).await?;
-        validate_tenders(&new.tenders, totals.total)?;
+        let settings = super::settings::load(&self.db).await?;
+        validate_tenders(&new.tenders, totals.total, settings.require_mpesa_reference)?;
 
         let price_drift = priced.iter().any(|l| l.drift);
         self.insert_order(InsertOrder {
@@ -1039,9 +1040,10 @@ async fn compute_totals(
 }
 
 /// Tenders: known kinds, positive amounts summing exactly to the total;
-/// cash change never exceeds what was handed over, M-Pesa needs its
-/// confirmation code (the manual-confirm path of v1).
-fn validate_tenders(tenders: &[TenderInput], total: Decimal) -> Result<()> {
+/// cash change never exceeds what was handed over, and M-Pesa needs its
+/// confirmation code when the tenant's settings say so (the manual-confirm
+/// path of v1 — a tenant may trade the code for queue speed).
+fn validate_tenders(tenders: &[TenderInput], total: Decimal, mpesa_needs_code: bool) -> Result<()> {
     let mut sum = Decimal::ZERO;
     for (i, t) in tenders.iter().enumerate() {
         let n = i + 1;
@@ -1072,6 +1074,7 @@ fn validate_tenders(tenders: &[TenderInput], total: Decimal) -> Result<()> {
                     )));
                 }
                 if other == "mpesa"
+                    && mpesa_needs_code
                     && t.reference.as_deref().is_none_or(|r| r.trim().is_empty())
                 {
                     return Err(Error::Validation(format!(

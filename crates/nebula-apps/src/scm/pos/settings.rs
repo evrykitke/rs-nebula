@@ -1,7 +1,5 @@
 //! Tenant-wide POS behaviour: one row per tenant database.
 //!
-//! Two knobs in v1, both about the drawer count:
-//!
 //! - **blind_count** — hide the expected cash from the cashier until they
 //!   have counted (the classic honesty device). It binds the cashier only:
 //!   a caller who can read POS reports sees the expectation regardless,
@@ -9,6 +7,11 @@
 //! - **denominations** — the note/coin set the till's count sheet offers,
 //!   defaulting to the KES set. Purely a helper vocabulary: the server
 //!   never assumes a drawer holds only these.
+//! - **require_mpesa_reference** — whether capture refuses an M-Pesa tender
+//!   without its confirmation code. On by default; a tenant that values
+//!   queue speed over reconciliation rigour turns it off.
+//! - **receipt_*** — the paper the tills print receipts to (width, margin,
+//!   type size). The client renders to these; the server just keeps them.
 
 use crate::scm::pos::permissions::names;
 use axum::routing::get;
@@ -40,6 +43,10 @@ pub mod row {
         pub blind_count: bool,
         #[sea_orm(column_type = "JsonBinary")]
         pub denominations: serde_json::Value,
+        pub require_mpesa_reference: bool,
+        pub receipt_paper_width_mm: i32,
+        pub receipt_margin_mm: i32,
+        pub receipt_font_size_px: i32,
         pub updated_at: DateTimeUtc,
         pub updated_by: Option<Uuid>,
     }
@@ -56,6 +63,12 @@ pub struct Settings {
     /// Largest first.
     #[schema(value_type = Vec<String>)]
     pub denominations: Vec<Decimal>,
+    /// An M-Pesa tender must carry its confirmation code.
+    pub require_mpesa_reference: bool,
+    /// The roll the tills print to — 58 and 80 are the common widths.
+    pub receipt_paper_width_mm: i32,
+    pub receipt_margin_mm: i32,
+    pub receipt_font_size_px: i32,
 }
 
 impl Default for Settings {
@@ -63,6 +76,10 @@ impl Default for Settings {
         Settings {
             blind_count: false,
             denominations: DEFAULT_DENOMINATIONS.iter().map(|d| Decimal::from(*d)).collect(),
+            require_mpesa_reference: true,
+            receipt_paper_width_mm: 80,
+            receipt_margin_mm: 4,
+            receipt_font_size_px: 12,
         }
     }
 }
@@ -75,6 +92,10 @@ pub async fn load<C: ConnectionTrait>(conn: &C) -> Result<Settings> {
     Ok(Settings {
         blind_count: stored.blind_count,
         denominations: parse_denominations(&stored.denominations)?,
+        require_mpesa_reference: stored.require_mpesa_reference,
+        receipt_paper_width_mm: stored.receipt_paper_width_mm,
+        receipt_margin_mm: stored.receipt_margin_mm,
+        receipt_font_size_px: stored.receipt_font_size_px,
     })
 }
 
@@ -115,6 +136,10 @@ pub async fn save<C: ConnectionTrait>(
             let mut active: row::ActiveModel = existing.into();
             active.blind_count = Set(settings.blind_count);
             active.denominations = Set(denominations);
+            active.require_mpesa_reference = Set(settings.require_mpesa_reference);
+            active.receipt_paper_width_mm = Set(settings.receipt_paper_width_mm);
+            active.receipt_margin_mm = Set(settings.receipt_margin_mm);
+            active.receipt_font_size_px = Set(settings.receipt_font_size_px);
             active.updated_at = Set(now);
             active.updated_by = Set(by);
             active.update(conn).await?;
@@ -124,6 +149,10 @@ pub async fn save<C: ConnectionTrait>(
                 id: Set(true),
                 blind_count: Set(settings.blind_count),
                 denominations: Set(denominations),
+                require_mpesa_reference: Set(settings.require_mpesa_reference),
+                receipt_paper_width_mm: Set(settings.receipt_paper_width_mm),
+                receipt_margin_mm: Set(settings.receipt_margin_mm),
+                receipt_font_size_px: Set(settings.receipt_font_size_px),
                 updated_at: Set(now),
                 updated_by: Set(by),
             }
@@ -145,6 +174,10 @@ pub struct UpdateSettingsRequest {
     /// duplicates. Empty = no count-sheet helper.
     #[schema(value_type = Vec<String>)]
     pub denominations: Vec<String>,
+    pub require_mpesa_reference: bool,
+    pub receipt_paper_width_mm: i32,
+    pub receipt_margin_mm: i32,
+    pub receipt_font_size_px: i32,
 }
 
 pub(crate) fn routes() -> Router {
@@ -194,17 +227,40 @@ async fn put_settings(
         }
     }
     denominations.sort_by(|a, b| b.cmp(a));
+    // Paper bounds: narrower than 30mm is not a receipt, wider than 210mm
+    // is a full page; the margin must leave some paper to print on.
+    if !(30..=210).contains(&req.receipt_paper_width_mm) {
+        return Err(Error::Validation(
+            "receipt paper width must be between 30 and 210 mm".into(),
+        ));
+    }
+    if req.receipt_margin_mm < 0 || req.receipt_margin_mm * 2 >= req.receipt_paper_width_mm {
+        return Err(Error::Validation(
+            "receipt margins must fit inside the paper".into(),
+        ));
+    }
+    if !(6..=32).contains(&req.receipt_font_size_px) {
+        return Err(Error::Validation(
+            "receipt type size must be between 6 and 32 px".into(),
+        ));
+    }
     let settings = Settings {
         blind_count: req.blind_count,
         denominations,
+        require_mpesa_reference: req.require_mpesa_reference,
+        receipt_paper_width_mm: req.receipt_paper_width_mm,
+        receipt_margin_mm: req.receipt_margin_mm,
+        receipt_font_size_px: req.receipt_font_size_px,
     };
     save(&db, &settings, Some(authz.user.id)).await?;
     audit
         .0
         .event(format!(
-            "updated POS settings: blind count {}, {} denominations",
+            "updated POS settings: blind count {}, {} denominations, M-Pesa code {}, {}mm paper",
             if settings.blind_count { "on" } else { "off" },
-            settings.denominations.len()
+            settings.denominations.len(),
+            if settings.require_mpesa_reference { "required" } else { "optional" },
+            settings.receipt_paper_width_mm
         ))
         .await;
     Ok(Json(settings))
